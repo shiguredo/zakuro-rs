@@ -1,0 +1,9 @@
+target/
+.cargo/
+
+# Agents
+.claude/
+.codex/
+
+# macOS
+.DS_Store

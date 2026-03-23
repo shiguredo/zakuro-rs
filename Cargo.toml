@@ -1,0 +1,27 @@
+[package]
+name = "shiguredo_zakuro"
+version = "2026.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[[bin]]
+name = "zakuro"
+path = "src/main.rs"
+
+[dependencies]
+noargs = "0.4"
+nojson = "0.3"
+sora_sdk = "2026.1.0-canary.0"
+shiguredo_webrtc = "0.146.1-canary.1"
+raden = { version = "2026.1.0-canary.2" }
+tokio = { version = "1", features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tokio-util = "0.7"
