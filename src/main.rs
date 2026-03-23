@@ -108,6 +108,11 @@ async fn main() -> Result<()> {
         audio: build_audio(&args),
         data_channel_signaling: args.data_channel_signaling,
         ignore_disconnect_websocket: args.ignore_disconnect_websocket,
+        simulcast: args.simulcast,
+        simulcast_request_rid: args.simulcast_request_rid.clone(),
+        spotlight: args.spotlight,
+        spotlight_focus_rid: args.spotlight_focus_rid.clone(),
+        spotlight_unfocus_rid: args.spotlight_unfocus_rid.clone(),
     };
 
     let mut clients = JoinSet::new();

@@ -25,6 +25,11 @@ pub(crate) struct Args {
     pub(crate) audio_bit_rate: Option<u32>,
     pub(crate) data_channel_signaling: Option<bool>,
     pub(crate) ignore_disconnect_websocket: Option<bool>,
+    pub(crate) simulcast: Option<bool>,
+    pub(crate) simulcast_request_rid: Option<String>,
+    pub(crate) spotlight: Option<bool>,
+    pub(crate) spotlight_focus_rid: Option<String>,
+    pub(crate) spotlight_unfocus_rid: Option<String>,
 }
 
 fn parse_resolution(s: &str) -> Result<(i32, i32)> {
@@ -203,6 +208,39 @@ pub(crate) fn parse_args() -> Result<Args> {
             _ => Err("sora-ignore-disconnect-websocket は true または false で指定してください"),
         })?;
 
+    let simulcast: Option<bool> = noargs::opt("sora-simulcast")
+        .doc("サイマルキャストの有効/無効 (true/false)")
+        .take(&mut args)
+        .present_and_then(|o| match o.value() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err("sora-simulcast は true または false で指定してください"),
+        })?;
+
+    let simulcast_request_rid: Option<String> = noargs::opt("sora-simulcast-request-rid")
+        .doc("サイマルキャストで受信する rid (r0/r1/r2)")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let spotlight: Option<bool> = noargs::opt("sora-spotlight")
+        .doc("スポットライトの有効/無効 (true/false)")
+        .take(&mut args)
+        .present_and_then(|o| match o.value() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err("sora-spotlight は true または false で指定してください"),
+        })?;
+
+    let spotlight_focus_rid: Option<String> = noargs::opt("sora-spotlight-focus-rid")
+        .doc("スポットライトでフォーカス時の rid (r0/r1/r2)")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let spotlight_unfocus_rid: Option<String> = noargs::opt("sora-spotlight-unfocus-rid")
+        .doc("スポットライトでアンフォーカス時の rid (r0/r1/r2)")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
     if let Some(help) = args.finish()? {
         print!("{}", help);
         std::process::exit(0);
@@ -243,5 +281,10 @@ pub(crate) fn parse_args() -> Result<Args> {
         audio_bit_rate,
         data_channel_signaling,
         ignore_disconnect_websocket,
+        simulcast,
+        simulcast_request_rid,
+        spotlight,
+        spotlight_focus_rid,
+        spotlight_unfocus_rid,
     })
 }

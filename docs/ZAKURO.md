@@ -220,8 +220,8 @@ POST /rpc          → JSON-RPC 2.0
 - [x] ロール (sendonly/recvonly/sendrecv)
 - [x] DataChannel シグナリング
 - [ ] mTLS (`--client-cert`, `--client-key`)
-- [ ] シミュルキャスト (`--sora-simulcast`)
-- [ ] スポットライト (`--sora-spotlight`)
+- [x] サイマルキャスト (`--sora-simulcast`, `--sora-simulcast-request-rid`)
+- [x] スポットライト (`--sora-spotlight`, `--sora-spotlight-focus-rid`, `--sora-spotlight-unfocus-rid`)
 - [ ] degradation-preference
 - [ ] DataChannel メッセージング (`--sora-data-channels`)
 
@@ -243,8 +243,10 @@ POST /rpc          → JSON-RPC 2.0
 - [ ] ログレベル制御 (`--log-level`)
 - [ ] NopVideoDecoder (受信映像廃棄)
 - [ ] 埋め込みリソース (フォント・音声)
-- [ ] GameKeyCore (キーボード入力制御)
-- [ ] GameAudioManager (ゲーム音声)
+### 実装しない機能
+
+- GameKeyCore (キーボード入力制御)
+- GameAudioManager (ゲーム音声)
 
 ### 設計差分
 

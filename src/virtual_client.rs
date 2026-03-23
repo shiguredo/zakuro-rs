@@ -21,6 +21,11 @@ pub(crate) struct VirtualClientConfig {
     pub(crate) audio: Option<sora_sdk::Audio>,
     pub(crate) data_channel_signaling: Option<bool>,
     pub(crate) ignore_disconnect_websocket: Option<bool>,
+    pub(crate) simulcast: Option<bool>,
+    pub(crate) simulcast_request_rid: Option<String>,
+    pub(crate) spotlight: Option<bool>,
+    pub(crate) spotlight_focus_rid: Option<String>,
+    pub(crate) spotlight_unfocus_rid: Option<String>,
 }
 
 enum DisconnectReason {
@@ -193,6 +198,22 @@ fn build_client(
     }
     if let Some(ignore_disconnect_websocket) = config.ignore_disconnect_websocket {
         builder = builder.ignore_disconnect_websocket(ignore_disconnect_websocket);
+    }
+
+    if let Some(simulcast) = config.simulcast {
+        builder = builder.simulcast(simulcast);
+    }
+    if let Some(ref rid) = config.simulcast_request_rid {
+        builder = builder.simulcast_request_rid(rid.clone());
+    }
+    if let Some(spotlight) = config.spotlight {
+        builder = builder.spotlight(spotlight);
+    }
+    if let Some(ref rid) = config.spotlight_focus_rid {
+        builder = builder.spotlight_focus_rid(rid.clone());
+    }
+    if let Some(ref rid) = config.spotlight_unfocus_rid {
+        builder = builder.spotlight_unfocus_rid(rid.clone());
     }
 
     builder.build()
