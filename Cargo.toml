@@ -1,9 +1,15 @@
 [package]
-name = "shiguredo_zakuro"
+name = "zakuro"
 version = "2026.1.0"
 edition = "2024"
-publish = false
+rust-version = "1.94"
+authors = ["Shiguredo Inc."]
 license = "Apache-2.0"
+description = "Recording Composition Tool Hisui"
+homepage = "https://github.com/shiguredo/hisui"
+repository = "https://github.com/shiguredo/hisui"
+readme = "README.md"
+publish = false
 
 [[bin]]
 name = "zakuro"

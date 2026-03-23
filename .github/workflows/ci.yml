@@ -34,9 +34,9 @@ jobs:
           sudo apt-get install -y libpulse-dev libx11-dev
       - run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --workspace --features ayame,sora -- -D warnings
+        run: cargo clippy --workspace -- -D warnings
       - name: Test
-        run: cargo test --workspace --features ayame,sora
+        run: cargo test --workspace
 
   slack_notify:
     needs: [ci]
