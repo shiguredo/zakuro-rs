@@ -1,0 +1,20 @@
+---
+source: src/jsonc_fmt.rs
+expression: render(input)
+---
+--- input ---
+{
+
+  "key"   :    "value"   ,
+
+
+  "another"  :   42
+
+
+}--- output ---
+{
+
+  "key": "value",
+
+  "another": 42
+}

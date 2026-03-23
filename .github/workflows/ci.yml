@@ -1,0 +1,115 @@
+name: ci
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - "develop"
+    paths-ignore:
+      - "**.md"
+      # issues/ は markdown と SEQUENCE (拡張子無し) のみで、ビルドとテストに無影響
+      - "issues/**"
+  push:
+    branches:
+      - "develop"
+      - "feature/**"
+    paths-ignore:
+      - "**.md"
+      # issues/ は markdown と SEQUENCE (拡張子無し) のみで、ビルドとテストに無影響
+      - "issues/**"
+  schedule:
+    # JST 11:00 (UTC 02:00), 月-金
+    - cron: "0 2 * * 1-5"
+
+# トップレベルで最小権限を宣言する (sora-rust-sdk と webrtc-rs の ci.yml と同じ書き方)
+permissions:
+  contents: read
+  actions: read
+
+# 同じブランチへの連続した push / schedule / PR で古い実行をキャンセルし、ランナーを占有しない
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: CI (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - ubuntu-26.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      # libduckdb-sys に prebuilt バイナリをダウンロードさせる (bundled ビルドは CI で 30 分以上かかるため)
+      DUCKDB_DOWNLOAD_LIB: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup update stable
+      # ~/.cargo 配下をキャッシュする組織製 action (hisui の ci.yml と同じ使い方)
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ${{ matrix.os }}
+          toolchain: stable
+      - name: Install dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpulse-dev libx11-dev libfdk-aac-dev
+      # Makefile の単一入口を呼ぶ。コマンド定義を二重に持たせないため
+      - name: Check (fmt / clippy / test)
+        run: make ci
+      - name: Verify Cargo metadata
+        run: |
+          DESCRIPTION=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.name == "zakuro") | .description')
+          if [ "$DESCRIPTION" != "Recording Composition Tool Zakuro" ]; then
+            echo "::error::Cargo.toml description mismatch: $DESCRIPTION"
+            exit 1
+          fi
+
+  # Cargo.toml の rust-version (MSRV) でビルドできることを検証する。
+  # rust-toolchain.toml は stable の浮動参照のままにし、この job だけ正確な
+  # バージョンを使う (開発者の作業環境に影響させないため)。
+  msrv:
+    name: MSRV (1.98)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # libduckdb-sys に prebuilt バイナリをダウンロードさせる
+      DUCKDB_DOWNLOAD_LIB: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install 1.98 --profile minimal
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ubuntu-24.04
+          toolchain: "1.98"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpulse-dev libx11-dev libfdk-aac-dev libclang-dev
+      - name: Build with MSRV
+        run: cargo +1.98 build --locked --features fdk-aac
+
+  slack_notify:
+    needs: [ci, msrv]
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    permissions:
+      actions: read
+    env:
+      # step の if では secrets コンテキストを使えないため、job の env で受け渡す
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+    steps:
+      - name: Slack Notification
+        # fork からの PR など secrets.SLACK_WEBHOOK が空の実行で通知 job を失敗させない
+        if: ${{ env.SLACK_WEBHOOK != '' }}
+        uses: shiguredo/github-actions/.github/actions/slack-notify@main
+        with:
+          status: ${{ job.status }}
+          slack_webhook: ${{ env.SLACK_WEBHOOK }}
+          slack_channel: zakuro
+          notify_mode: failure_and_fixed

@@ -1,0 +1,93 @@
+[package]
+name = "zakuro"
+version = "2026.0.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Recording Composition Tool Zakuro"
+readme = "README.md"
+homepage = "https://github.com/shiguredo/zakuro-rs"
+repository = "https://github.com/shiguredo/zakuro-rs"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "zakuro"
+path = "src/main.rs"
+
+[dependencies]
+# CLI 診断メッセージのソース注釈表示
+annotate-snippets = "0.12"
+# 暗号ライブラリ (乱数生成に利用)
+aws-lc-rs = "1.18"
+# DuckDB バインディング (統計記録に利用)
+# bundled は CI でビルド時間 30 分以上かかるため使用しない
+# prebuilt ダウンロードは .cargo/config.toml の DUCKDB_DOWNLOAD_LIB で有効化する
+# (duckdb-rs に対応 feature が無いため Cargo.toml の features では指定できない)
+duckdb = { version = "1.10505", default-features = false }
+# UTC タイムスタンプ整形 (DuckDB ファイル名生成用)
+jiff = "0.2"
+# CLI 引数パース
+noargs = "0.4"
+# JSON パース / 生成
+nojson = "0.3"
+# 2D ベクターグラフィックス (フェイク映像生成)
+raden = "2026.2"
+# HTTP/1.1 サーバー
+shiguredo_http11 = "2026.6"
+# MP4 コンテナからの音声トラックの demux に利用 (映像は sora_sdk 経由。
+# sora_sdk と同じ shiguredo_mp4 バージョンに解決される)
+shiguredo_mp4 = "2026.5"
+# OpenH264 バインディング (H.264 エンコード)
+shiguredo_openh264 = "2026.2"
+# Opus デコード (MP4 音声を PCM へ変換する際に利用)
+shiguredo_opus = "2026.2"
+# クロスプラットフォーム ビデオデバイス
+shiguredo_video_device = "2026.3"
+# libwebrtc バインディング
+shiguredo_webrtc = "0.152.1-canary.1"
+# Sora Rust SDK
+sora_sdk = "2026.2.0-canary.1"
+# tokio Stream ラッパー (ReceiverStream, IntervalStream)
+tokio-stream = "0.1"
+# tokio ユーティリティ (CancellationToken, DelayQueue)
+tokio-util = { version = "0.7", features = ["time"] }
+
+# 複数キーを持つ依存はインラインテーブルではなくテーブルセクションで記述する。
+# tombi は行長超過のインラインテーブルを複数行に展開するが、複数行インラインテーブルは
+# TOML 1.1 の機能であり cargo がマニフェストを解析できない場合がある。
+
+# 非同期ランタイム
+[dependencies.tokio]
+version = "1.53"
+features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+]
+
+[dev-dependencies]
+# スナップショットテスト (フォーマッタ出力の golden master)
+insta = "1.48"
+# テストで一時ディレクトリを使う
+tempfile = "3.27"
+
+# AAC デコード (FDK AAC 共有ライブラリを実行時に動的ロードする)
+# shiguredo_fdk_aac は非 Linux でコンパイルエラーになるクレートのため、
+# Linux 限定かつ optional にする (feature `fdk-aac` で有効化。他 OS では AAC は未対応扱い)
+[target.'cfg(target_os = "linux")'.dependencies]
+shiguredo_fdk_aac = { version = "2026.1", optional = true }
+
+[features]
+# Linux で MP4 の AAC 音声デコードを有効にする (libfdk-aac を実行時に動的ロードする)
+# 非 Linux ではこの feature を有効にしても依存は解決されない
+fdk-aac = ["dep:shiguredo_fdk_aac"]
+
+[profile.release]
+strip = true
+# 配布バイナリのサイズを抑える。libwebrtc の prebuilt macOS ライブラリが参照する
+# ___isPlatformVersionAtLeast を fat LTO が落としてリンクに失敗するため、LTO は使わない
+codegen-units = 1

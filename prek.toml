@@ -1,0 +1,104 @@
+# prek (Rust 製のリポジトリフックフレームワーク) の設定ファイル。
+# 詳細は https://prek.j178.dev を参照すること。
+#:schema https://www.schemastore.org/prek.json
+
+# prek install でインストールするフックを決める設定 (どのステージで走るかとは別)
+# prek install で pre-commit と pre-push の両方の Git フックを入れる
+default_install_hook_types = ["pre-commit", "pre-push"]
+
+# 設定の整合性チェック (発火しないフックを置かないための検査)
+[[repos]]
+repo = "meta"
+hooks = [{ id = "check-hooks-apply" }]
+
+# prek 組み込みフック (オフラインで動作する Rust ネイティブ実装)
+# 公開リポジトリでは、一度履歴に入った秘密鍵や大容量ファイルの除去が高コストになるため
+# コミット段階で機械的に止める (履歴の書き換えを繰り返さないための安全策)
+[[repos]]
+repo = "builtin"
+hooks = [
+  # 行末の空白を取り除く
+  { id = "trailing-whitespace" },
+  # ファイル末尾を改行 1 つで終わらせる
+  { id = "end-of-file-fixer" },
+  # ファイル先頭の UTF-8 BOM を取り除く
+  { id = "fix-byte-order-marker" },
+  # TOML の構文エラーを検出する
+  { id = "check-toml" },
+  # YAML の構文エラーを検出する
+  { id = "check-yaml" },
+  # 大文字小文字だけが異なるファイル名の衝突を防ぐ
+  { id = "check-case-conflict" },
+  # マージコンフリクトマーカーが残ったコミットを防ぐ
+  { id = "check-merge-conflict" },
+  # 大きなファイルの誤コミットを防ぐ
+  { id = "check-added-large-files" },
+  # 秘密鍵の誤コミットを防ぐ
+  { id = "detect-private-key" },
+  # 改行コードの混在を防ぐ
+  { id = "mixed-line-ending" },
+  # リンク切れのシンボリックリンクを検出する (CLAUDE.md は AGENTS.md へのリンク)
+  { id = "check-symlinks" },
+  # シンボリックリンクだったファイルが実体ファイルとしてコミットされるのを検出する
+  { id = "destroyed-symlinks" },
+  # shebang 付きスクリプトに実行権限があるか確認する
+  # Rust の inner attribute #![...] が shebang と誤判定されるため Rust ファイルは除外する
+  { id = "check-shebang-scripts-are-executable", exclude_types = ["rust"] },
+  # NOTE: 発火対象がリポジトリに存在しないフックは置いていない (0057 が除去した失陥を繰り返さない)
+  #   - check-json: 追跡中の JSON 系は `.markdownlint.jsonc` だけで jsonc 型に分類され、
+  #     `prek run check-json --all-files` は常に Skipped になる
+  #   - check-executables-have-shebangs: 実行権限を持つ追跡ファイルが 0 件のため常に Skipped になる
+  # どちらも該当するファイル種別が増えた時点で追加する
+]
+
+# tombi: TOML のフォーマッタ・リンタ。`shiguredo-rust` の規約でフックすることが求められている
+# rev は tombi 本体のバージョンを固定する (tombi-pre-commit の pyproject が同版の tombi をインストールする)
+[[repos]]
+repo = "https://github.com/tombi-toml/tombi-pre-commit"
+rev = "v1.5.2"
+hooks = [
+  # stages を未指定にすると全ステージ対象になるため、pre-commit 専用とすることを明示する
+  # Cargo.lock は自動生成ファイルなので整形・検査の対象外にする
+  { id = "tombi-lint", stages = ["pre-commit"], exclude = { glob = ["**/Cargo.lock"] } },
+  { id = "tombi-format", stages = ["pre-commit"], exclude = { glob = ["**/Cargo.lock"] } },
+]
+
+# プロジェクト固有のローカルフック。
+# priority が小さいほど先に実行され、同じ priority なら並列実行される
+[[repos]]
+repo = "local"
+hooks = [
+  {
+    id = "cargo-fmt",
+    name = "cargo fmt",
+    entry = "cargo fmt --all -- --check",
+    language = "system",
+    types = ["rust"],
+    pass_filenames = false,
+    # stages 未指定は全ステージ対象になるため、push 時に再実行しないよう明示する
+    stages = ["pre-commit"],
+    priority = 0,
+  },
+  {
+    id = "cargo-clippy",
+    name = "cargo clippy",
+    entry = "cargo clippy --locked --workspace --all-targets --features fdk-aac -- -D warnings",
+    language = "system",
+    types = ["rust"],
+    pass_filenames = false,
+    stages = ["pre-commit"],
+    priority = 10,
+  },
+  {
+    id = "cargo-test",
+    name = "cargo test",
+    entry = "cargo test --locked --workspace --features fdk-aac",
+    language = "system",
+    # types を付けると Rust の変更が無い push で発火せず、テスト実行を機械的に担保できないため常に実行する
+    always_run = true,
+    pass_filenames = false,
+    # コミットごとにテストが走ると遅すぎるため pre-push だけで実行する (`shiguredo-rust` の規約)
+    stages = ["pre-push"],
+    priority = 20,
+  },
+]
