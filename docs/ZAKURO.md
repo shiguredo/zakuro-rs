@@ -223,7 +223,7 @@ POST /rpc          → JSON-RPC 2.0
 - [x] サイマルキャスト (`--sora-simulcast`, `--sora-simulcast-request-rid`)
 - [x] スポットライト (`--sora-spotlight`, `--sora-spotlight-focus-rid`, `--sora-spotlight-unfocus-rid`)
 - [ ] degradation-preference
-- [ ] DataChannel メッセージング (`--sora-data-channels`)
+- [x] DataChannel メッセージング (`--sora-data-channels`)
 
 ### HTTP API
 

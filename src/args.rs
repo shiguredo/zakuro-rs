@@ -23,6 +23,7 @@ pub(crate) struct Args {
     pub(crate) audio: bool,
     pub(crate) audio_codec_type: Option<String>,
     pub(crate) audio_bit_rate: Option<u32>,
+    pub(crate) data_channels: Option<String>,
     pub(crate) data_channel_signaling: Option<bool>,
     pub(crate) ignore_disconnect_websocket: Option<bool>,
     pub(crate) simulcast: Option<bool>,
@@ -190,6 +191,11 @@ pub(crate) fn parse_args() -> Result<Args> {
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<u32>())?;
 
+    let data_channels: Option<String> = noargs::opt("sora-data-channels")
+        .doc("DataChannel メッセージング設定 (JSON 文字列)")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
     let data_channel_signaling: Option<bool> = noargs::opt("sora-data-channel-signaling")
         .doc("DataChannel 経由でシグナリングを行う (true/false)")
         .take(&mut args)
@@ -279,6 +285,7 @@ pub(crate) fn parse_args() -> Result<Args> {
         audio,
         audio_codec_type,
         audio_bit_rate,
+        data_channels,
         data_channel_signaling,
         ignore_disconnect_websocket,
         simulcast,

@@ -2,10 +2,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use shiguredo_webrtc::{VideoTrackSource, rtc_log_info, rtc_log_warning};
-use sora_sdk::{Role, SoraClient, SoraClientContext};
+use sora_sdk::{ConnectDataChannel, Role, SoraClient, SoraClientContext};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::data_channel::MessageChannel;
 use crate::stats::StatsEvent;
 
 #[derive(Clone)]
@@ -19,6 +20,8 @@ pub(crate) struct VirtualClientConfig {
     pub(crate) retry_interval: f64,
     pub(crate) video: Option<sora_sdk::Video>,
     pub(crate) audio: Option<sora_sdk::Audio>,
+    pub(crate) connect_data_channels: Option<Vec<ConnectDataChannel>>,
+    pub(crate) message_channels: Vec<MessageChannel>,
     pub(crate) data_channel_signaling: Option<bool>,
     pub(crate) ignore_disconnect_websocket: Option<bool>,
     pub(crate) simulcast: Option<bool>,
@@ -72,6 +75,17 @@ pub(crate) async fn run(
         };
         let _ = stats_tx.send(StatsEvent::Connected { id }).await;
         rtc_log_info!("[vc-{}] 接続しました", id);
+
+        // DataChannel メッセージングタスクの起動
+        let messaging_token = connection_token.child_token();
+        if !config.message_channels.is_empty() {
+            let msg_handle = handle.clone();
+            let msg_channels = config.message_channels.clone();
+            let msg_token = messaging_token.clone();
+            tokio::spawn(async move {
+                crate::data_channel::run_messaging(id, msg_handle, msg_channels, msg_token).await;
+            });
+        }
 
         let mut run_future = Box::pin(client.run());
 
@@ -193,6 +207,9 @@ fn build_client(
         builder = builder.sender_audio_track(audio_track);
     }
 
+    if let Some(ref dcs) = config.connect_data_channels {
+        builder = builder.data_channels(dcs.clone());
+    }
     if let Some(data_channel_signaling) = config.data_channel_signaling {
         builder = builder.data_channel_signaling(data_channel_signaling);
     }

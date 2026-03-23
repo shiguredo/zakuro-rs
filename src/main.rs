@@ -1,4 +1,5 @@
 mod args;
+mod data_channel;
 mod error;
 mod fake_video_capturer;
 mod stats;
@@ -96,6 +97,14 @@ async fn main() -> Result<()> {
     let stats = StatsCollector::new(args.vcs, token.clone());
     let stats_tx = stats.event_tx();
 
+    // DataChannel メッセージング設定のパース
+    let (connect_data_channels, message_channels) = if let Some(ref dc_json) = args.data_channels {
+        let (connect, msg) = data_channel::parse_data_channels(dc_json)?;
+        (Some(connect), msg)
+    } else {
+        (None, Vec::new())
+    };
+
     let vc_config = VirtualClientConfig {
         signaling_urls: args.signaling_urls.clone(),
         channel_id: args.channel_id.clone(),
@@ -106,6 +115,8 @@ async fn main() -> Result<()> {
         retry_interval: args.retry_interval,
         video: build_video(&args),
         audio: build_audio(&args),
+        connect_data_channels,
+        message_channels,
         data_channel_signaling: args.data_channel_signaling,
         ignore_disconnect_websocket: args.ignore_disconnect_websocket,
         simulcast: args.simulcast,
