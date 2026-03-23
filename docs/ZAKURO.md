@@ -177,115 +177,74 @@ POST /rpc          → JSON-RPC 2.0
 --client-key <FILE>                 mTLS 秘密鍵
 ```
 
-## zakuro-rs 現在の実装状況
+## zakuro-rs 実装 TODO
 
-### 依存ライブラリ
+### コア機能
 
-| クレート | バージョン | 用途 |
-|---------|-----------|------|
-| sora_sdk | 2026.1.0-canary.0 | Sora WebRTC SDK |
-| shiguredo_webrtc | 0.146.1-canary.1 | WebRTC ライブラリ |
-| raden | 2026.1.0-canary.2 | グラフィックス描画 |
-| noargs | 0.4 | コマンドライン引数 |
-| nojson | 0.3 | JSON パース |
-| tokio | 1 | 非同期ランタイム |
+- [x] コマンドライン引数パース (noargs)
+- [x] Sora SDK 連携 (映像・音声送受信)
+- [x] 複数仮想クライアント管理
+- [x] hatch-rate による段階的起動
+- [x] 統計収集・レポート
+- [x] リトライロジック (max-retry, retry-interval)
+- [x] Duration + repeat-interval
+- [x] Ctrl+C グレースフルシャットダウン
 
-### 実装済み機能
+### 映像
 
-| 機能 | 状態 |
-|------|------|
-| コマンドライン引数パース | 実装済み |
-| フェイク映像生成 (Raden + 砂嵐) | 実装済み |
-| 複数仮想クライアント管理 | 実装済み |
-| Sora SDK 連携 (映像・音声送受信) | 実装済み |
-| 統計収集・レポート | 実装済み |
-| リトライロジック | 実装済み |
-| Duration + repeat_interval | 実装済み |
-| Ctrl+C シャットダウン | 実装済み |
+- [x] フェイク映像生成 (Raden: デジタル時計、パイチャート、カラーボックス)
+- [x] 砂嵐映像生成
+- [x] 解像度指定 (QVGA/VGA/HD/FHD/4K/WxH)
+- [x] フレームレート指定 (1-60)
+- [ ] Y4M 動画ファイル読込 (`--fake-video-capture`)
+- [ ] 実デバイスキャプチャ (`--video-device`)
+- [ ] 解像度固定モード (`--fixed-resolution`)
 
-### モジュール構成
+### 音声
 
-```
-src/
-├── main.rs               # エントリポイント、クライアント管理
-├── args.rs               # コマンドライン引数
-├── error.rs              # エラー型
-├── fake_video_capturer.rs # フェイク映像生成
-├── stats.rs              # 統計収集
-└── virtual_client.rs     # 仮想クライアント
-```
+- [x] 音声無効化 (`--no-audio-device`)
+- [ ] フェイク音声自動生成 (BIP/BOP/HUM/ノイズ, 48kHz)
+- [ ] WAV 音声ファイル読込 (`--fake-audio-capture`)
 
-## 差分: 未実装機能
+### コーデック
 
-zakuro (C++) にあって zakuro-rs に未実装の機能:
+- [x] ビデオコーデック指定 (VP8/VP9/AV1/H264/H265)
+- [x] オーディオコーデック指定 (Opus)
+- [x] ビットレート指定 (映像・音声)
+- [ ] OpenH264 外部ライブラリ (`--openh264`)
 
-### 高優先度
+### 接続設定
 
-| 機能 | 説明 |
-|------|------|
-| Y4M 読込 | Y4M 動画ファイルからのフェイク映像 |
-| WAV 読込 | WAV 音声ファイルからのフェイク音声 |
-| フェイク音声自動生成 | BIP/BOP/HUM/ノイズ (48kHz) |
-| JSONC 設定ファイル | `--config` による設定読み込み |
-| mTLS | クライアント証明書認証 |
+- [x] シグナリング URL (複数指定可)
+- [x] チャネル ID
+- [x] ロール (sendonly/recvonly/sendrecv)
+- [x] DataChannel シグナリング
+- [ ] mTLS (`--client-cert`, `--client-key`)
+- [ ] シミュルキャスト (`--sora-simulcast`)
+- [ ] スポットライト (`--sora-spotlight`)
+- [ ] degradation-preference
+- [ ] DataChannel メッセージング (`--sora-data-channels`)
 
-### 中優先度
+### HTTP API
 
-| 機能 | 説明 |
-|------|------|
-| HTTP API サーバー | ヘルスチェック (/.ok) + JSON-RPC (/rpc) |
-| DataChannel メッセージング | ZAKURO ヘッダ付きバイナリ送信 |
-| シナリオ機能 | Sleep, Disconnect, Reconnect 等の自動化 |
-| シミュルキャスト | `--sora-simulcast` |
-| スポットライト | `--sora-spotlight` |
-| degradation-preference | 解像度/フレームレートの劣化制御 |
-| instance-hatch-rate | インスタンス生成レート制御 |
+- [ ] ヘルスチェック (`GET /.ok`)
+- [ ] JSON-RPC 2.0 (`POST /rpc`)
+- [ ] GetVersion メソッド
 
-### 低優先度
+### シナリオ
 
-| 機能 | 説明 |
-|------|------|
-| GameKeyCore | キーボード入力による実行時制御 |
-| GameAudioManager | ゲーム音声生成 |
-| NopVideoDecoder | 受信映像の廃棄 (CPU 効率化) |
-| 埋め込みリソース | フォント・音声のバイナリ埋め込み |
-| 実デバイスキャプチャ | カメラ/マイクの実デバイス対応 |
-| fixed-resolution | 解像度固定モード |
-| OpenH264 対応 | 外部 OpenH264 ライブラリ指定 |
+- [ ] ScenarioPlayer (Sleep, Disconnect, Reconnect, Exit)
+- [ ] DataChannel メッセージ自動送信 (ZAKURO ヘッダ付き)
+- [ ] instance-hatch-rate
 
-### コマンドライン引数の差分
+### その他
 
-zakuro-rs に未実装の引数:
-
-```
-# 映像関連
---fake-capture-device
---fake-video-capture <FILE>
---video-device <NAME>
---fixed-resolution
-
-# 音声関連
---fake-audio-capture <FILE>
-
-# 高度な接続設定
---instance-hatch-rate <F>
---degradation-preference
---sora-simulcast
---sora-spotlight
---sora-data-channels <JSON>
---scenario {reconnect}
-
-# HTTP API
---http-host <ADDR>
---http-port <PORT>
-
-# その他
---config <FILE>
---log-level
---client-cert <FILE>
---client-key <FILE>
---openh264 <PATH>
-```
+- [ ] JSONC 設定ファイル (`--config`)
+- [ ] ログレベル制御 (`--log-level`)
+- [ ] NopVideoDecoder (受信映像廃棄)
+- [ ] 埋め込みリソース (フォント・音声)
+- [ ] GameKeyCore (キーボード入力制御)
+- [ ] GameAudioManager (ゲーム音声)
 
 ### 設計差分
 
