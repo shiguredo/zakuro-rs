@@ -23,6 +23,7 @@ impl std::fmt::Display for ErrorMessage {
 pub(crate) enum AppError {
     Args(noargs::Error),
     Sora(sora_sdk::Error),
+    VideoDevice(shiguredo_video_device::Error),
     Message(ErrorMessage),
     Io(io::Error),
 }
@@ -33,6 +34,7 @@ impl std::fmt::Display for AppError {
             AppError::Args(err) => write!(f, "{err:?}"),
             AppError::Sora(err) => write!(f, "AppError::Sora: {err}"),
             AppError::Message(err) => write!(f, "AppError::Message: {err}"),
+            AppError::VideoDevice(err) => write!(f, "AppError::VideoDevice: {err}"),
             AppError::Io(err) => write!(f, "AppError::Io: {err}"),
         }
     }
@@ -62,6 +64,12 @@ impl From<sora_sdk::Error> for AppError {
 impl From<ErrorMessage> for AppError {
     fn from(err: ErrorMessage) -> Self {
         AppError::Message(err)
+    }
+}
+
+impl From<shiguredo_video_device::Error> for AppError {
+    fn from(err: shiguredo_video_device::Error) -> Self {
+        AppError::VideoDevice(err)
     }
 }
 

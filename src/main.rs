@@ -3,6 +3,7 @@ mod data_channel;
 mod error;
 mod fake_video_capturer;
 mod stats;
+mod video_device_capturer;
 mod virtual_client;
 mod y4m_reader;
 
@@ -16,7 +17,39 @@ use tokio_util::sync::CancellationToken;
 use crate::error::Result;
 use crate::fake_video_capturer::{FakeVideoCapturer, FakeVideoCapturerConfig};
 use crate::stats::StatsCollector;
+use crate::video_device_capturer::{VideoDeviceCapturer, VideoDeviceCapturerConfig};
 use crate::virtual_client::VirtualClientConfig;
+
+/// デバイス名または ID からデバイス ID を解決する
+///
+/// 名前の前方一致で検索し、見つからなければ ID として扱う。
+fn resolve_device_id(name_or_id: &str) -> Result<String> {
+    let device_list = shiguredo_video_device::VideoDeviceList::enumerate()?;
+    // 名前で検索する
+    for device in device_list.devices() {
+        if let Ok(name) = device.name()
+            && name == name_or_id
+        {
+            return Ok(device
+                .unique_id()
+                .unwrap_or_else(|_| name_or_id.to_string()));
+        }
+    }
+    // ID として扱う
+    for device in device_list.devices() {
+        if let Ok(uid) = device.unique_id()
+            && uid == name_or_id
+        {
+            return Ok(uid);
+        }
+    }
+    // 見つからなかった場合はそのまま渡す（デバイス側でエラーになる）
+    rtc_log_warning!(
+        "Video device '{}' not found in enumeration, passing as-is",
+        name_or_id
+    );
+    Ok(name_or_id.to_string())
+}
 
 fn build_video(args: &args::Args) -> Option<sora_sdk::Video> {
     if args.no_video_device {
@@ -77,24 +110,42 @@ async fn main() -> Result<()> {
 
     let token = CancellationToken::new();
 
-    // FakeVideoCapturer（映像有効時のみ）
-    let mut _capturer = None;
+    // 映像キャプチャ（映像有効時のみ）
+    let mut _fake_capturer = None;
+    let mut _device_capturer = None;
     let video_source = if !args.no_video_device && args.role.wants_send() {
-        let config = FakeVideoCapturerConfig {
-            width: args.resolution.0,
-            height: args.resolution.1,
-            fps: args.framerate as i32,
-            sandstorm: args.sandstorm,
-            y4m_path: args
-                .fake_video_capture
-                .as_ref()
-                .map(std::path::PathBuf::from),
-        };
-        let mut capturer = FakeVideoCapturer::new(config)?;
-        capturer.start()?;
-        let source = capturer.video_source();
-        _capturer = Some(capturer);
-        Some(source)
+        if let Some(ref device_name) = args.video_input_device {
+            // 実デバイスキャプチャ
+            let device_id = resolve_device_id(device_name)?;
+            let config = VideoDeviceCapturerConfig {
+                device_id: Some(device_id),
+                width: args.resolution.0,
+                height: args.resolution.1,
+                fps: args.framerate as i32,
+            };
+            let mut capturer = VideoDeviceCapturer::new(config)?;
+            capturer.start()?;
+            let source = capturer.video_source();
+            _device_capturer = Some(capturer);
+            Some(source)
+        } else {
+            // フェイク映像キャプチャ
+            let config = FakeVideoCapturerConfig {
+                width: args.resolution.0,
+                height: args.resolution.1,
+                fps: args.framerate as i32,
+                sandstorm: args.sandstorm,
+                y4m_path: args
+                    .fake_video_capture
+                    .as_ref()
+                    .map(std::path::PathBuf::from),
+            };
+            let mut capturer = FakeVideoCapturer::new(config)?;
+            capturer.start()?;
+            let source = capturer.video_source();
+            _fake_capturer = Some(capturer);
+            Some(source)
+        }
     } else {
         None
     };

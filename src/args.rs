@@ -15,6 +15,7 @@ pub(crate) struct Args {
     pub(crate) retry_interval: f64,
     pub(crate) no_video_device: bool,
     pub(crate) no_audio_device: bool,
+    pub(crate) video_input_device: Option<String>,
     pub(crate) resolution: (i32, i32),
     pub(crate) framerate: u32,
     pub(crate) sandstorm: bool,
@@ -138,6 +139,12 @@ pub(crate) fn parse_args() -> Result<Args> {
         .doc("音声デバイスを使用しない")
         .take(&mut args)
         .is_present();
+
+    let video_input_device: Option<String> = noargs::opt("video-input-device")
+        .doc("映像入力デバイス名または ID")
+        .example("FaceTime HD Camera")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let resolution: (i32, i32) = noargs::opt("resolution")
         .doc("映像解像度 (QVGA/VGA/HD/FHD/4K または WxH, デフォルト: VGA)")
@@ -283,6 +290,18 @@ pub(crate) fn parse_args() -> Result<Args> {
         )
         .into());
     }
+    if video_input_device.is_some() && fake_video_capture.is_some() {
+        return Err(ErrorMessage::new(
+            "--video-input-device と --fake-video-capture は同時に指定できません",
+        )
+        .into());
+    }
+    if video_input_device.is_some() && sandstorm {
+        return Err(ErrorMessage::new(
+            "--video-input-device と --sandstorm は同時に指定できません",
+        )
+        .into());
+    }
 
     Ok(Args {
         signaling_urls,
@@ -296,6 +315,7 @@ pub(crate) fn parse_args() -> Result<Args> {
         retry_interval,
         no_video_device,
         no_audio_device,
+        video_input_device,
         resolution,
         framerate,
         sandstorm,
