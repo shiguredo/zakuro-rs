@@ -4,6 +4,7 @@ mod error;
 mod fake_video_capturer;
 mod stats;
 mod virtual_client;
+mod y4m_reader;
 
 use std::time::Duration;
 
@@ -84,6 +85,10 @@ async fn main() -> Result<()> {
             height: args.resolution.1,
             fps: args.framerate as i32,
             sandstorm: args.sandstorm,
+            y4m_path: args
+                .fake_video_capture
+                .as_ref()
+                .map(std::path::PathBuf::from),
         };
         let mut capturer = FakeVideoCapturer::new(config)?;
         capturer.start()?;

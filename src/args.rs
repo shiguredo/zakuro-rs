@@ -18,6 +18,7 @@ pub(crate) struct Args {
     pub(crate) resolution: (i32, i32),
     pub(crate) framerate: u32,
     pub(crate) sandstorm: bool,
+    pub(crate) fake_video_capture: Option<String>,
     pub(crate) video_codec_type: Option<String>,
     pub(crate) video_bit_rate: Option<u32>,
     pub(crate) audio: bool,
@@ -155,6 +156,18 @@ pub(crate) fn parse_args() -> Result<Args> {
         .take(&mut args)
         .is_present();
 
+    let fake_video_capture: Option<String> = noargs::opt("fake-video-capture")
+        .doc("Y4M 動画ファイルからフェイク映像を生成する")
+        .example("video.y4m")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let path = o.value().to_string();
+            if !std::path::Path::new(&path).exists() {
+                return Err("fake-video-capture: file not found");
+            }
+            Ok(path)
+        })?;
+
     let video_codec_type: Option<String> = noargs::opt("sora-video-codec-type")
         .doc("映像コーデック (vp8/vp9/av1/h264/h265)")
         .take(&mut args)
@@ -264,6 +277,12 @@ pub(crate) fn parse_args() -> Result<Args> {
     if framerate == 0 || framerate > 60 {
         return Err(ErrorMessage::new("framerate は 1 から 60 の範囲で指定してください").into());
     }
+    if sandstorm && fake_video_capture.is_some() {
+        return Err(ErrorMessage::new(
+            "--sandstorm と --fake-video-capture は同時に指定できません",
+        )
+        .into());
+    }
 
     Ok(Args {
         signaling_urls,
@@ -280,6 +299,7 @@ pub(crate) fn parse_args() -> Result<Args> {
         resolution,
         framerate,
         sandstorm,
+        fake_video_capture,
         video_codec_type,
         video_bit_rate,
         audio,

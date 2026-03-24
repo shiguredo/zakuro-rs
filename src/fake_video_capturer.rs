@@ -1,4 +1,5 @@
 use std::f64::consts::PI;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -9,12 +10,14 @@ use shiguredo_webrtc::{
 };
 
 use crate::error::Result;
+use crate::y4m_reader::Y4mReader;
 
 pub(crate) struct FakeVideoCapturerConfig {
     pub(crate) width: i32,
     pub(crate) height: i32,
     pub(crate) fps: i32,
     pub(crate) sandstorm: bool,
+    pub(crate) y4m_path: Option<PathBuf>,
 }
 
 pub(crate) struct FakeVideoCapturer {
@@ -34,6 +37,7 @@ pub(crate) struct FakeVideoCapturer {
 enum ImageHolder {
     Raden(Image, Box<PipelineRuntime>),
     Sandstorm(Vec<u32>),
+    Y4m(Y4mReader, Vec<u8>),
 }
 
 impl FakeVideoCapturer {
@@ -48,7 +52,11 @@ impl FakeVideoCapturer {
         let source = AdaptedVideoTrackSource::new();
         let timestamp_aligner = TimestampAligner::new();
         let video_source = source.cast_to_video_track_source();
-        let image = if config.sandstorm {
+        let image = if let Some(ref y4m_path) = config.y4m_path {
+            let reader = Y4mReader::open(y4m_path.as_path())?;
+            let buf = vec![0u8; reader.width() as usize * reader.height() as usize * 3 / 2];
+            ImageHolder::Y4m(reader, buf)
+        } else if config.sandstorm {
             ImageHolder::Sandstorm(vec![0u32; (width * height) as usize])
         } else {
             let img = Image::new(width as u32, height as u32, PixelFormat::Prgb32);
@@ -92,6 +100,10 @@ impl FakeVideoCapturer {
         let fps = self.fps.max(1);
         let start_time_ms = self.start_time_ms;
         let sandstorm = self.sandstorm;
+        let has_y4m = self
+            .image
+            .as_ref()
+            .is_some_and(|i| matches!(i, ImageHolder::Y4m(..)));
         let stop = self.stop.clone();
         let handle = thread::Builder::new()
             .name("fake-video-capturer".to_string())
@@ -99,7 +111,19 @@ impl FakeVideoCapturer {
                 let mut frame_counter: u32 = 0;
                 let mut xorshift_state: u32 = 0xDEAD_BEEF;
                 while !stop.load(Ordering::Acquire) {
-                    if sandstorm {
+                    if has_y4m {
+                        if let ImageHolder::Y4m(ref mut reader, ref mut buf) = image {
+                            tick_y4m(
+                                &mut source,
+                                &mut timestamp_aligner,
+                                reader,
+                                buf,
+                                width,
+                                height,
+                                start_time_ms,
+                            );
+                        }
+                    } else if sandstorm {
                         if let ImageHolder::Sandstorm(ref mut buf) = image {
                             tick_sandstorm(
                                 &mut source,
@@ -160,6 +184,92 @@ fn xorshift32(state: &mut u32) -> u32 {
     x ^= x << 5;
     *state = x;
     x
+}
+
+fn tick_y4m(
+    source: &mut AdaptedVideoTrackSource,
+    timestamp_aligner: &mut TimestampAligner,
+    reader: &mut Y4mReader,
+    buf: &mut [u8],
+    output_width: i32,
+    output_height: i32,
+    start_time_ms: i64,
+) {
+    let elapsed_ms = shiguredo_webrtc::time_millis() - start_time_ms;
+
+    // フレームを取得。同一フレームの場合は None が返る
+    let updated = match reader.get_frame(elapsed_ms, buf) {
+        Ok(Some(())) => true,
+        Ok(None) => false,
+        Err(_) => return,
+    };
+
+    if !updated {
+        return;
+    }
+
+    let y4m_width = reader.width();
+    let y4m_height = reader.height();
+
+    // Y4M から読んだ I420 データを I420Buffer にコピーする
+    let y_size = (y4m_width * y4m_height) as usize;
+    let uv_width = ((y4m_width + 1) / 2) as usize;
+    let uv_height = ((y4m_height + 1) / 2) as usize;
+    let uv_size = uv_width * uv_height;
+
+    let mut i420 = shiguredo_webrtc::I420Buffer::new(y4m_width, y4m_height);
+
+    // Y プレーン: stride が幅と異なる場合があるため行ごとにコピー
+    let stride_y = i420.stride_y() as usize;
+    let w = y4m_width as usize;
+    let h = y4m_height as usize;
+    {
+        let y_dst = i420.y_data_mut();
+        for row in 0..h {
+            y_dst[row * stride_y..row * stride_y + w].copy_from_slice(&buf[row * w..row * w + w]);
+        }
+    }
+
+    // U プレーン
+    let stride_u = i420.stride_u() as usize;
+    {
+        let u_dst = i420.u_data_mut();
+        for row in 0..uv_height {
+            u_dst[row * stride_u..row * stride_u + uv_width]
+                .copy_from_slice(&buf[y_size + row * uv_width..y_size + row * uv_width + uv_width]);
+        }
+    }
+
+    // V プレーン
+    let stride_v = i420.stride_v() as usize;
+    {
+        let v_dst = i420.v_data_mut();
+        for row in 0..uv_height {
+            v_dst[row * stride_v..row * stride_v + uv_width].copy_from_slice(
+                &buf[y_size + uv_size + row * uv_width
+                    ..y_size + uv_size + row * uv_width + uv_width],
+            );
+        }
+    }
+
+    // 出力解像度が Y4M と異なる場合はスケーリング
+    let buffer = if y4m_width != output_width || y4m_height != output_height {
+        let mut scaled = shiguredo_webrtc::I420Buffer::new(output_width, output_height);
+        scaled.scale_from(&i420);
+        scaled
+    } else {
+        i420
+    };
+
+    let timestamp_us = elapsed_ms * 1000;
+    send_frame(
+        source,
+        timestamp_aligner,
+        &buffer,
+        output_width,
+        output_height,
+        timestamp_us,
+    );
 }
 
 fn tick_sandstorm(
