@@ -2,6 +2,7 @@ mod args;
 mod data_channel;
 mod error;
 mod fake_video_capturer;
+mod mp4_video_capturer;
 mod stats;
 mod video_device_capturer;
 mod virtual_client;
@@ -10,12 +11,15 @@ mod y4m_reader;
 use std::time::Duration;
 
 use shiguredo_webrtc::{log, rtc_log_info, rtc_log_warning};
-use sora_sdk::{AdmConfig, SoraClientContext, SoraClientContextConfig};
+use sora_sdk::{AdmConfig, SoraClientContext, SoraClientContextConfig, VideoCodecPreference};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::error::Result;
+use crate::error::{ErrorMessage, Result};
 use crate::fake_video_capturer::{FakeVideoCapturer, FakeVideoCapturerConfig};
+use crate::mp4_video_capturer::{
+    Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer,
+};
 use crate::stats::StatsCollector;
 use crate::video_device_capturer::{VideoDeviceCapturer, VideoDeviceCapturerConfig};
 use crate::virtual_client::VirtualClientConfig;
@@ -103,18 +107,65 @@ async fn main() -> Result<()> {
         args.repeat_interval,
     );
 
-    let context = SoraClientContext::new_with_config(SoraClientContextConfig {
-        adm_config: AdmConfig::NoAudioDevice,
-        ..Default::default()
-    })?;
+    // MP4 パススルー時はコーデック能力をカスタマイズする
+    let mp4_sample_slot = if let Some(ref mp4_path) = args.input_mp4 {
+        let reader = Mp4SampleReader::new(mp4_path)?;
+        let expected_codec =
+            mp4_video_capturer::parse_video_codec_type(args.video_codec_type.as_deref().unwrap())
+                .ok_or_else(|| ErrorMessage::new("--sora-video-codec-type の値が不正です"))?;
+        if reader.codec_type() != expected_codec {
+            return Err(ErrorMessage::new(format!(
+                "MP4 ファイルのコーデック ({:?}) と --sora-video-codec-type ({:?}) が一致しません",
+                reader.codec_type(),
+                expected_codec,
+            ))
+            .into());
+        }
+        let slot = mp4_video_capturer::new_sample_slot();
+        Some((reader, slot))
+    } else {
+        None
+    };
+
+    let context_config = if let Some((_, ref slot)) = mp4_sample_slot {
+        let codec_type =
+            mp4_video_capturer::parse_video_codec_type(args.video_codec_type.as_deref().unwrap())
+                .unwrap();
+        let mut config = SoraClientContextConfig {
+            adm_config: AdmConfig::NoAudioDevice,
+            ..Default::default()
+        };
+        let mp4_capability: Box<dyn sora_sdk::VideoCodecCapability> = Box::new(
+            Mp4PassthroughVideoCodecCapability::new(codec_type, slot.clone()),
+        );
+        let mp4_preference = VideoCodecPreference::new_from_capability(mp4_capability.as_ref());
+        config.video_codec_preference.merge(&mp4_preference);
+        config.video_codec_capabilities.push(mp4_capability);
+        config
+    } else {
+        SoraClientContextConfig {
+            adm_config: AdmConfig::NoAudioDevice,
+            ..Default::default()
+        }
+    };
+
+    let context = SoraClientContext::new_with_config(context_config)?;
 
     let token = CancellationToken::new();
 
     // 映像キャプチャ（映像有効時のみ）
     let mut _fake_capturer = None;
     let mut _device_capturer = None;
+    let mut _mp4_capturer = None;
     let video_source = if !args.no_video_device && args.role.wants_send() {
-        if let Some(ref device_name) = args.video_input_device {
+        if let Some((reader, slot)) = mp4_sample_slot {
+            // MP4 パススルーキャプチャ
+            let mut capturer = Mp4VideoCapturer::new();
+            capturer.start(reader, slot)?;
+            let source = capturer.video_source();
+            _mp4_capturer = Some(capturer);
+            Some(source)
+        } else if let Some(ref device_name) = args.video_input_device {
             // 実デバイスキャプチャ
             let device_id = resolve_device_id(device_name)?;
             let config = VideoDeviceCapturerConfig {

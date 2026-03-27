@@ -20,6 +20,7 @@ pub(crate) struct Args {
     pub(crate) framerate: u32,
     pub(crate) sandstorm: bool,
     pub(crate) fake_video_capture: Option<String>,
+    pub(crate) input_mp4: Option<String>,
     pub(crate) video_codec_type: Option<String>,
     pub(crate) video_bit_rate: Option<u32>,
     pub(crate) audio: bool,
@@ -175,6 +176,18 @@ pub(crate) fn parse_args() -> Result<Args> {
             Ok(path)
         })?;
 
+    let input_mp4: Option<String> = noargs::opt("input-mp4")
+        .doc("MP4 ファイルからエンコード済み映像をパススルー送信する")
+        .example("video.mp4")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let path = o.value().to_string();
+            if !std::path::Path::new(&path).exists() {
+                return Err("input-mp4: file not found");
+            }
+            Ok(path)
+        })?;
+
     let video_codec_type: Option<String> = noargs::opt("sora-video-codec-type")
         .doc("映像コーデック (vp8/vp9/av1/h264/h265)")
         .take(&mut args)
@@ -302,6 +315,33 @@ pub(crate) fn parse_args() -> Result<Args> {
         )
         .into());
     }
+    if input_mp4.is_some() && video_input_device.is_some() {
+        return Err(ErrorMessage::new(
+            "--input-mp4 と --video-input-device は同時に指定できません",
+        )
+        .into());
+    }
+    if input_mp4.is_some() && fake_video_capture.is_some() {
+        return Err(ErrorMessage::new(
+            "--input-mp4 と --fake-video-capture は同時に指定できません",
+        )
+        .into());
+    }
+    if input_mp4.is_some() && sandstorm {
+        return Err(ErrorMessage::new("--input-mp4 と --sandstorm は同時に指定できません").into());
+    }
+    if input_mp4.is_some() && video_codec_type.is_none() {
+        return Err(ErrorMessage::new(
+            "--input-mp4 使用時は --sora-video-codec-type の指定が必須です",
+        )
+        .into());
+    }
+    if input_mp4.is_some() && video_bit_rate.is_none() {
+        return Err(ErrorMessage::new(
+            "--input-mp4 使用時は --sora-video-bit-rate の指定が必須です",
+        )
+        .into());
+    }
 
     Ok(Args {
         signaling_urls,
@@ -320,6 +360,7 @@ pub(crate) fn parse_args() -> Result<Args> {
         framerate,
         sandstorm,
         fake_video_capture,
+        input_mp4,
         video_codec_type,
         video_bit_rate,
         audio,

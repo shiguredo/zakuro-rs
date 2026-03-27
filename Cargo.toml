@@ -32,4 +32,5 @@ tokio = { version = "1", features = [
 ] }
 tokio-util = "0.7"
 shiguredo_video_device = "2026.1.0-canary.3"
+shiguredo_mp4 = "2026.2"
 duckdb = "1.10501.0"
