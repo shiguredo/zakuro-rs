@@ -197,7 +197,7 @@ POST /rpc          → JSON-RPC 2.0
 - [x] 解像度指定 (QVGA/VGA/HD/FHD/4K/WxH)
 - [x] フレームレート指定 (1-60)
 - [x] Y4M 動画ファイル読込 (`--fake-video-capture`)
-- [ ] 実デバイスキャプチャ (`--video-device`)
+- [x] 実デバイスキャプチャ (`--video-input-device`)
 - [ ] 解像度固定モード (`--fixed-resolution`)
 
 ### 音声
@@ -234,8 +234,8 @@ POST /rpc          → JSON-RPC 2.0
 ### シナリオ
 
 - [ ] ScenarioPlayer (Sleep, Disconnect, Reconnect, Exit)
-- [ ] DataChannel メッセージ自動送信 (ZAKURO ヘッダ付き)
-- [ ] instance-hatch-rate
+- [x] DataChannel メッセージ自動送信 (ZAKURO ヘッダ付き)
+- [x] instance-hatch-rate (`--vcs-hatch-rate`)
 
 ### その他
 
