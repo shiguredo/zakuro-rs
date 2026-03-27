@@ -3,6 +3,7 @@ mod data_channel;
 mod error;
 mod fake_video_capturer;
 mod mp4_video_capturer;
+mod openh264_video_codec;
 mod stats;
 mod video_device_capturer;
 mod virtual_client;
@@ -127,26 +128,44 @@ async fn main() -> Result<()> {
         None
     };
 
-    let context_config = if let Some((_, ref slot)) = mp4_sample_slot {
-        let codec_type =
-            mp4_video_capturer::parse_video_codec_type(args.video_codec_type.as_deref().unwrap())
-                .unwrap();
+    // OpenH264 ライブラリのロード
+    let openh264_lib = if let Some(ref path) = args.openh264 {
+        Some(openh264_video_codec::load_openh264_library(path)?)
+    } else {
+        None
+    };
+
+    let context_config = {
         let mut config = SoraClientContextConfig {
             adm_config: AdmConfig::NoAudioDevice,
             ..Default::default()
         };
-        let mp4_capability: Box<dyn sora_sdk::VideoCodecCapability> = Box::new(
-            Mp4PassthroughVideoCodecCapability::new(codec_type, slot.clone()),
-        );
-        let mp4_preference = VideoCodecPreference::new_from_capability(mp4_capability.as_ref());
-        config.video_codec_preference.merge(&mp4_preference);
-        config.video_codec_capabilities.push(mp4_capability);
-        config
-    } else {
-        SoraClientContextConfig {
-            adm_config: AdmConfig::NoAudioDevice,
-            ..Default::default()
+
+        // MP4 パススルーコーデック能力の登録
+        if let Some((_, ref slot)) = mp4_sample_slot {
+            let codec_type = mp4_video_capturer::parse_video_codec_type(
+                args.video_codec_type.as_deref().unwrap(),
+            )
+            .unwrap();
+            let mp4_capability: Box<dyn sora_sdk::VideoCodecCapability> = Box::new(
+                Mp4PassthroughVideoCodecCapability::new(codec_type, slot.clone()),
+            );
+            let mp4_preference = VideoCodecPreference::new_from_capability(mp4_capability.as_ref());
+            config.video_codec_preference.merge(&mp4_preference);
+            config.video_codec_capabilities.push(mp4_capability);
         }
+
+        // OpenH264 コーデック能力の登録
+        if let Some(lib) = openh264_lib {
+            let openh264_capability: Box<dyn sora_sdk::VideoCodecCapability> =
+                Box::new(openh264_video_codec::Openh264VideoCodecCapability::new(lib));
+            let openh264_preference =
+                VideoCodecPreference::new_from_capability(openh264_capability.as_ref());
+            config.video_codec_preference.merge(&openh264_preference);
+            config.video_codec_capabilities.push(openh264_capability);
+        }
+
+        config
     };
 
     let context = SoraClientContext::new_with_config(context_config)?;

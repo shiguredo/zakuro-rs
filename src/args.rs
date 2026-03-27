@@ -21,6 +21,7 @@ pub(crate) struct Args {
     pub(crate) sandstorm: bool,
     pub(crate) fake_video_capture: Option<String>,
     pub(crate) input_mp4: Option<String>,
+    pub(crate) openh264: Option<String>,
     pub(crate) video_codec_type: Option<String>,
     pub(crate) video_bit_rate: Option<u32>,
     pub(crate) audio: bool,
@@ -184,6 +185,18 @@ pub(crate) fn parse_args() -> Result<Args> {
             let path = o.value().to_string();
             if !std::path::Path::new(&path).exists() {
                 return Err("input-mp4: file not found");
+            }
+            Ok(path)
+        })?;
+
+    let openh264: Option<String> = noargs::opt("openh264")
+        .doc("OpenH264 共有ライブラリのパス")
+        .example("libopenh264-2.6.0-mac-arm64.dylib")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let path = o.value().to_string();
+            if !std::path::Path::new(&path).exists() {
+                return Err("openh264: library file not found");
             }
             Ok(path)
         })?;
@@ -361,6 +374,7 @@ pub(crate) fn parse_args() -> Result<Args> {
         sandstorm,
         fake_video_capture,
         input_mp4,
+        openh264,
         video_codec_type,
         video_bit_rate,
         audio,

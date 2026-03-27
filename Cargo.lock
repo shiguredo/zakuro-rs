@@ -2287,6 +2287,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "029f44879b590e0b5e50add084b436a7b740e08b2cc4fee662ed93f1cffddc63"
 
 [[package]]
+name = "shiguredo_openh264"
+version = "2026.1.0-canary.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f20171292f81c654ded0678b2ef0388661a6e8ded7343e1e4623d298e5f1f5f"
+dependencies = [
+ "bindgen",
+ "shiguredo_toml",
+]
+
+[[package]]
 name = "shiguredo_toml"
 version = "2026.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3361,6 +3371,7 @@ dependencies = [
  "nojson",
  "raden",
  "shiguredo_mp4",
+ "shiguredo_openh264",
  "shiguredo_video_device",
  "shiguredo_webrtc",
  "sora_sdk",
