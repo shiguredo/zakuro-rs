@@ -2,6 +2,8 @@ mod args;
 mod data_channel;
 mod error;
 mod fake_video_capturer;
+mod http_server;
+mod json_rpc;
 mod mp4_video_capturer;
 mod openh264_video_codec;
 mod stats;
@@ -288,6 +290,17 @@ async fn main() -> Result<()> {
 
     // main 側の stats_tx を drop して、全クライアント終了時に channel が閉じるようにする
     drop(stats_tx);
+
+    // HTTP サーバーの起動
+    if let (Some(host), Some(port)) = (&args.http_host, args.http_port) {
+        let server = http_server::HttpServer::bind(host, port, token.clone())
+            .await
+            .map_err(|e| error::ErrorMessage::new(format!("HTTP server bind failed: {e}")))?;
+        let handler = http_server::DefaultHandler;
+        tokio::spawn(async move {
+            server.run(handler).await;
+        });
+    }
 
     // Ctrl+C で CancellationToken を発火
     let shutdown_token = token.clone();

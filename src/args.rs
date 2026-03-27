@@ -35,6 +35,8 @@ pub(crate) struct Args {
     pub(crate) spotlight: Option<bool>,
     pub(crate) spotlight_focus_rid: Option<String>,
     pub(crate) spotlight_unfocus_rid: Option<String>,
+    pub(crate) http_host: Option<String>,
+    pub(crate) http_port: Option<u16>,
 }
 
 fn parse_resolution(s: &str) -> Result<(i32, i32)> {
@@ -293,6 +295,22 @@ pub(crate) fn parse_args() -> Result<Args> {
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
+    let http_host: Option<String> = noargs::opt("http-host")
+        .doc("HTTP サーバーのホストアドレス")
+        .example("0.0.0.0")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let http_port: Option<u16> = noargs::opt("http-port")
+        .doc("HTTP サーバーのポート番号")
+        .example("8080")
+        .take(&mut args)
+        .present_and_then(|o| {
+            o.value()
+                .parse::<u16>()
+                .map_err(|_| "http-port は 0-65535 の整数で指定してください")
+        })?;
+
     if let Some(help) = args.finish()? {
         print!("{}", help);
         std::process::exit(0);
@@ -343,6 +361,12 @@ pub(crate) fn parse_args() -> Result<Args> {
     if input_mp4.is_some() && sandstorm {
         return Err(ErrorMessage::new("--input-mp4 と --sandstorm は同時に指定できません").into());
     }
+    if http_host.is_some() != http_port.is_some() {
+        return Err(
+            ErrorMessage::new("--http-host と --http-port は両方指定する必要があります").into(),
+        );
+    }
+
     if input_mp4.is_some() && video_codec_type.is_none() {
         return Err(ErrorMessage::new(
             "--input-mp4 使用時は --sora-video-codec-type の指定が必須です",
@@ -388,5 +412,7 @@ pub(crate) fn parse_args() -> Result<Args> {
         spotlight,
         spotlight_focus_rid,
         spotlight_unfocus_rid,
+        http_host,
+        http_port,
     })
 }

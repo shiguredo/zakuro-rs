@@ -227,9 +227,9 @@ POST /rpc          → JSON-RPC 2.0
 
 ### HTTP API
 
-- [ ] ヘルスチェック (`GET /.ok`)
-- [ ] JSON-RPC 2.0 (`POST /rpc`)
-- [ ] GetVersion メソッド
+- [x] ヘルスチェック (`GET /.ok`)
+- [x] JSON-RPC 2.0 (`POST /rpc`)
+- [x] GetVersion メソッド
 
 ### シナリオ
 

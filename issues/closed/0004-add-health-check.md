@@ -1,6 +1,7 @@
 # ヘルスチェックエンドポイント GET /.ok を追加する
 
 Created: 2026-03-27
+Completed: 2026-03-27
 Model: Opus 4.6
 
 ## 概要
@@ -21,6 +22,10 @@ zakuro (C++) では PR #74 でヘルスチェック用の `GET /.ok` エンド�
 
 - `GET /.ok` リクエストに対して 200 OK を返す
 - レスポンスボディは空でよい
+
+## 解決方法
+
+`src/http_server.rs` の `DefaultHandler` に `GET /.ok` ハンドラを実装した。200 OK を空ボディで返す。
 
 ## 依存
 

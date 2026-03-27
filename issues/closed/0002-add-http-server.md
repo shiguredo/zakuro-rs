@@ -1,6 +1,7 @@
 # HTTP サーバーを追加する
 
 Created: 2026-03-27
+Completed: 2026-03-27
 Model: Opus 4.6
 
 ## 概要
@@ -34,3 +35,7 @@ zakuro (C++) では PR #72 で HTTP サーバー基盤が追加されている�
 
 - HTTP サーバーの起動処理を追加する
 - シャットダウン時に HTTP サーバーも停止する
+
+## 解決方法
+
+`src/http_server.rs` を新規作成し、tokio の `TcpListener` + `shiguredo_http11` の `RequestDecoder`/`Response` で HTTP/1.1 サーバーを実装した。`HttpHandler` トレイトによるルーティング抽象化、`CancellationToken` 連携のグレースフルシャットダウン、Keep-Alive 対応を含む。`src/args.rs` に `--http-host` と `--http-port` オプションを追加し、両方指定時のみ起動する。

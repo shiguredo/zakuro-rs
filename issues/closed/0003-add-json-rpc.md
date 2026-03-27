@@ -1,6 +1,7 @@
 # JSON-RPC 2.0 /rpc エンドポイントを追加する
 
 Created: 2026-03-27
+Completed: 2026-03-27
 Model: Opus 4.6
 
 ## 概要
@@ -32,6 +33,10 @@ zakuro (C++) では PR #73 で JSON-RPC 2.0 の `/rpc` エンドポイントが�
 
 - `POST /rpc` エンドポイントを追加する
 - Content-Type: application/json のバリデーション
+
+## 解決方法
+
+`src/json_rpc.rs` を新規作成し、JSON-RPC 2.0 仕様に準拠したリクエスト処理を実装した。`nojson::RawJson` で JSON パース、メソッドディスパッチ、Notification 対応、エラーレスポンス生成を含む。`GetVersion` メソッドでバージョン情報を返す。`src/http_server.rs` の `DefaultHandler` に `POST /rpc` エンドポイントを追加した。
 
 ## 依存
 
