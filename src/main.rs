@@ -5,6 +5,7 @@ mod fake_video_capturer;
 mod http_server;
 mod json_rpc;
 mod mp4_video_capturer;
+mod nop_video_decoder;
 mod openh264_video_codec;
 mod stats;
 mod video_device_capturer;
@@ -165,6 +166,15 @@ async fn main() -> Result<()> {
                 VideoCodecPreference::new_from_capability(openh264_capability.as_ref());
             config.video_codec_preference.merge(&openh264_preference);
             config.video_codec_capabilities.push(openh264_capability);
+        }
+
+        // NopVideoDecoder の登録 (受信映像をデコードせず廃棄する)
+        if args.role.wants_recv() {
+            let nop_capability: Box<dyn sora_sdk::VideoCodecCapability> =
+                Box::new(nop_video_decoder::NopVideoDecoderCapability);
+            let nop_preference = VideoCodecPreference::new_from_capability(nop_capability.as_ref());
+            config.video_codec_preference.merge(&nop_preference);
+            config.video_codec_capabilities.push(nop_capability);
         }
 
         config

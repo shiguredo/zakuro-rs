@@ -1,7 +1,72 @@
+use nojson::{JsonValueKind, RawJson};
 use shiguredo_webrtc::rtc_log_info;
 use sora_sdk::Role;
 
 use crate::error::{ErrorMessage, Result};
+
+/// JSONC 設定ファイルを読み込み、CLI 引数形式のベクターに変換する
+fn load_jsonc_config(path: &str) -> Result<Vec<String>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| ErrorMessage::new(format!("config file read error: {e}")))?;
+    let (json, _) = RawJson::parse_jsonc(&content)
+        .map_err(|e| ErrorMessage::new(format!("config file parse error: {e}")))?;
+    let root = json.value();
+    if root.kind() != JsonValueKind::Object {
+        return Err(ErrorMessage::new("config file must be a JSON object").into());
+    }
+    let mut argv = Vec::new();
+    let members = root
+        .to_object()
+        .map_err(|e| ErrorMessage::new(format!("config file parse error: {e}")))?;
+    for (key, value) in members {
+        let key_str: String = key
+            .try_into()
+            .map_err(|e: nojson::JsonParseError| ErrorMessage::new(format!("{e}")))?;
+        match value.kind() {
+            JsonValueKind::Boolean => {
+                let b: bool = value
+                    .try_into()
+                    .map_err(|e: nojson::JsonParseError| ErrorMessage::new(format!("{e}")))?;
+                if b {
+                    argv.push(format!("--{key_str}"));
+                }
+            }
+            JsonValueKind::String => {
+                let s: String = value
+                    .try_into()
+                    .map_err(|e: nojson::JsonParseError| ErrorMessage::new(format!("{e}")))?;
+                argv.push(format!("--{key_str}"));
+                argv.push(s);
+            }
+            JsonValueKind::Integer | JsonValueKind::Float => {
+                argv.push(format!("--{key_str}"));
+                argv.push(value.as_raw_str().to_string());
+            }
+            _ => {
+                // オブジェクトや配列はそのまま JSON 文字列として渡す
+                argv.push(format!("--{key_str}"));
+                argv.push(value.as_raw_str().to_string());
+            }
+        }
+    }
+    Ok(argv)
+}
+
+/// CLI 引数と設定ファイルの引数をマージする
+///
+/// CLI 引数が優先される。設定ファイルの引数を先に配置し、
+/// CLI 引数を後に配置することで noargs の後勝ちセマンティクスを利用する。
+fn merge_args_with_config(config_argv: Vec<String>) -> noargs::RawArgs {
+    let cli_args: Vec<String> = std::env::args().collect();
+    let program_name = cli_args.first().cloned().unwrap_or_default();
+
+    // program_name + config_argv + cli_args (program_name を除く)
+    let mut merged = vec![program_name];
+    merged.extend(config_argv);
+    merged.extend(cli_args.into_iter().skip(1));
+
+    noargs::RawArgs::new(merged.into_iter())
+}
 
 pub(crate) struct Args {
     pub(crate) signaling_urls: Vec<String>,
@@ -71,7 +136,21 @@ fn parse_resolution(s: &str) -> Result<(i32, i32)> {
 }
 
 pub(crate) fn parse_args() -> Result<Args> {
-    let mut args = noargs::raw_args();
+    // --config を先に処理して設定ファイルの引数とマージする
+    let mut pre_args = noargs::raw_args();
+    let config_path: Option<String> = noargs::opt("config")
+        .doc("JSONC 設定ファイルのパス")
+        .example("config.jsonc")
+        .take(&mut pre_args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+    drop(pre_args);
+
+    let mut args = if let Some(ref path) = config_path {
+        let config_argv = load_jsonc_config(path)?;
+        merge_args_with_config(config_argv)
+    } else {
+        noargs::raw_args()
+    };
     args.metadata_mut().app_name = env!("CARGO_PKG_NAME");
     args.metadata_mut().app_description = "Sora WebRTC SFU 負荷試験ツール";
 
@@ -81,6 +160,11 @@ pub(crate) fn parse_args() -> Result<Args> {
     }
 
     noargs::HELP_FLAG.take_help(&mut args);
+
+    // --config は既に処理済みなので消費する
+    let _: Option<String> = noargs::opt("config")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let signaling_urls: Vec<String> = noargs::opt("sora-signaling-url")
         .doc("Sora の WebSocket シグナリング URL (カンマ区切りで複数指定可)")

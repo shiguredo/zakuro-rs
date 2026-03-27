@@ -1,6 +1,7 @@
 # JSONC 設定ファイル (`--config`) を追加する
 
 Created: 2026-03-27
+Completed: 2026-03-27
 Model: Opus 4.6
 
 ## 概要
@@ -26,3 +27,7 @@ zakuro (C++) では `--config` で JSONC 設定ファイルを指定でき、複
 
 - 設定ファイルの値をコマンドライン引数と同等に扱う
 - コマンドライン引数が設定ファイルより優先する
+
+## 解決方法
+
+`src/args.rs` に `load_jsonc_config()` と `merge_args_with_config()` を追加した。`nojson::RawJson::parse_jsonc()` で JSONC ファイルをパースし、キー・値を `--key value` 形式に変換する。設定ファイルの引数を先、CLI 引数を後に配置して `noargs::RawArgs::new()` に渡すことで、CLI 引数優先のセマンティクスを実現した。

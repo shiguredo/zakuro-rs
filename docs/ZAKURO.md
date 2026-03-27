@@ -239,9 +239,9 @@ POST /rpc          → JSON-RPC 2.0
 
 ### その他
 
-- [ ] JSONC 設定ファイル (`--config`)
+- [x] JSONC 設定ファイル (`--config`)
 - [ ] ログレベル制御 (`--log-level`)
-- [ ] NopVideoDecoder (受信映像廃棄)
+- [x] NopVideoDecoder (受信映像廃棄)
 - [ ] 埋め込みリソース (フォント・音声)
 ### 実装しない機能
 

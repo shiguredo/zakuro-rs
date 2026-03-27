@@ -1,6 +1,7 @@
 # NopVideoDecoder (受信映像廃棄) を追加する
 
 Created: 2026-03-27
+Completed: 2026-03-27
 Model: Opus 4.6
 
 ## 概要
@@ -21,3 +22,7 @@ zakuro (C++) では NopVideoDecoder により受信映像のデコード処理�
 ### 2. デコーダ登録
 
 - recvonly/sendrecv モードで NopVideoDecoder を使用する
+
+## 解決方法
+
+`src/nop_video_decoder.rs` を新規作成した。`VideoDecoderHandler` のデフォルト実装をそのまま利用する `NopDecoder` と、全コーデック型のデコーダとして `NopDecoder` を返す `NopVideoDecoderCapability` を実装した。`src/main.rs` で `role.wants_recv()` の場合に自動登録する。
