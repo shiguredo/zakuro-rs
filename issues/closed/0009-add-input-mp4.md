@@ -1,6 +1,7 @@
 # MP4 パススルー映像入力機能を追加する
 
 Created: 2026-03-27
+Completed: 2026-03-27
 Model: Opus 4.6
 
 ## 概要
