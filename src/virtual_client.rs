@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use shiguredo_webrtc::{VideoTrackSource, rtc_log_info, rtc_log_warning};
-use sora_sdk::{ConnectDataChannel, Role, SoraClient, SoraClientContext};
+use sora_sdk::{ConnectDataChannel, JsonString, Role, SoraClient, SoraClientContext};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -14,6 +14,10 @@ pub(crate) struct VirtualClientConfig {
     pub(crate) signaling_urls: Vec<String>,
     pub(crate) channel_id: String,
     pub(crate) role: Role,
+    pub(crate) client_id: Option<String>,
+    pub(crate) bundle_id: Option<String>,
+    pub(crate) metadata: Option<JsonString>,
+    pub(crate) signaling_notify_metadata: Option<JsonString>,
     pub(crate) duration: Option<f64>,
     pub(crate) repeat_interval: Option<f64>,
     pub(crate) max_retry: u32,
@@ -24,11 +28,15 @@ pub(crate) struct VirtualClientConfig {
     pub(crate) message_channels: Vec<MessageChannel>,
     pub(crate) data_channel_signaling: Option<bool>,
     pub(crate) ignore_disconnect_websocket: Option<bool>,
+    pub(crate) disconnect_wait_timeout: Option<Duration>,
     pub(crate) simulcast: Option<bool>,
     pub(crate) simulcast_request_rid: Option<String>,
     pub(crate) spotlight: Option<bool>,
     pub(crate) spotlight_focus_rid: Option<String>,
     pub(crate) spotlight_unfocus_rid: Option<String>,
+    pub(crate) insecure: bool,
+    pub(crate) client_cert: Option<String>,
+    pub(crate) client_key: Option<String>,
 }
 
 enum DisconnectReason {
@@ -189,6 +197,19 @@ fn build_client(
     .on_track(|_transceiver| {})
     .on_remove_track(|_receiver| {});
 
+    if let Some(ref id) = config.client_id {
+        builder = builder.client_id(id.clone());
+    }
+    if let Some(ref id) = config.bundle_id {
+        builder = builder.bundle_id(id.clone());
+    }
+    if let Some(ref metadata) = config.metadata {
+        builder = builder.metadata(metadata.clone());
+    }
+    if let Some(ref metadata) = config.signaling_notify_metadata {
+        builder = builder.signaling_notify_metadata(metadata.clone());
+    }
+
     if let Some(video) = &config.video {
         builder = builder.video(video.clone());
     }
@@ -216,6 +237,9 @@ fn build_client(
     if let Some(ignore_disconnect_websocket) = config.ignore_disconnect_websocket {
         builder = builder.ignore_disconnect_websocket(ignore_disconnect_websocket);
     }
+    if let Some(timeout) = config.disconnect_wait_timeout {
+        builder = builder.disconnect_wait_timeout(timeout);
+    }
 
     if let Some(simulcast) = config.simulcast {
         builder = builder.simulcast(simulcast);
@@ -231,6 +255,13 @@ fn build_client(
     }
     if let Some(ref rid) = config.spotlight_unfocus_rid {
         builder = builder.spotlight_unfocus_rid(rid.clone());
+    }
+
+    if config.insecure {
+        builder = builder.insecure(true);
+    }
+    if let (Some(cert), Some(key)) = (&config.client_cert, &config.client_key) {
+        builder = builder.client_cert(cert.clone(), key.clone());
     }
 
     builder.build()

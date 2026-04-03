@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use shiguredo_webrtc::{VideoCodecType, log, rtc_log_info, rtc_log_warning};
 use sora_sdk::{
-    AdmConfig, Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer,
+    AdmConfig, JsonString, Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer,
     SoraClientContext, SoraClientContextConfig, VideoCodecPreference,
 };
 use tokio::task::JoinSet;
@@ -236,10 +236,49 @@ async fn main() -> Result<()> {
         (None, Vec::new())
     };
 
+    // メタデータの JSON パース
+    let metadata =
+        if let Some(ref s) = args.metadata {
+            Some(s.parse::<JsonString>().map_err(|e| {
+                ErrorMessage::new(format!("--sora-metadata の JSON が不正です: {e}"))
+            })?)
+        } else {
+            None
+        };
+    let signaling_notify_metadata = if let Some(ref s) = args.signaling_notify_metadata {
+        Some(s.parse::<JsonString>().map_err(|e| {
+            ErrorMessage::new(format!(
+                "--sora-signaling-notify-metadata の JSON が不正です: {e}"
+            ))
+        })?)
+    } else {
+        None
+    };
+
+    // mTLS 証明書の読み込み
+    let client_cert_pem = if let Some(ref path) = args.client_cert {
+        Some(std::fs::read_to_string(path).map_err(|e| {
+            ErrorMessage::new(format!("Failed to read client cert '{}': {}", path, e))
+        })?)
+    } else {
+        None
+    };
+    let client_key_pem = if let Some(ref path) = args.client_key {
+        Some(std::fs::read_to_string(path).map_err(|e| {
+            ErrorMessage::new(format!("Failed to read client key '{}': {}", path, e))
+        })?)
+    } else {
+        None
+    };
+
     let vc_config = VirtualClientConfig {
         signaling_urls: args.signaling_urls.clone(),
         channel_id: args.channel_id.clone(),
         role: args.role,
+        client_id: args.client_id.clone(),
+        bundle_id: args.bundle_id.clone(),
+        metadata,
+        signaling_notify_metadata,
         duration: args.duration,
         repeat_interval: args.repeat_interval,
         max_retry: args.max_retry,
@@ -250,11 +289,15 @@ async fn main() -> Result<()> {
         message_channels,
         data_channel_signaling: args.data_channel_signaling,
         ignore_disconnect_websocket: args.ignore_disconnect_websocket,
+        disconnect_wait_timeout: args.disconnect_wait_timeout.map(Duration::from_secs_f64),
         simulcast: args.simulcast,
         simulcast_request_rid: args.simulcast_request_rid.clone(),
         spotlight: args.spotlight,
         spotlight_focus_rid: args.spotlight_focus_rid.clone(),
         spotlight_unfocus_rid: args.spotlight_unfocus_rid.clone(),
+        insecure: args.insecure,
+        client_cert: client_cert_pem,
+        client_key: client_key_pem,
     };
 
     let mut clients = JoinSet::new();

@@ -217,9 +217,15 @@ POST /rpc          → JSON-RPC 2.0
 
 - [x] シグナリング URL (複数指定可)
 - [x] チャネル ID
+- [x] クライアント ID (`--sora-client-id`)
+- [x] バンドル ID (`--sora-bundle-id`)
 - [x] ロール (sendonly/recvonly/sendrecv)
+- [x] メタデータ (`--sora-metadata`)
+- [x] シグナリング通知メタデータ (`--sora-signaling-notify-metadata`)
 - [x] DataChannel シグナリング
-- [ ] mTLS (`--client-cert`, `--client-key`)
+- [x] 切断待ちタイムアウト (`--sora-disconnect-wait-timeout`)
+- [x] mTLS (`--client-cert`, `--client-key`)
+- [x] TLS 証明書検証スキップ (`--insecure`)
 - [x] サイマルキャスト (`--sora-simulcast`, `--sora-simulcast-request-rid`)
 - [x] スポットライト (`--sora-spotlight`, `--sora-spotlight-focus-rid`, `--sora-spotlight-unfocus-rid`)
 - [ ] degradation-preference
@@ -243,6 +249,16 @@ POST /rpc          → JSON-RPC 2.0
 - [ ] ログレベル制御 (`--log-level`)
 - [x] NopVideoDecoder (受信映像廃棄)
 - [ ] 埋め込みリソース (フォント・音声)
+### sora-rust-sdk 未対応のため未実装の機能
+
+- スポットライト数指定 (`--sora-spotlight-number`)
+- シグナリング URL ランダム化無効 (`--sora-disable-signaling-url-randomization`)
+- DataChannel シグナリングタイムアウト (`--sora-data-channel-signaling-timeout`)
+- コーデック個別エンコーダ指定 (`--vp8-encoder` 等)
+- コーデックパラメータ (`--sora-video-vp9-params` 等、Params 構造体のフィールドが private)
+- ビデオコーデック能力表示 (`--show-video-codec-capability`)
+- connection ID ファイル出力 (`--output-file-connection-id`)
+
 ### 実装しない機能
 
 - GameKeyCore (キーボード入力制御)

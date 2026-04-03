@@ -72,6 +72,10 @@ pub(crate) struct Args {
     pub(crate) signaling_urls: Vec<String>,
     pub(crate) channel_id: String,
     pub(crate) role: Role,
+    pub(crate) client_id: Option<String>,
+    pub(crate) bundle_id: Option<String>,
+    pub(crate) metadata: Option<String>,
+    pub(crate) signaling_notify_metadata: Option<String>,
     pub(crate) vcs: u32,
     pub(crate) vcs_hatch_rate: f64,
     pub(crate) duration: Option<f64>,
@@ -95,11 +99,15 @@ pub(crate) struct Args {
     pub(crate) data_channels: Option<String>,
     pub(crate) data_channel_signaling: Option<bool>,
     pub(crate) ignore_disconnect_websocket: Option<bool>,
+    pub(crate) disconnect_wait_timeout: Option<f64>,
     pub(crate) simulcast: Option<bool>,
     pub(crate) simulcast_request_rid: Option<String>,
     pub(crate) spotlight: Option<bool>,
     pub(crate) spotlight_focus_rid: Option<String>,
     pub(crate) spotlight_unfocus_rid: Option<String>,
+    pub(crate) insecure: bool,
+    pub(crate) client_cert: Option<String>,
+    pub(crate) client_key: Option<String>,
     pub(crate) http_host: Option<String>,
     pub(crate) http_port: Option<u16>,
 }
@@ -183,6 +191,27 @@ pub(crate) fn parse_args() -> Result<Args> {
         .example("sendonly")
         .take(&mut args)
         .then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let client_id: Option<String> = noargs::opt("sora-client-id")
+        .doc("Sora のクライアント ID")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let bundle_id: Option<String> = noargs::opt("sora-bundle-id")
+        .doc("Sora のバンドル ID")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let metadata: Option<String> = noargs::opt("sora-metadata")
+        .doc("Sora の connect メッセージに含めるメタデータ (JSON)")
+        .example(r#"{"key":"value"}"#)
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let signaling_notify_metadata: Option<String> = noargs::opt("sora-signaling-notify-metadata")
+        .doc("Sora のシグナリング通知メタデータ (JSON)")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let vcs: u32 = noargs::opt("vcs")
         .doc("仮想クライアント数 (1-1000, デフォルト: 1)")
@@ -346,6 +375,11 @@ pub(crate) fn parse_args() -> Result<Args> {
             _ => Err("sora-ignore-disconnect-websocket は true または false で指定してください"),
         })?;
 
+    let disconnect_wait_timeout: Option<f64> = noargs::opt("sora-disconnect-wait-timeout")
+        .doc("切断待ちタイムアウト (秒, デフォルト: 5.0)")
+        .take(&mut args)
+        .present_and_then(|o| o.value().parse::<f64>())?;
+
     let simulcast: Option<bool> = noargs::opt("sora-simulcast")
         .doc("サイマルキャストの有効/無効 (true/false)")
         .take(&mut args)
@@ -378,6 +412,33 @@ pub(crate) fn parse_args() -> Result<Args> {
         .doc("スポットライトでアンフォーカス時の rid (r0/r1/r2)")
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let insecure = noargs::flag("insecure")
+        .doc("TLS 証明書の検証をスキップする")
+        .take(&mut args)
+        .is_present();
+
+    let client_cert: Option<String> = noargs::opt("client-cert")
+        .doc("mTLS クライアント証明書ファイルのパス (PEM)")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let path = o.value().to_string();
+            if !std::path::Path::new(&path).exists() {
+                return Err("client-cert: file not found");
+            }
+            Ok(path)
+        })?;
+
+    let client_key: Option<String> = noargs::opt("client-key")
+        .doc("mTLS クライアント秘密鍵ファイルのパス (PEM)")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let path = o.value().to_string();
+            if !std::path::Path::new(&path).exists() {
+                return Err("client-key: file not found");
+            }
+            Ok(path)
+        })?;
 
     let http_host: Option<String> = noargs::opt("http-host")
         .doc("HTTP サーバーのホストアドレス")
@@ -450,6 +511,12 @@ pub(crate) fn parse_args() -> Result<Args> {
             ErrorMessage::new("--http-host と --http-port は両方指定する必要があります").into(),
         );
     }
+    if client_cert.is_some() != client_key.is_some() {
+        return Err(ErrorMessage::new(
+            "--client-cert と --client-key は両方指定する必要があります",
+        )
+        .into());
+    }
 
     if input_mp4.is_some() && video_codec_type.is_none() {
         return Err(ErrorMessage::new(
@@ -468,6 +535,10 @@ pub(crate) fn parse_args() -> Result<Args> {
         signaling_urls,
         channel_id,
         role,
+        client_id,
+        bundle_id,
+        metadata,
+        signaling_notify_metadata,
         vcs,
         vcs_hatch_rate,
         duration,
@@ -491,11 +562,15 @@ pub(crate) fn parse_args() -> Result<Args> {
         data_channels,
         data_channel_signaling,
         ignore_disconnect_websocket,
+        disconnect_wait_timeout,
         simulcast,
         simulcast_request_rid,
         spotlight,
         spotlight_focus_rid,
         spotlight_unfocus_rid,
+        insecure,
+        client_cert,
+        client_key,
         http_host,
         http_port,
     })
