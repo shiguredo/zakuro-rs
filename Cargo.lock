@@ -3368,11 +3368,11 @@ dependencies = [
 name = "zakuro"
 version = "2026.1.0"
 dependencies = [
+ "aws-lc-rs",
  "duckdb",
  "noargs",
  "nojson",
  "raden",
- "rand 0.9.2",
  "shiguredo_http11",
  "shiguredo_openh264",
  "shiguredo_video_device",

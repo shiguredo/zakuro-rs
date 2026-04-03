@@ -66,11 +66,11 @@ fn build_reconnect_scenario() -> Scenario {
 }
 
 /// min..=max の範囲でランダムな値を返す
-///
-/// ThreadRng は Send ではないので await をまたがない同期関数として分離する。
 fn random_range(min: u64, max: u64) -> u64 {
-    use rand::Rng;
-    rand::rng().random_range(min..=max)
+    let range = max - min + 1;
+    let mut buf = [0u8; 8];
+    aws_lc_rs::rand::fill(&mut buf).expect("random fill failed");
+    min + u64::from_ne_bytes(buf) % range
 }
 
 /// シナリオプレイヤー
@@ -102,7 +102,6 @@ impl ScenarioPlayer {
 
             match op {
                 ScenarioOp::Sleep { min_ms, max_ms } => {
-                    // ThreadRng は Send ではないので await をまたがないようにする
                     let ms = random_range(*min_ms, *max_ms);
                     tokio::select! {
                         biased;
