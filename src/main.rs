@@ -4,7 +4,6 @@ mod error;
 mod fake_video_capturer;
 mod http_server;
 mod json_rpc;
-mod mp4_video_capturer;
 mod nop_video_decoder;
 mod openh264_video_codec;
 mod stats;
@@ -14,16 +13,16 @@ mod y4m_reader;
 
 use std::time::Duration;
 
-use shiguredo_webrtc::{log, rtc_log_info, rtc_log_warning};
-use sora_sdk::{AdmConfig, SoraClientContext, SoraClientContextConfig, VideoCodecPreference};
+use shiguredo_webrtc::{VideoCodecType, log, rtc_log_info, rtc_log_warning};
+use sora_sdk::{
+    AdmConfig, Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer,
+    SoraClientContext, SoraClientContextConfig, VideoCodecPreference,
+};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{ErrorMessage, Result};
 use crate::fake_video_capturer::{FakeVideoCapturer, FakeVideoCapturerConfig};
-use crate::mp4_video_capturer::{
-    Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer,
-};
 use crate::stats::StatsCollector;
 use crate::video_device_capturer::{VideoDeviceCapturer, VideoDeviceCapturerConfig};
 use crate::virtual_client::VirtualClientConfig;
@@ -112,11 +111,11 @@ async fn main() -> Result<()> {
     );
 
     // MP4 パススルー時はコーデック能力をカスタマイズする
-    let mp4_sample_slot = if let Some(ref mp4_path) = args.input_mp4 {
-        let reader = Mp4SampleReader::new(mp4_path)?;
-        let expected_codec =
-            mp4_video_capturer::parse_video_codec_type(args.video_codec_type.as_deref().unwrap())
-                .ok_or_else(|| ErrorMessage::new("--sora-video-codec-type の値が不正です"))?;
+    let mp4_reader = if let Some(ref mp4_path) = args.input_mp4 {
+        let reader = Mp4SampleReader::new(mp4_path)
+            .map_err(|e| ErrorMessage::new(format!("Failed to read MP4 file: {e}")))?;
+        let expected_codec = parse_video_codec_type(args.video_codec_type.as_deref().unwrap())
+            .ok_or_else(|| ErrorMessage::new("--sora-video-codec-type の値が不正です"))?;
         if reader.codec_type() != expected_codec {
             return Err(ErrorMessage::new(format!(
                 "MP4 ファイルのコーデック ({:?}) と --sora-video-codec-type ({:?}) が一致しません",
@@ -125,8 +124,7 @@ async fn main() -> Result<()> {
             ))
             .into());
         }
-        let slot = mp4_video_capturer::new_sample_slot();
-        Some((reader, slot))
+        Some(reader)
     } else {
         None
     };
@@ -145,14 +143,9 @@ async fn main() -> Result<()> {
         };
 
         // MP4 パススルーコーデック能力の登録
-        if let Some((_, ref slot)) = mp4_sample_slot {
-            let codec_type = mp4_video_capturer::parse_video_codec_type(
-                args.video_codec_type.as_deref().unwrap(),
-            )
-            .unwrap();
-            let mp4_capability: Box<dyn sora_sdk::VideoCodecCapability> = Box::new(
-                Mp4PassthroughVideoCodecCapability::new(codec_type, slot.clone()),
-            );
+        if let Some(ref reader) = mp4_reader {
+            let mp4_capability: Box<dyn sora_sdk::VideoCodecCapability> =
+                Box::new(Mp4PassthroughVideoCodecCapability::new(reader.codec_type()));
             let mp4_preference = VideoCodecPreference::new_from_capability(mp4_capability.as_ref());
             config.video_codec_preference.merge(&mp4_preference);
             config.video_codec_capabilities.push(mp4_capability);
@@ -189,10 +182,10 @@ async fn main() -> Result<()> {
     let mut _device_capturer = None;
     let mut _mp4_capturer = None;
     let video_source = if !args.no_video_device && args.role.wants_send() {
-        if let Some((reader, slot)) = mp4_sample_slot {
+        if let Some(reader) = mp4_reader {
             // MP4 パススルーキャプチャ
-            let mut capturer = Mp4VideoCapturer::new();
-            capturer.start(reader, slot)?;
+            let capturer = Mp4VideoCapturer::new(reader)
+                .map_err(|e| ErrorMessage::new(format!("Failed to start MP4 capturer: {e}")))?;
             let source = capturer.video_source();
             _mp4_capturer = Some(capturer);
             Some(source)
@@ -333,4 +326,16 @@ async fn main() -> Result<()> {
     rtc_log_info!("zakuro: 全ての仮想クライアントが終了しました");
 
     Ok(())
+}
+
+/// --sora-video-codec-type の文字列を VideoCodecType に変換する
+fn parse_video_codec_type(s: &str) -> Option<VideoCodecType> {
+    match s {
+        "vp8" => Some(VideoCodecType::Vp8),
+        "vp9" => Some(VideoCodecType::Vp9),
+        "av1" => Some(VideoCodecType::Av1),
+        "h264" => Some(VideoCodecType::H264),
+        "h265" => Some(VideoCodecType::H265),
+        _ => None,
+    }
 }
