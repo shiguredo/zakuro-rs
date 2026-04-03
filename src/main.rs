@@ -1,6 +1,7 @@
 mod args;
 mod data_channel;
 mod error;
+mod fake_audio_capturer;
 mod fake_video_capturer;
 mod http_server;
 mod json_rpc;
@@ -137,11 +138,33 @@ async fn main() -> Result<()> {
         None
     };
 
+    // フェイク音声キャプチャの初期化
+    // 音声有効かつフェイク映像モード時にビープ音連携を行う
+    let use_fake_audio = !args.no_audio_device
+        && args.audio
+        && args.role.wants_send()
+        && args.input_mp4.is_none()
+        && args.video_input_device.is_none();
+    let beep_trigger = if use_fake_audio {
+        Some(fake_audio_capturer::BeepTrigger::new())
+    } else {
+        None
+    };
+    let mut _fake_audio_capturer = None;
+
     let context_config = {
         let mut config = SoraClientContextConfig {
             adm_config: AdmConfig::NoAudioDevice,
             ..Default::default()
         };
+
+        // フェイク音声 ADM の登録
+        if let Some(ref trigger) = beep_trigger {
+            let mut capturer = fake_audio_capturer::FakeAudioCapturer::new(trigger.clone());
+            capturer.start();
+            config.adm_config = AdmConfig::UseExternal(capturer.audio_device_module());
+            _fake_audio_capturer = Some(capturer);
+        }
 
         // MP4 パススルーコーデック能力の登録
         if let Some(ref reader) = mp4_reader {
@@ -215,6 +238,7 @@ async fn main() -> Result<()> {
                     .fake_video_capture
                     .as_ref()
                     .map(std::path::PathBuf::from),
+                beep_trigger: beep_trigger.clone(),
             };
             let mut capturer = FakeVideoCapturer::new(config)?;
             capturer.start()?;
