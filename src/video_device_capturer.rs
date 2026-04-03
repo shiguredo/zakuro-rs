@@ -51,21 +51,53 @@ impl VideoDeviceCapturer {
                     let Some(uv_data) = frame.uv_data else {
                         return;
                     };
-                    shiguredo_webrtc::nv12_to_i420(
+                    let mut buf = I420Buffer::new(frame.width, frame.height);
+                    let sy = buf.stride_y();
+                    let su = buf.stride_u();
+                    let sv = buf.stride_v();
+                    let (y, u, v) = buf.planes_mut();
+                    if shiguredo_webrtc::nv12_to_i420(
                         frame.data,
                         frame.stride,
                         uv_data,
                         frame.stride_uv,
+                        y,
+                        sy,
+                        u,
+                        su,
+                        v,
+                        sv,
                         frame.width,
                         frame.height,
-                    )
+                    ) {
+                        Some(buf)
+                    } else {
+                        None
+                    }
                 }
-                PixelFormat::Yuy2 => shiguredo_webrtc::yuy2_to_i420(
-                    frame.data,
-                    frame.stride,
-                    frame.width,
-                    frame.height,
-                ),
+                PixelFormat::Yuy2 => {
+                    let mut buf = I420Buffer::new(frame.width, frame.height);
+                    let sy = buf.stride_y();
+                    let su = buf.stride_u();
+                    let sv = buf.stride_v();
+                    let (y, u, v) = buf.planes_mut();
+                    if shiguredo_webrtc::yuy2_to_i420(
+                        frame.data,
+                        frame.stride,
+                        y,
+                        sy,
+                        u,
+                        su,
+                        v,
+                        sv,
+                        frame.width,
+                        frame.height,
+                    ) {
+                        Some(buf)
+                    } else {
+                        None
+                    }
+                }
                 PixelFormat::I420 => {
                     let Some(uv_data) = frame.uv_data else {
                         return;
@@ -151,13 +183,14 @@ impl VideoDeviceCapturer {
                     buffer
                 };
 
-            let video_frame = shiguredo_webrtc::VideoFrame::from_i420(
-                &final_buffer,
-                state
-                    .timestamp_aligner
-                    .translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000),
-                0,
-            );
+            let translated_ts = state
+                .timestamp_aligner
+                .translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
+            let vfb = final_buffer.cast_to_video_frame_buffer();
+            let video_frame = shiguredo_webrtc::VideoFrame::builder(&vfb)
+                .set_timestamp_us(translated_ts)
+                .set_rtp_timestamp(0)
+                .build();
             state.source.on_frame(&video_frame);
         })?;
 

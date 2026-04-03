@@ -358,7 +358,11 @@ impl Mp4VideoCapturer {
                             let timestamp_us = shiguredo_webrtc::time_millis() * 1000;
                             let ts = timestamp_aligner
                                 .translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
-                            let frame = VideoFrame::from_i420(&dummy_buffer, ts, 0);
+                            let vfb = dummy_buffer.cast_to_video_frame_buffer();
+                            let frame = VideoFrame::builder(&vfb)
+                                .set_timestamp_us(ts)
+                                .set_rtp_timestamp(0)
+                                .build();
                             source.on_frame(&frame);
 
                             // 次のフレームまで絶対時刻ベースで待機する（ドリフト防止）

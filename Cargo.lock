@@ -2285,15 +2285,15 @@ checksum = "50203212be42844ef00003e05fe57f0b19a80b33d9d35745c48efc01e5d2fb63"
 
 [[package]]
 name = "shiguredo_mp4"
-version = "2026.2.0"
+version = "2026.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "029f44879b590e0b5e50add084b436a7b740e08b2cc4fee662ed93f1cffddc63"
+checksum = "b135058874815f8f13edae644ceedb659f7238fe4a9e2b1bdceecc72dc659b35"
 
 [[package]]
 name = "shiguredo_openh264"
-version = "2026.1.0-canary.5"
+version = "2026.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9b630b0ee5d116b1092ebdebe3b608a8e7acf0c5461c2998a52a8d3339973c8"
+checksum = "08588733ad03a7110b7132a250d560b496be9a8616ef2e2833fdcccee88f88d0"
 dependencies = [
  "bindgen",
  "shiguredo_toml",
@@ -2307,9 +2307,9 @@ checksum = "f501556feebae970519ffa4afc5edb078c8eb16da4a0a2fbe803d75c0e34a79b"
 
 [[package]]
 name = "shiguredo_video_device"
-version = "2026.1.0-canary.3"
+version = "2026.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08f36c1e6940b6f72753d0cd869af28603a121c4f9666074acc396531b8c66a4"
+checksum = "79fc6bed758f11d7413d108650edf83aa8345de7f578eca7fca4750add71f4f2"
 dependencies = [
  "bindgen",
  "cc",
@@ -2319,9 +2319,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_webrtc"
-version = "0.146.2-canary.5"
+version = "0.146.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62798ad0c47d528709f6b231165b3da4b289460705daebb8d55d23e2d1fbba68"
+checksum = "bbf2a9ac93fa60dfebac3951a2dbc57a900cb817550ca3e4d1c6c9bb3a73f09a"
 dependencies = [
  "bindgen",
  "nojson",
@@ -2393,9 +2393,9 @@ dependencies = [
 
 [[package]]
 name = "sora_sdk"
-version = "2026.1.0-canary.4"
+version = "2026.1.0-canary.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bff5c32c56aa62727d983b3f42d58aa3ef498115be4ed2ca99689d96b3a7c7a"
+checksum = "9edcbd0bc5fecd0131bdf66e89182b410ba88848aa4b1b992497490a36b49da2"
 dependencies = [
  "aws-lc-rs",
  "flate2",
@@ -2405,6 +2405,7 @@ dependencies = [
  "rustls-platform-verifier",
  "rustls-webpki",
  "shiguredo_http11",
+ "shiguredo_mp4",
  "shiguredo_webrtc",
  "shiguredo_websocket",
  "tokio",

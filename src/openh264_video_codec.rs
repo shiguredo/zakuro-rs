@@ -102,17 +102,18 @@ impl Openh264Encoder {
         frame: &VideoFrameRef<'_>,
     ) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         let buffer = frame.buffer();
-        let width = buffer.width() as usize;
-        let height = buffer.height() as usize;
-        let stride_y = buffer.stride_y() as usize;
-        let stride_u = buffer.stride_u() as usize;
-        let stride_v = buffer.stride_v() as usize;
+        let i420 = buffer.as_i420()?;
+        let width = i420.width() as usize;
+        let height = i420.height() as usize;
+        let stride_y = i420.stride_y() as usize;
+        let stride_u = i420.stride_u() as usize;
+        let stride_v = i420.stride_v() as usize;
         let uv_height = height.div_ceil(2);
         let uv_width = width.div_ceil(2);
 
-        let y_data = buffer.y_data();
-        let u_data = buffer.u_data();
-        let v_data = buffer.v_data();
+        let y_data = i420.y_data();
+        let u_data = i420.u_data();
+        let v_data = i420.v_data();
 
         if stride_y == width && stride_u == uv_width && stride_v == uv_width {
             // ストライドが幅と一致する場合はそのままコピー

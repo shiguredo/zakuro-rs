@@ -289,10 +289,27 @@ fn tick_sandstorm(
         *pixel = 0xFF00_0000 | (gray as u32) << 16 | (gray as u32) << 8 | (gray as u32);
     }
 
-    let Some(buffer) = shiguredo_webrtc::abgr_to_i420(u32_slice_as_u8_slice(buf), width, height)
-    else {
-        return;
-    };
+    let mut buffer = shiguredo_webrtc::I420Buffer::new(width, height);
+    let stride_y = buffer.stride_y();
+    let stride_u = buffer.stride_u();
+    let stride_v = buffer.stride_v();
+    {
+        let (y, u, v) = buffer.planes_mut();
+        if !shiguredo_webrtc::abgr_to_i420(
+            u32_slice_as_u8_slice(buf),
+            width * 4,
+            y,
+            stride_y,
+            u,
+            stride_u,
+            v,
+            stride_v,
+            width,
+            height,
+        ) {
+            return;
+        }
+    }
 
     let timestamp_us = elapsed_ms * 1000;
     send_frame(
@@ -340,9 +357,27 @@ fn tick_raden(
 
     let pixel_data = image.data();
 
-    let Some(buffer) = shiguredo_webrtc::abgr_to_i420(pixel_data, width, height) else {
-        return;
-    };
+    let mut buffer = shiguredo_webrtc::I420Buffer::new(width, height);
+    let stride_y = buffer.stride_y();
+    let stride_u = buffer.stride_u();
+    let stride_v = buffer.stride_v();
+    {
+        let (y, u, v) = buffer.planes_mut();
+        if !shiguredo_webrtc::abgr_to_i420(
+            pixel_data,
+            width * 4,
+            y,
+            stride_y,
+            u,
+            stride_u,
+            v,
+            stride_v,
+            width,
+            height,
+        ) {
+            return;
+        }
+    }
 
     let timestamp_us = elapsed_ms * 1000;
     send_frame(
@@ -364,20 +399,22 @@ fn send_frame(
     timestamp_us: i64,
 ) {
     let AdaptFrameResult { applied, size } = source.adapt_frame(width, height, timestamp_us);
+    let translated_ts =
+        timestamp_aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
     let frame = if applied && (size.adapted_width != width || size.adapted_height != height) {
         let mut scaled = shiguredo_webrtc::I420Buffer::new(size.adapted_width, size.adapted_height);
         scaled.scale_from(buffer);
-        shiguredo_webrtc::VideoFrame::from_i420(
-            &scaled,
-            timestamp_aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000),
-            0,
-        )
+        let vfb = scaled.cast_to_video_frame_buffer();
+        shiguredo_webrtc::VideoFrame::builder(&vfb)
+            .set_timestamp_us(translated_ts)
+            .set_rtp_timestamp(0)
+            .build()
     } else {
-        shiguredo_webrtc::VideoFrame::from_i420(
-            buffer,
-            timestamp_aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000),
-            0,
-        )
+        let vfb = buffer.cast_to_video_frame_buffer();
+        shiguredo_webrtc::VideoFrame::builder(&vfb)
+            .set_timestamp_us(translated_ts)
+            .set_rtp_timestamp(0)
+            .build()
     };
     source.on_frame(&frame);
 }
