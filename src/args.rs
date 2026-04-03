@@ -3,6 +3,7 @@ use shiguredo_webrtc::rtc_log_info;
 use sora_sdk::Role;
 
 use crate::error::{ErrorMessage, Result};
+use crate::scenario::ScenarioType;
 
 /// JSONC 設定ファイルを読み込み、CLI 引数形式のベクターに変換する
 fn load_jsonc_config(path: &str) -> Result<Vec<String>> {
@@ -108,6 +109,7 @@ pub(crate) struct Args {
     pub(crate) insecure: bool,
     pub(crate) client_cert: Option<String>,
     pub(crate) client_key: Option<String>,
+    pub(crate) scenario: Option<ScenarioType>,
     pub(crate) http_host: Option<String>,
     pub(crate) http_port: Option<u16>,
 }
@@ -413,6 +415,13 @@ pub(crate) fn parse_args() -> Result<Args> {
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
+    let scenario: Option<ScenarioType> = noargs::opt("scenario")
+        .doc("シナリオ種別 (reconnect)")
+        .take(&mut args)
+        .present_and_then(|o| {
+            ScenarioType::parse(o.value()).ok_or("scenario は reconnect で指定してください")
+        })?;
+
     let insecure = noargs::flag("insecure")
         .doc("TLS 証明書の検証をスキップする")
         .take(&mut args)
@@ -571,6 +580,7 @@ pub(crate) fn parse_args() -> Result<Args> {
         insecure,
         client_cert,
         client_key,
+        scenario,
         http_host,
         http_port,
     })

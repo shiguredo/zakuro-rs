@@ -3372,6 +3372,7 @@ dependencies = [
  "noargs",
  "nojson",
  "raden",
+ "rand 0.9.2",
  "shiguredo_http11",
  "shiguredo_openh264",
  "shiguredo_video_device",

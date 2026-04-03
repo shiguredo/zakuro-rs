@@ -6,6 +6,7 @@ mod http_server;
 mod json_rpc;
 mod nop_video_decoder;
 mod openh264_video_codec;
+mod scenario;
 mod stats;
 mod video_device_capturer;
 mod virtual_client;
@@ -298,6 +299,7 @@ async fn main() -> Result<()> {
         insecure: args.insecure,
         client_cert: client_cert_pem,
         client_key: client_key_pem,
+        scenario: args.scenario.map(scenario::build_scenario),
     };
 
     let mut clients = JoinSet::new();

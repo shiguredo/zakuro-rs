@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::data_channel::MessageChannel;
+use crate::scenario::{Scenario, ScenarioPlayer};
 use crate::stats::StatsEvent;
 
 #[derive(Clone)]
@@ -37,11 +38,13 @@ pub(crate) struct VirtualClientConfig {
     pub(crate) insecure: bool,
     pub(crate) client_cert: Option<String>,
     pub(crate) client_key: Option<String>,
+    pub(crate) scenario: Option<Scenario>,
 }
 
 enum DisconnectReason {
     Shutdown,
     DurationExpired,
+    ScenarioDisconnect,
     Unexpected(sora_sdk::Result<()>),
 }
 
@@ -54,6 +57,7 @@ pub(crate) async fn run(
     stats_tx: mpsc::Sender<StatsEvent>,
 ) {
     let mut retry_count: u32 = 0;
+    let mut scenario_player = config.scenario.clone().map(ScenarioPlayer::new);
 
     loop {
         let connection_token = token.child_token();
@@ -97,18 +101,27 @@ pub(crate) async fn run(
 
         let mut run_future = Box::pin(client.run());
 
-        let reason = tokio::select! {
-            biased;
-            _ = token.cancelled() => DisconnectReason::Shutdown,
-            _ = duration_timer(config.duration) => DisconnectReason::DurationExpired,
-            result = &mut run_future => DisconnectReason::Unexpected(result),
+        let reason = if let Some(ref mut player) = scenario_player {
+            // シナリオモード: シナリオの Disconnect 操作まで実行する
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => DisconnectReason::Shutdown,
+                _ = player.run_until_disconnect(&token) => DisconnectReason::ScenarioDisconnect,
+                result = &mut run_future => DisconnectReason::Unexpected(result),
+            }
+        } else {
+            // 通常モード: duration タイマーで切断する
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => DisconnectReason::Shutdown,
+                _ = duration_timer(config.duration) => DisconnectReason::DurationExpired,
+                result = &mut run_future => DisconnectReason::Unexpected(result),
+            }
         };
 
         match reason {
             DisconnectReason::Shutdown => {
                 rtc_log_info!("[vc-{}] シャットダウンします", id);
-                // run_future をポーリングしながら disconnect を送信する
-                // (client.run() が disconnect コマンドを処理するため)
                 tokio::select! {
                     _ = handle.disconnect() => {}
                     _ = &mut run_future => {}
@@ -136,6 +149,18 @@ pub(crate) async fn run(
                     }
                     _ => break,
                 }
+            }
+            DisconnectReason::ScenarioDisconnect => {
+                rtc_log_info!("[vc-{}] シナリオにより切断します", id);
+                tokio::select! {
+                    _ = handle.disconnect() => {}
+                    _ = &mut run_future => {}
+                }
+                connection_token.cancel();
+                let _ = stats_tx.send(StatsEvent::Disconnected { id }).await;
+                retry_count = 0;
+                // シナリオは無限ループなので即座に再接続する
+                continue;
             }
             DisconnectReason::Unexpected(result) => {
                 connection_token.cancel();

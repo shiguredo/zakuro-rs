@@ -239,7 +239,7 @@ POST /rpc          → JSON-RPC 2.0
 
 ### シナリオ
 
-- [ ] ScenarioPlayer (Sleep, Disconnect, Reconnect, Exit)
+- [x] ScenarioPlayer (Sleep, Disconnect, Reconnect)
 - [x] DataChannel メッセージ自動送信 (ZAKURO ヘッダ付き)
 - [x] instance-hatch-rate (`--vcs-hatch-rate`)
 
