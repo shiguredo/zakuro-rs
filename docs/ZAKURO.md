@@ -177,7 +177,24 @@ POST /rpc          → JSON-RPC 2.0
 --client-key <FILE>                 mTLS 秘密鍵
 ```
 
-## zakuro-rs 実装 TODO
+## zakuro-rs 実装状況
+
+### 主要な依存ライブラリ
+
+| ライブラリ | バージョン | 用途 |
+|-----------|-----------|------|
+| shiguredo_webrtc | 0.150 | libwebrtc バインディング |
+| sora_sdk | 2026.1.0-canary.11 | Sora Rust SDK |
+| shiguredo_http11 | 2026.6 | HTTP/1.1 サーバー |
+| shiguredo_openh264 | 2026.1 | OpenH264 バインディング |
+| shiguredo_video_device | 2026.1 | クロスプラットフォーム ビデオデバイス |
+| raden | 2026.2.0-canary.0 | 2D ベクターグラフィックス (フェイク映像生成) |
+| nojson | 0.3 | JSON / JSONC パース |
+| noargs | 0.4 | CLI 引数パース |
+| aws-lc-rs | 1.17 | 暗号ライブラリ (乱数生成) |
+| tokio | 1.52 | 非同期ランタイム |
+| tokio-util | 0.7 | CancellationToken |
+| duckdb | 1.10504 | DuckDB バインディング (将来の統計記録用) |
 
 ### コア機能
 
@@ -198,12 +215,14 @@ POST /rpc          → JSON-RPC 2.0
 - [x] フレームレート指定 (1-60)
 - [x] Y4M 動画ファイル読込 (`--fake-video-capture`)
 - [x] 実デバイスキャプチャ (`--video-input-device`)
+- [x] MP4 パススルー送信 (`--input-mp4`)
 - [ ] 解像度固定モード (`--fixed-resolution`)
 
 ### 音声
 
 - [x] 音声無効化 (`--no-audio-device`)
-- [ ] フェイク音声自動生成 (BIP/BOP/HUM/ノイズ, 48kHz)
+- [x] フェイク音声 (ビープ音のみ、映像のパイチャート一周に同期して 1000Hz/100ms を生成)
+- [ ] フェイク音声フル実装 (BIP/BOP/HUM/ノイズ自動生成)
 - [ ] WAV 音声ファイル読込 (`--fake-audio-capture`)
 
 ### コーデック
@@ -222,14 +241,15 @@ POST /rpc          → JSON-RPC 2.0
 - [x] ロール (sendonly/recvonly/sendrecv)
 - [x] メタデータ (`--sora-metadata`)
 - [x] シグナリング通知メタデータ (`--sora-signaling-notify-metadata`)
-- [x] DataChannel シグナリング
+- [x] DataChannel シグナリング (`--sora-data-channel-signaling`)
+- [x] WebSocket 切断無視 (`--sora-ignore-disconnect-websocket`)
 - [x] 切断待ちタイムアウト (`--sora-disconnect-wait-timeout`)
 - [x] mTLS (`--client-cert`, `--client-key`)
 - [x] TLS 証明書検証スキップ (`--insecure`)
 - [x] サイマルキャスト (`--sora-simulcast`, `--sora-simulcast-request-rid`)
 - [x] スポットライト (`--sora-spotlight`, `--sora-spotlight-focus-rid`, `--sora-spotlight-unfocus-rid`)
-- [ ] degradation-preference
 - [x] DataChannel メッセージング (`--sora-data-channels`)
+- [ ] degradation-preference
 
 ### HTTP API
 
@@ -239,16 +259,22 @@ POST /rpc          → JSON-RPC 2.0
 
 ### シナリオ
 
-- [x] ScenarioPlayer (Sleep, Disconnect, Reconnect)
+- [x] ScenarioPlayer (Sleep, Disconnect 操作)
+- [x] reconnect シナリオ (9 回のランダム Sleep 後に切断 → 再接続ループ)
 - [x] DataChannel メッセージ自動送信 (ZAKURO ヘッダ付き)
-- [x] instance-hatch-rate (`--vcs-hatch-rate`)
+- [x] vcs-hatch-rate (段階的起動)
+- [ ] シナリオ操作 PlayVoiceNumberClient (音声未対応のため)
+- [ ] シナリオ操作 SendDataChannelMessage
+- [ ] シナリオ操作 Exit
+- [ ] instance-hatch-rate (zakuro-rs はシングルプロセス前提)
 
 ### その他
 
 - [x] JSONC 設定ファイル (`--config`)
-- [ ] ログレベル制御 (`--log-level`)
 - [x] NopVideoDecoder (受信映像廃棄)
+- [ ] ログレベル制御 (`--log-level`)
 - [ ] 埋め込みリソース (フォント・音声)
+
 ### sora-rust-sdk 未対応のため未実装の機能
 
 - スポットライト数指定 (`--sora-spotlight-number`)
@@ -272,6 +298,9 @@ POST /rpc          → JSON-RPC 2.0
 | 描画 | Blend2D | Raden |
 | 引数パース | CLI11 | noargs |
 | JSON | Boost.JSON | nojson |
+| HTTP | 自前実装 | shiguredo_http11 |
+| 暗号 / 乱数 | OpenSSL / std | aws-lc-rs |
 | シグナル処理 | SIGINT/SIGTERM | tokio::signal (Ctrl+C) |
 | 統計通知 | コールバック | mpsc + watch チャネル |
 | シャットダウン | io_context 停止 | CancellationToken |
+| インスタンス起動 | instance-hatch-rate でマルチプロセス | シングルプロセス内の vcs-hatch-rate のみ |
