@@ -1,14 +1,13 @@
 [package]
 name = "zakuro"
-version = "2026.1.0"
+version = "2026.0.0"
 edition = "2024"
-rust-version = "1.94"
-authors = ["Shiguredo Inc."]
-license = "Apache-2.0"
+rust-version = "1.96"
 description = "Recording Composition Tool Hisui"
+readme = "README.md"
 homepage = "https://github.com/shiguredo/hisui"
 repository = "https://github.com/shiguredo/hisui"
-readme = "README.md"
+license = "Apache-2.0"
 publish = false
 
 [[bin]]
@@ -16,12 +15,30 @@ name = "zakuro"
 path = "src/main.rs"
 
 [dependencies]
+# 暗号ライブラリ (乱数生成に利用)
+aws-lc-rs = "1.17"
+# DuckDB バインディング (将来の統計記録用)
+duckdb = "1.10504"
+# CLI 引数パース
 noargs = "0.4"
+# JSON パース / 生成
 nojson = "0.3"
-sora_sdk = "2026.1.0-canary.5"
-shiguredo_webrtc = "0.146.3"
-raden = { version = "2026.1.0-canary.5" }
-tokio = { version = "1", features = [
+# 2D ベクターグラフィックス (フェイク映像生成)
+raden = "2026.2.0-canary.0"
+# HTTP/1.1 サーバー
+shiguredo_http11 = "2026.6"
+# OpenH264 バインディング (H.264 エンコード)
+shiguredo_openh264 = "2026.1"
+# クロスプラットフォーム ビデオデバイス
+shiguredo_video_device = "2026.1"
+# libwebrtc バインディング
+shiguredo_webrtc = "0.150"
+# Sora Rust SDK
+sora_sdk = "2026.1.0-canary.11"
+# 非同期ランタイム
+tokio = {
+  version = "1.52",
+  features = [
     "io-util",
     "macros",
     "net",
@@ -29,10 +46,7 @@ tokio = { version = "1", features = [
     "signal",
     "sync",
     "time",
-] }
+  ]
+}
+# tokio ユーティリティ (CancellationToken)
 tokio-util = "0.7"
-shiguredo_video_device = "2026.1"
-shiguredo_http11 = "2026.1"
-shiguredo_openh264 = "2026.1"
-aws-lc-rs = "1"
-duckdb = "1.10501.0"

@@ -1,14 +1,13 @@
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use shiguredo_openh264::{EncodeOptions, EncoderConfig, FrameType, Openh264Library};
 use shiguredo_webrtc::{
-    CodecSpecificInfo, EncodedImage, EncodedImageBuffer, H264PacketizationMode, SdpVideoFormat,
-    VideoCodecStatus, VideoCodecType, VideoDecoderHandler, VideoEncoderEncodedImageCallbackPtr,
-    VideoEncoderEncodedImageCallbackRef, VideoEncoderEncoderInfo, VideoEncoderHandler,
-    VideoEncoderRateControlParametersRef, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    rtc_log_info, rtc_log_warning,
+    CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EnvironmentRef, H264PacketizationMode,
+    SdpVideoFormat, SdpVideoFormatRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
+    VideoEncoder, VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
+    VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
+    VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef, rtc_log_info, rtc_log_warning,
 };
 use sora_sdk::{CodecDirection, VideoCodecCapability, VideoCodecImplementation};
 
@@ -301,39 +300,29 @@ impl VideoCodecCapability for Openh264VideoCodecCapability {
         VideoCodecImplementation::new("openh264", "OpenH264 Software Codec")
     }
 
-    fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
-        codec_type == VideoCodecType::H264
-            && matches!(direction, CodecDirection::Encoder | CodecDirection::Decoder)
-    }
-
-    fn resolve_sdp_format(
-        &self,
-        direction: CodecDirection,
-        codec_type: VideoCodecType,
-        _parameters: &HashMap<String, String>,
-        _scalability_mode: Option<&str>,
-    ) -> Option<SdpVideoFormat> {
-        if codec_type != VideoCodecType::H264 {
-            return None;
-        }
-        if matches!(direction, CodecDirection::Encoder | CodecDirection::Decoder) {
-            Some(SdpVideoFormat::new("H264"))
-        } else {
-            None
+    fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
+        // H.264 のエンコーダのみサポートする (デコーダは将来対応)
+        match direction {
+            CodecDirection::Encoder => vec![SdpVideoFormat::new("H264")],
+            CodecDirection::Decoder => Vec::new(),
         }
     }
 
     fn create_video_encoder(
         &self,
-        _format: &SdpVideoFormat,
-    ) -> Option<Box<dyn VideoEncoderHandler>> {
-        Some(Box::new(Openh264Encoder::new((*self.lib).clone())))
+        _env: EnvironmentRef<'_>,
+        _format: SdpVideoFormatRef<'_>,
+    ) -> Option<VideoEncoder> {
+        Some(VideoEncoder::new_with_handler(Box::new(
+            Openh264Encoder::new((*self.lib).clone()),
+        )))
     }
 
     fn create_video_decoder(
         &self,
-        _format: &SdpVideoFormat,
-    ) -> Option<Box<dyn VideoDecoderHandler>> {
+        _env: EnvironmentRef<'_>,
+        _format: SdpVideoFormatRef<'_>,
+    ) -> Option<VideoDecoder> {
         // デコーダは将来対応
         None
     }

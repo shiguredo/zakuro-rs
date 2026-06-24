@@ -31,13 +31,19 @@ impl HttpHandler for DefaultHandler {
         match (request.method.as_str(), request.uri.as_str()) {
             // ヘルスチェック
             ("GET", "/.ok") => Response::new(200, "OK")
+                .expect("static response 200 should not fail")
                 .header("Content-Length", "0")
-                .header("Connection", "close"),
+                .expect("static header should not fail")
+                .header("Connection", "close")
+                .expect("static header should not fail"),
             // JSON-RPC 2.0
             ("POST", "/rpc") => crate::json_rpc::handle_rpc(request),
             _ => Response::new(404, "Not Found")
+                .expect("static response 404 should not fail")
                 .header("Content-Length", "0")
-                .header("Connection", "close"),
+                .expect("static header should not fail")
+                .header("Connection", "close")
+                .expect("static header should not fail"),
         }
     }
 }
@@ -116,10 +122,10 @@ async fn handle_connection(
 
         let mut decoder = RequestDecoder::new();
         if decoder.feed(&buf[..n]).is_err() {
-            let response = Response::new(400, "Bad Request")
-                .header("Content-Length", "0")
-                .header("Connection", "close");
-            stream.write_all(&response.encode()).await?;
+            let response = bad_request_response();
+            stream
+                .write_all(&response.encode().expect("response encode should not fail"))
+                .await?;
             break;
         }
 
@@ -138,18 +144,18 @@ async fn handle_connection(
                         return Ok(());
                     }
                     if decoder.feed(&buf[..n]).is_err() {
-                        let response = Response::new(400, "Bad Request")
-                            .header("Content-Length", "0")
-                            .header("Connection", "close");
-                        stream.write_all(&response.encode()).await?;
+                        let response = bad_request_response();
+                        stream
+                            .write_all(&response.encode().expect("response encode should not fail"))
+                            .await?;
                         return Ok(());
                     }
                 }
                 Err(_) => {
-                    let response = Response::new(400, "Bad Request")
-                        .header("Content-Length", "0")
-                        .header("Connection", "close");
-                    stream.write_all(&response.encode()).await?;
+                    let response = bad_request_response();
+                    stream
+                        .write_all(&response.encode().expect("response encode should not fail"))
+                        .await?;
                     return Ok(());
                 }
             }
@@ -158,13 +164,15 @@ async fn handle_connection(
         let keep_alive = request.is_keep_alive();
 
         let http_request = HttpRequest {
-            method: request.method,
-            uri: request.uri,
-            body: request.body,
+            method: request.method().to_string(),
+            uri: request.uri().to_string(),
+            body: request.body_bytes().map(|b| b.to_vec()).unwrap_or_default(),
         };
 
         let response = handler.handle(&http_request);
-        stream.write_all(&response.encode()).await?;
+        stream
+            .write_all(&response.encode().expect("response encode should not fail"))
+            .await?;
 
         if !keep_alive {
             break;
@@ -172,4 +180,14 @@ async fn handle_connection(
     }
 
     Ok(())
+}
+
+/// 400 Bad Request レスポンスを生成する
+fn bad_request_response() -> Response {
+    Response::new(400, "Bad Request")
+        .expect("static response 400 should not fail")
+        .header("Content-Length", "0")
+        .expect("static header should not fail")
+        .header("Connection", "close")
+        .expect("static header should not fail")
 }

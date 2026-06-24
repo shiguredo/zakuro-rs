@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use shiguredo_webrtc::{VideoTrackSource, rtc_log_info, rtc_log_warning};
-use sora_sdk::{ConnectDataChannel, JsonString, Role, SoraClient, SoraClientContext};
+use sora_sdk::{ConnectDataChannel, JsonString, Role, SoraConnection, SoraConnectionContext};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -50,7 +50,7 @@ enum DisconnectReason {
 
 pub(crate) async fn run(
     id: u32,
-    context: Arc<SoraClientContext>,
+    context: Arc<SoraConnectionContext>,
     video_source: Option<VideoTrackSource>,
     config: VirtualClientConfig,
     token: CancellationToken,
@@ -207,11 +207,11 @@ async fn duration_timer(duration: Option<f64>) {
 }
 
 fn build_client(
-    context: &Arc<SoraClientContext>,
+    context: &Arc<SoraConnectionContext>,
     video_source: &Option<VideoTrackSource>,
     config: &VirtualClientConfig,
-) -> sora_sdk::Result<(sora_sdk::SoraClient, sora_sdk::SoraClientHandle)> {
-    let mut builder = SoraClient::builder(
+) -> sora_sdk::Result<(sora_sdk::SoraConnection, sora_sdk::SoraConnectionHandle)> {
+    let mut builder = SoraConnection::builder(
         context.clone(),
         config.signaling_urls.clone(),
         config.channel_id.clone(),

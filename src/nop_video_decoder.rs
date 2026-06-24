@@ -1,6 +1,7 @@
-use std::collections::HashMap;
-
-use shiguredo_webrtc::{SdpVideoFormat, VideoCodecType, VideoDecoderHandler, VideoEncoderHandler};
+use shiguredo_webrtc::{
+    EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoDecoder, VideoDecoderHandler,
+    VideoEncoder,
+};
 use sora_sdk::{CodecDirection, VideoCodecCapability, VideoCodecImplementation};
 
 /// 受信映像廃棄デコーダ
@@ -21,42 +22,33 @@ impl VideoCodecCapability for NopVideoDecoderCapability {
         VideoCodecImplementation::new("nop", "Nop Video Decoder")
     }
 
-    fn is_supported(&self, direction: CodecDirection, _codec_type: VideoCodecType) -> bool {
-        direction == CodecDirection::Decoder
-    }
-
-    fn resolve_sdp_format(
-        &self,
-        direction: CodecDirection,
-        codec_type: VideoCodecType,
-        _parameters: &HashMap<String, String>,
-        _scalability_mode: Option<&str>,
-    ) -> Option<SdpVideoFormat> {
-        if direction != CodecDirection::Decoder {
-            return None;
+    fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
+        // デコーダのみ全コーデック型をサポートする
+        match direction {
+            CodecDirection::Decoder => vec![
+                SdpVideoFormat::new("VP8"),
+                SdpVideoFormat::new("VP9"),
+                SdpVideoFormat::new("AV1"),
+                SdpVideoFormat::new("H264"),
+                SdpVideoFormat::new("H265"),
+            ],
+            CodecDirection::Encoder => Vec::new(),
         }
-        let name = match codec_type {
-            VideoCodecType::Vp8 => "VP8",
-            VideoCodecType::Vp9 => "VP9",
-            VideoCodecType::Av1 => "AV1",
-            VideoCodecType::H264 => "H264",
-            VideoCodecType::H265 => "H265",
-            _ => return None,
-        };
-        Some(SdpVideoFormat::new(name))
     }
 
     fn create_video_encoder(
         &self,
-        _format: &SdpVideoFormat,
-    ) -> Option<Box<dyn VideoEncoderHandler>> {
+        _env: EnvironmentRef<'_>,
+        _format: SdpVideoFormatRef<'_>,
+    ) -> Option<VideoEncoder> {
         None
     }
 
     fn create_video_decoder(
         &self,
-        _format: &SdpVideoFormat,
-    ) -> Option<Box<dyn VideoDecoderHandler>> {
-        Some(Box::new(NopDecoder))
+        _env: EnvironmentRef<'_>,
+        _format: SdpVideoFormatRef<'_>,
+    ) -> Option<VideoDecoder> {
+        Some(VideoDecoder::new_with_handler(Box::new(NopDecoder)))
     }
 }

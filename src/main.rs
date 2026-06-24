@@ -18,7 +18,7 @@ use std::time::Duration;
 use shiguredo_webrtc::{VideoCodecType, log, rtc_log_info, rtc_log_warning};
 use sora_sdk::{
     AdmConfig, JsonString, Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer,
-    SoraClientContext, SoraClientContextConfig, VideoCodecPreference,
+    SoraConnectionContext, SoraConnectionContextConfig, VideoCodecPreference,
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
     let mut _fake_audio_capturer = None;
 
     let context_config = {
-        let mut config = SoraClientContextConfig {
+        let mut config = SoraConnectionContextConfig {
             adm_config: AdmConfig::NoAudioDevice,
             ..Default::default()
         };
@@ -197,7 +197,7 @@ async fn main() -> Result<()> {
         config
     };
 
-    let context = SoraClientContext::new_with_config(context_config)?;
+    let context = SoraConnectionContext::new_with_config(context_config)?;
 
     let token = CancellationToken::new();
 

@@ -41,8 +41,11 @@ pub(crate) fn handle_rpc(request: &HttpRequest) -> Response {
         None => {
             // Notification: レスポンスを返さない
             return Response::new(204, "No Content")
+                .expect("static response 204 should not fail")
                 .header("Content-Length", "0")
-                .header("Connection", "close");
+                .expect("static header should not fail")
+                .header("Connection", "close")
+                .expect("static header should not fail");
         }
     };
 
@@ -75,8 +78,11 @@ pub(crate) fn handle_rpc(request: &HttpRequest) -> Response {
 fn rpc_success_response(id_json: &str, result: &str) -> Response {
     let body = format!(r#"{{"jsonrpc":"2.0","result":{result},"id":{id_json}}}"#);
     Response::new(200, "OK")
+        .expect("static response 200 should not fail")
         .header("Content-Type", "application/json")
+        .expect("static header should not fail")
         .header("Connection", "close")
+        .expect("static header should not fail")
         .body(body.into_bytes())
 }
 
@@ -86,7 +92,10 @@ fn rpc_error_response(code: i64, message: &str, id_json: &str) -> Response {
         r#"{{"jsonrpc":"2.0","error":{{"code":{code},"message":"{message}"}},"id":{id_json}}}"#
     );
     Response::new(200, "OK")
+        .expect("static response 200 should not fail")
         .header("Content-Type", "application/json")
+        .expect("static header should not fail")
         .header("Connection", "close")
+        .expect("static header should not fail")
         .body(body.into_bytes())
 }

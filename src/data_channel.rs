@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nojson::RawJsonOwned;
 use shiguredo_webrtc::rtc_log_info;
-use sora_sdk::{ConnectDataChannel, SoraClientHandle};
+use sora_sdk::{ConnectDataChannel, SoraConnectionHandle};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{ErrorMessage, Result};
@@ -189,7 +189,7 @@ fn xorshift32(state: &mut u32) -> u32 {
 /// 各チャネルに対して interval_ms ごとに ZAKURO ヘッダ付きメッセージを送信する
 pub(crate) async fn run_messaging(
     id: u32,
-    handle: SoraClientHandle,
+    handle: SoraConnectionHandle,
     channels: Vec<MessageChannel>,
     token: CancellationToken,
 ) {
