@@ -1,15 +1,15 @@
-# WAV 音声ファイル読込機能 (`--fake-audio-capture`) を追加する
+# WAV 音声ファイル読込機能 (`--input-wav`) を追加する
 
 Created: 2026-03-27
 Model: Opus 4.6
 
 ## 概要
 
-`--fake-audio-capture` オプションで WAV ファイルから音声を読み込み、フェイク音声として送信する機能を追加する。
+`--input-wav` オプションで WAV ファイルから音声を読み込み、音声入力として送信する機能を追加する。
 
 ## 根拠
 
-zakuro (C++) では `--fake-audio-capture` で WAV ファイルを指定し、その音声を繰り返し送信できる。特定の音声パターンでの負荷試験や、音声品質の検証に必要。C++ 版との機能互換性を維持するために対応する。
+zakuro (C++) では `--fake-audio-capture` で WAV ファイルを指定し、その音声を繰り返し送信できる。特定の音声パターンでの負荷試験や、音声品質の検証に必要。C++ 版との機能互換性を維持するために対応する。CLI 名称は zakuro-rs の入力ソース系命名規則 (`--input-{形式}`) に合わせて `--input-wav` とする。
 
 ## 対応内容
 
@@ -21,7 +21,7 @@ zakuro (C++) では `--fake-audio-capture` で WAV ファイルを指定し、�
 
 ### 2. コマンドライン引数
 
-- `--fake-audio-capture <FILE>` オプションを追加する
+- `--input-wav <FILE>` オプションを追加する
 
 ### 3. AudioSource との連携
 
