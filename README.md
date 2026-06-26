@@ -65,7 +65,7 @@ cargo run -- \
   --sora-signaling-url wss://sora.example.com/signaling \
   --sora-channel-id zakuro-y4m \
   --sora-role sendonly \
-  --fake-video-capture ./video.y4m
+  --input-y4m ./video.y4m
 ```
 
 ### MP4 パススルーで送信する
@@ -173,7 +173,7 @@ cargo run -- --config ./config.jsonc
 | `--duration` | 接続維持秒数 |
 | `--repeat-interval` | 再接続間隔 |
 | `--video-input-device` | 映像入力デバイス名または ID |
-| `--fake-video-capture` | Y4M ファイル入力 |
+| `--input-y4m` | Y4M ファイル入力 |
 | `--input-mp4` | MP4 パススルー入力 |
 | `--sandstorm` | 砂嵐映像を生成 |
 | `--resolution` | `QVGA` / `VGA` / `HD` / `FHD` / `4K` / `WxH` |
@@ -218,8 +218,8 @@ curl -s http://127.0.0.1:8080/rpc \
 
 - `--http-host` と `--http-port` は両方指定が必要です
 - `--client-cert` と `--client-key` は両方指定が必要です
-- `--sandstorm` は `--fake-video-capture` / `--video-input-device` / `--input-mp4` と同時指定できません
-- `--input-mp4` は `--video-input-device` / `--fake-video-capture` / `--sandstorm` と同時指定できません
+- `--sandstorm` は `--input-y4m` / `--video-input-device` / `--input-mp4` と同時指定できません
+- `--input-mp4` は `--video-input-device` / `--input-y4m` / `--sandstorm` と同時指定できません
 
 ## 関連資料
 
