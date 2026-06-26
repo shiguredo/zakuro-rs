@@ -5,6 +5,8 @@ use std::thread;
 
 use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportRef};
 
+use crate::wav_reader::WavReader;
+
 /// ビープ音の周波数 (Hz)
 const BEEP_FREQUENCY: f64 = 1000.0;
 /// ビープ音の長さ (ミリ秒)
@@ -43,23 +45,37 @@ impl BeepTrigger {
     }
 }
 
-/// フェイク音声キャプチャの内部状態
+/// フェイク音声の供給ソース
+///
+/// `Beep` はビープトリガーに同期して短時間サイン波を生成する。
+/// `Wav` は WAV ファイルを 48kHz モノラルにリサンプリング済みのサンプル列として
+/// ループ再生する。
+pub(crate) enum FakeAudioSource {
+    Beep(BeepTrigger),
+    Wav(WavReader),
+}
+
+/// フェイク音声キャプチャの内部状態 (スレッド間で共有する制御フラグのみ)
 #[derive(Clone)]
-pub(crate) struct FakeAudioState {
+struct FakeAudioState {
     recording: Arc<AtomicBool>,
     audio_transport: Arc<std::sync::Mutex<Option<AudioTransportRef>>>,
-    beep_trigger: BeepTrigger,
     stop: Arc<AtomicBool>,
 }
 
 /// フェイク音声キャプチャ
 ///
 /// カスタム AudioDeviceModule を使って 10ms ごとに PCM データを WebRTC に送信する。
-/// 通常は無音を送信し、`BeepTrigger::trigger()` が呼ばれると
-/// 1000Hz のビープ音を 100ms 間生成する。
+/// 音声ソースは `FakeAudioSource` で指定する。
+///
+/// - `FakeAudioSource::Beep`: 通常は無音を送信し、`BeepTrigger::trigger()` が呼ばれると
+///   1000Hz のビープ音を 100ms 間生成する。
+/// - `FakeAudioSource::Wav`: WAV ファイルから読み込んだサンプル列をループ再生する。
 pub(crate) struct FakeAudioCapturer {
     adm: AudioDeviceModule,
     state: FakeAudioState,
+    /// `start()` で音声スレッドに move する。
+    source: Option<FakeAudioSource>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -128,7 +144,7 @@ impl AudioDeviceModuleHandler for FakeAudioHandler {
 }
 
 impl FakeAudioCapturer {
-    pub(crate) fn new(beep_trigger: BeepTrigger) -> Self {
+    pub(crate) fn new(source: FakeAudioSource) -> Self {
         let recording = Arc::new(AtomicBool::new(false));
         let audio_transport = Arc::new(std::sync::Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
@@ -141,13 +157,13 @@ impl FakeAudioCapturer {
         let state = FakeAudioState {
             recording,
             audio_transport,
-            beep_trigger,
             stop,
         };
 
         Self {
             adm,
             state,
+            source: Some(source),
             handle: None,
         }
     }
@@ -162,10 +178,16 @@ impl FakeAudioCapturer {
         }
 
         let state = self.state.clone();
+        // source は所有権をスレッドに移す (Beep は Arc 経由でトリガーを共有するが、
+        // Wav は WavReader 内部の cursor を Vec に保持しているため Clone 不可)
+        let source = self
+            .source
+            .take()
+            .expect("FakeAudioCapturer::start called twice");
         let handle = thread::Builder::new()
             .name("fake-audio-capturer".to_string())
             .spawn(move || {
-                audio_thread(state);
+                audio_thread(state, source);
             })
             .expect("failed to spawn fake audio thread");
 
@@ -183,11 +205,12 @@ impl Drop for FakeAudioCapturer {
 }
 
 /// 10ms ごとに PCM データを生成して WebRTC に送信するスレッド
-fn audio_thread(state: FakeAudioState) {
+fn audio_thread(state: FakeAudioState, mut source: FakeAudioSource) {
     // 10ms 分のサンプル数
     let samples_per_10ms = (SAMPLE_RATE / 100) as usize;
     let mut buffer = vec![0i16; samples_per_10ms * CHANNELS];
 
+    // ビープ生成用のローカルステート (source が Beep のときのみ更新される)
     let mut beep_samples_remaining: i32 = 0;
     let mut beep_phase: f64 = 0.0;
     let phase_increment = 2.0 * PI * BEEP_FREQUENCY / SAMPLE_RATE as f64;
@@ -196,27 +219,35 @@ fn audio_thread(state: FakeAudioState) {
     let mut next_time = std::time::Instant::now();
 
     while !state.stop.load(Ordering::Acquire) {
-        // ビープトリガーをチェック
-        if state.beep_trigger.take() {
-            beep_samples_remaining = (BEEP_DURATION_MS * SAMPLE_RATE / 1000) as i32;
-            beep_phase = 0.0;
-        }
+        match &mut source {
+            FakeAudioSource::Beep(trigger) => {
+                // ビープトリガーをチェック
+                if trigger.take() {
+                    beep_samples_remaining = (BEEP_DURATION_MS * SAMPLE_RATE / 1000) as i32;
+                    beep_phase = 0.0;
+                }
 
-        // ビープ音またはサイレンスを生成
-        if beep_samples_remaining > 0 {
-            for sample in buffer.iter_mut() {
-                *sample = (BEEP_AMPLITUDE * beep_phase.sin()) as i16;
-                beep_phase += phase_increment;
-                if beep_phase >= 2.0 * PI {
-                    beep_phase -= 2.0 * PI;
+                // ビープ音またはサイレンスを生成
+                if beep_samples_remaining > 0 {
+                    for sample in buffer.iter_mut() {
+                        *sample = (BEEP_AMPLITUDE * beep_phase.sin()) as i16;
+                        beep_phase += phase_increment;
+                        if beep_phase >= 2.0 * PI {
+                            beep_phase -= 2.0 * PI;
+                        }
+                    }
+                    beep_samples_remaining -= samples_per_10ms as i32;
+                    if beep_samples_remaining < 0 {
+                        beep_samples_remaining = 0;
+                    }
+                } else {
+                    buffer.fill(0);
                 }
             }
-            beep_samples_remaining -= samples_per_10ms as i32;
-            if beep_samples_remaining < 0 {
-                beep_samples_remaining = 0;
+            FakeAudioSource::Wav(reader) => {
+                // WAV からサンプルを取り出してループ再生する
+                reader.read_samples(&mut buffer);
             }
-        } else {
-            buffer.fill(0);
         }
 
         // WebRTC に送信

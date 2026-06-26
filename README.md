@@ -68,6 +68,18 @@ cargo run -- \
   --input-y4m ./video.y4m
 ```
 
+### WAV ファイルから音声を流す
+
+`--input-wav` は PCM 16bit のモノラル / ステレオに対応します。サンプルレートは自動で 48kHz にリサンプリングされ、ファイル終端に達するとループ再生します。
+
+```bash
+cargo run -- \
+  --sora-signaling-url wss://sora.example.com/signaling \
+  --sora-channel-id zakuro-wav \
+  --sora-role sendonly \
+  --input-wav ./audio.wav
+```
+
 ### MP4 パススルーで送信する
 
 `--input-mp4` 使用時は `--sora-video-codec-type` と `--sora-video-bit-rate` が必須です。
@@ -175,6 +187,7 @@ cargo run -- --config ./config.jsonc
 | `--video-input-device` | 映像入力デバイス名または ID |
 | `--input-y4m` | Y4M ファイル入力 |
 | `--input-mp4` | MP4 パススルー入力 |
+| `--input-wav` | WAV ファイル音声入力 (PCM 16bit、ループ再生) |
 | `--sandstorm` | 砂嵐映像を生成 |
 | `--resolution` | `QVGA` / `VGA` / `HD` / `FHD` / `4K` / `WxH` |
 | `--framerate` | フレームレート (`1` - `60`) |
@@ -220,6 +233,7 @@ curl -s http://127.0.0.1:8080/rpc \
 - `--client-cert` と `--client-key` は両方指定が必要です
 - `--sandstorm` は `--input-y4m` / `--video-input-device` / `--input-mp4` と同時指定できません
 - `--input-mp4` は `--video-input-device` / `--input-y4m` / `--sandstorm` と同時指定できません
+- `--input-wav` は `--no-audio-device` / `--sora-audio=false` と同時指定できません
 
 ## 関連資料
 

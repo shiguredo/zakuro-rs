@@ -223,7 +223,7 @@ POST /rpc          → JSON-RPC 2.0
 - [x] 音声無効化 (`--no-audio-device`)
 - [x] フェイク音声 (ビープ音のみ、映像のパイチャート一周に同期して 1000Hz/100ms を生成)
 - [ ] フェイク音声フル実装 (BIP/BOP/HUM/ノイズ自動生成)
-- [ ] WAV 音声ファイル読込 (`--fake-audio-capture`)
+- [x] WAV 音声ファイル読込 (`--input-wav`)
 
 ### コーデック
 
