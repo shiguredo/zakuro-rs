@@ -15,17 +15,22 @@ mod y4m_reader;
 
 use std::time::Duration;
 
-use shiguredo_webrtc::{VideoCodecType, log, rtc_log_info, rtc_log_warning};
+use shiguredo_openh264::Openh264Library;
+use shiguredo_webrtc::{log, rtc_log_info, rtc_log_warning};
 use sora_sdk::{
     AdmConfig, JsonString, Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer,
     SoraConnectionContext, SoraConnectionContextConfig, VideoCodecPreference,
 };
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
+use tokio_util::time::DelayQueue;
 
+use crate::args::{CommonArgs, InstanceArgs};
 use crate::error::{ErrorMessage, Result};
 use crate::fake_video_capturer::{FakeVideoCapturer, FakeVideoCapturerConfig};
-use crate::stats::StatsCollector;
+use crate::stats::{StatsCollector, StatsEvent};
 use crate::video_device_capturer::{VideoDeviceCapturer, VideoDeviceCapturerConfig};
 use crate::virtual_client::VirtualClientConfig;
 
@@ -60,7 +65,7 @@ fn resolve_device_id(name_or_id: &str) -> Result<String> {
     Ok(name_or_id.to_string())
 }
 
-fn build_video(args: &args::Args) -> Option<sora_sdk::Video> {
+fn build_video(args: &InstanceArgs) -> Option<sora_sdk::Video> {
     if args.no_video_device {
         return Some(sora_sdk::Video::new_bool(false));
     }
@@ -80,7 +85,7 @@ fn build_video(args: &args::Args) -> Option<sora_sdk::Video> {
     }
 }
 
-fn build_audio(args: &args::Args) -> Option<sora_sdk::Audio> {
+fn build_audio(args: &InstanceArgs) -> Option<sora_sdk::Audio> {
     if args.no_audio_device || !args.audio {
         return Some(sora_sdk::Audio::new_bool(false));
     }
@@ -96,27 +101,193 @@ fn build_audio(args: &args::Args) -> Option<sora_sdk::Audio> {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // `FakeAudioCapturer` などの libwebrtc 由来オブジェクトが !Send のため、
+    // instance ごとの future は LocalSet 上で `spawn_local` する必要がある
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| ErrorMessage::new(format!("Failed to build tokio runtime: {e}")))?;
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&rt, async_main())
+}
+
+async fn async_main() -> Result<()> {
     log::log_to_debug(log::Severity::Info);
     log::enable_timestamps();
     log::enable_threads();
 
-    let args = args::parse_args()?;
+    let (common, instance_args_vec) = args::parse_args()?;
+
+    let total_vcs: u32 = instance_args_vec.iter().map(|i| i.vcs).sum();
+    let instances_count = instance_args_vec.len() as u32;
 
     rtc_log_info!(
-        "zakuro: vcs={} hatch_rate={} duration={:?} repeat_interval={:?}",
-        args.vcs,
-        args.vcs_hatch_rate,
-        args.duration,
-        args.repeat_interval,
+        "zakuro: instances={} instance-hatch-rate={} total-vcs={}",
+        instances_count,
+        common.instance_hatch_rate,
+        total_vcs,
+    );
+
+    // OpenH264 ライブラリのロード (プロセス全体で 1 回)
+    let openh264_lib: Option<Openh264Library> = if let Some(ref path) = common.openh264 {
+        Some(openh264_video_codec::load_openh264_library(path)?)
+    } else {
+        None
+    };
+
+    // mTLS PEM の読み込み (プロセス全体で 1 回)
+    let client_cert_pem: Option<String> = if let Some(ref path) = common.client_cert {
+        Some(
+            std::fs::read_to_string(path)
+                .map_err(|e| ErrorMessage::new(format!("Failed to read client cert: {e}")))?,
+        )
+    } else {
+        None
+    };
+    let client_key_pem: Option<String> = if let Some(ref path) = common.client_key {
+        Some(
+            std::fs::read_to_string(path)
+                .map_err(|e| ErrorMessage::new(format!("Failed to read client key: {e}")))?,
+        )
+    } else {
+        None
+    };
+
+    let token = CancellationToken::new();
+
+    let stats = StatsCollector::new(total_vcs, instances_count, token.clone());
+    let stats_tx = stats.event_tx();
+
+    // Ctrl+C ハンドラを先に起動 (DelayQueue poll 中のキャンセル経路を確保)
+    let shutdown_token = token.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        rtc_log_info!("Ctrl+C received, shutting down...");
+        shutdown_token.cancel();
+    });
+
+    // HTTP サーバーの起動 (両方ある場合のみ、Ctrl+C ハンドラ起動と DelayQueue 構築の間)
+    if let (Some(host), Some(port)) = (&common.http_host, common.http_port) {
+        let server = http_server::HttpServer::bind(host, port, token.clone())
+            .await
+            .map_err(|e| ErrorMessage::new(format!("HTTP server bind failed: {e}")))?;
+        let handler = http_server::DefaultHandler;
+        tokio::spawn(async move {
+            server.run(handler).await;
+        });
+    }
+
+    // hatch rate 制御の DelayQueue を構築
+    let hatch_start = tokio::time::Instant::now();
+    let interval = Duration::from_secs_f64(1.0 / common.instance_hatch_rate);
+    let mut delay: DelayQueue<u32> = DelayQueue::new();
+    for i in 0..instances_count {
+        delay.insert(i, interval * i);
+    }
+
+    // instance 引数は起動時に 1 度だけ消費するため Option<InstanceArgs> でラップして take する
+    let mut pending: Vec<Option<InstanceArgs>> = instance_args_vec.into_iter().map(Some).collect();
+    // JoinSet の Item を (instance_id, Result<()>) にすることで、正常終了 / Err 経路で
+    // instance_id を取り出せるようにする。JoinError 経路 (panic) は instance_id 取得不可。
+    // FakeAudioCapturer などの !Send 型を future が保持するため `spawn_local` を使う。
+    let mut instances: JoinSet<(u32, Result<()>)> = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => break,
+            maybe_expired = delay.next() => {
+                // DelayQueue が空になれば全 instance 起動完了
+                let Some(expired) = maybe_expired else { break };
+                let i = expired.into_inner();
+                rtc_log_info!(
+                    "Starting zakuro instance {} at +{:.2}s",
+                    i,
+                    hatch_start.elapsed().as_secs_f64(),
+                );
+                let instance = pending[i as usize]
+                    .take()
+                    .expect("logical invariant: each instance_id is dispatched once via DelayQueue and taken on first dispatch");
+                let task_token = token.child_token();
+                let common_cloned = common.clone();
+                let openh264_lib_cloned = openh264_lib.clone();
+                let client_cert_pem_cloned = client_cert_pem.clone();
+                let client_key_pem_cloned = client_key_pem.clone();
+                let stats_tx_cloned = stats_tx.clone();
+                instances.spawn_local(async move {
+                    let result = run_zakuro_instance(
+                        i,
+                        common_cloned,
+                        instance,
+                        openh264_lib_cloned,
+                        client_cert_pem_cloned,
+                        client_key_pem_cloned,
+                        task_token,
+                        stats_tx_cloned,
+                    ).await;
+                    (i, result)
+                });
+            }
+        }
+    }
+
+    // loop を抜けた経路は 2 通り:
+    //   (1) token.cancelled() (Ctrl+C 等): aggregator / reporter は token.cancelled で先に break する。
+    //       後続の drop(stats_tx) と token.cancel() は idempotent。
+    //   (2) DelayQueue::next() が None (全 instance 起動完了): 以降は aggregator が channel close を
+    //       見て break する必要があるため、main 側の stats_tx を drop する。
+    drop(stats_tx);
+
+    while let Some(joined) = instances.join_next().await {
+        match joined {
+            Ok((id, Ok(()))) => rtc_log_info!("Zakuro instance {} finished", id),
+            Ok((id, Err(e))) => {
+                rtc_log_warning!("Zakuro instance {} failed: {}", id, e);
+            }
+            Err(e) => rtc_log_warning!("Zakuro instance task panicked: {}", e),
+        }
+    }
+
+    // 経路 (2) で reporter (定期統計出力) を停止する。経路 (1) では既に cancel 済みだが
+    // token.cancel() は idempotent なため二度呼び出しても問題ない。
+    token.cancel();
+
+    rtc_log_info!("zakuro: all Zakuro instances finished");
+
+    Ok(())
+}
+
+/// 1 つの Zakuro インスタンスを実行する
+///
+/// `SoraConnectionContext` 構築 / 映像キャプチャ初期化 / vcs 個の仮想クライアントの
+/// `vcs-hatch-rate` 制御スポーン・完了待機まで担当する。
+#[expect(clippy::too_many_arguments)]
+async fn run_zakuro_instance(
+    instance_id: u32,
+    common: CommonArgs,
+    instance: InstanceArgs,
+    openh264_lib: Option<Openh264Library>,
+    client_cert_pem: Option<String>,
+    client_key_pem: Option<String>,
+    token: CancellationToken,
+    stats_tx: mpsc::Sender<StatsEvent>,
+) -> Result<()> {
+    rtc_log_info!(
+        "Zakuro instance {}: vcs={} vcs-hatch-rate={} duration={:?} repeat_interval={:?}",
+        instance_id,
+        instance.vcs,
+        instance.vcs_hatch_rate,
+        instance.duration,
+        instance.repeat_interval,
     );
 
     // MP4 パススルー時はコーデック能力をカスタマイズする
-    let mp4_reader = if let Some(ref mp4_path) = args.input_mp4 {
+    let mp4_reader = if let Some(ref mp4_path) = instance.input_mp4 {
         let reader = Mp4SampleReader::new(mp4_path)
             .map_err(|e| ErrorMessage::new(format!("Failed to read MP4 file: {e}")))?;
-        let expected_codec = parse_video_codec_type(args.video_codec_type.as_deref().unwrap())
+        let expected_codec =
+            args::parse_video_codec_type(instance.video_codec_type.as_deref().expect(
+                "guarded by InstanceArgs validation: input_mp4 requires sora-video-codec-type",
+            ))
             .ok_or_else(|| ErrorMessage::new("--sora-video-codec-type の値が不正です"))?;
         if reader.codec_type() != expected_codec {
             return Err(ErrorMessage::new(format!(
@@ -131,40 +302,42 @@ async fn main() -> Result<()> {
         None
     };
 
-    // OpenH264 ライブラリのロード
-    let openh264_lib = if let Some(ref path) = args.openh264 {
-        Some(openh264_video_codec::load_openh264_library(path)?)
-    } else {
-        None
-    };
-
     // フェイク音声キャプチャの初期化
     // 音声有効かつフェイク映像モード時にビープ音連携を行う
-    let use_fake_audio = !args.no_audio_device
-        && args.audio
-        && args.role.wants_send()
-        && args.input_mp4.is_none()
-        && args.video_input_device.is_none();
+    let use_fake_audio = !instance.no_audio_device
+        && instance.audio
+        && instance.role.wants_send()
+        && instance.input_mp4.is_none()
+        && instance.video_input_device.is_none();
     let beep_trigger = if use_fake_audio {
         Some(fake_audio_capturer::BeepTrigger::new())
     } else {
         None
     };
-    let mut _fake_audio_capturer = None;
 
-    let context_config = {
+    // FakeAudioCapturer は内部スレッドから SoraConnectionContext 由来の AudioDeviceModule に
+    // 触れ続けるため、Rust の RAII 逆順 Drop を利用して context より先に capturer を Drop させる
+    // 必要がある。そのため context を先に宣言し、capturer は後で late-bind する。
+    // context_config 構築時には capturer の audio_device_module() ハンドルが必要なので、
+    // 構築ブロック内で一時生成して Option として持ち出す。
+    let (context_config, pending_audio_capturer): (
+        SoraConnectionContextConfig,
+        Option<fake_audio_capturer::FakeAudioCapturer>,
+    ) = {
         let mut config = SoraConnectionContextConfig {
             adm_config: AdmConfig::NoAudioDevice,
             ..Default::default()
         };
 
         // フェイク音声 ADM の登録
-        if let Some(ref trigger) = beep_trigger {
+        let pending = if let Some(ref trigger) = beep_trigger {
             let mut capturer = fake_audio_capturer::FakeAudioCapturer::new(trigger.clone());
             capturer.start();
             config.adm_config = AdmConfig::UseExternal(capturer.audio_device_module());
-            _fake_audio_capturer = Some(capturer);
-        }
+            Some(capturer)
+        } else {
+            None
+        };
 
         // MP4 パススルーコーデック能力の登録
         if let Some(ref reader) = mp4_reader {
@@ -186,7 +359,7 @@ async fn main() -> Result<()> {
         }
 
         // NopVideoDecoder の登録 (受信映像をデコードせず廃棄する)
-        if args.role.wants_recv() {
+        if instance.role.wants_recv() {
             let nop_capability: Box<dyn sora_sdk::VideoCodecCapability> =
                 Box::new(nop_video_decoder::NopVideoDecoderCapability);
             let nop_preference = VideoCodecPreference::new_from_capability(nop_capability.as_ref());
@@ -194,18 +367,19 @@ async fn main() -> Result<()> {
             config.video_codec_capabilities.push(nop_capability);
         }
 
-        config
+        (config, pending)
     };
 
+    // context を先に宣言 (= Drop は最後)
     let context = SoraConnectionContext::new_with_config(context_config)?;
 
-    let token = CancellationToken::new();
-
-    // 映像キャプチャ（映像有効時のみ）
-    let mut _fake_capturer = None;
-    let mut _device_capturer = None;
-    let mut _mp4_capturer = None;
-    let video_source = if !args.no_video_device && args.role.wants_send() {
+    // context より「後に」 capturer 系を宣言する (= Drop は context より先)
+    // pending_audio_capturer を late-bind することで宣言順序を保つ
+    let _fake_audio_capturer = pending_audio_capturer;
+    let mut _fake_capturer: Option<FakeVideoCapturer> = None;
+    let mut _device_capturer: Option<VideoDeviceCapturer> = None;
+    let mut _mp4_capturer: Option<Mp4VideoCapturer> = None;
+    let video_source = if !instance.no_video_device && instance.role.wants_send() {
         if let Some(reader) = mp4_reader {
             // MP4 パススルーキャプチャ
             let capturer = Mp4VideoCapturer::new(reader)
@@ -213,14 +387,14 @@ async fn main() -> Result<()> {
             let source = capturer.video_source();
             _mp4_capturer = Some(capturer);
             Some(source)
-        } else if let Some(ref device_name) = args.video_input_device {
+        } else if let Some(ref device_name) = instance.video_input_device {
             // 実デバイスキャプチャ
             let device_id = resolve_device_id(device_name)?;
             let config = VideoDeviceCapturerConfig {
                 device_id: Some(device_id),
-                width: args.resolution.0,
-                height: args.resolution.1,
-                fps: args.framerate as i32,
+                width: instance.resolution.0,
+                height: instance.resolution.1,
+                fps: instance.framerate as i32,
             };
             let mut capturer = VideoDeviceCapturer::new(config)?;
             capturer.start()?;
@@ -230,11 +404,11 @@ async fn main() -> Result<()> {
         } else {
             // フェイク映像キャプチャ
             let config = FakeVideoCapturerConfig {
-                width: args.resolution.0,
-                height: args.resolution.1,
-                fps: args.framerate as i32,
-                sandstorm: args.sandstorm,
-                y4m_path: args
+                width: instance.resolution.0,
+                height: instance.resolution.1,
+                fps: instance.framerate as i32,
+                sandstorm: instance.sandstorm,
+                y4m_path: instance
                     .fake_video_capture
                     .as_ref()
                     .map(std::path::PathBuf::from),
@@ -250,27 +424,25 @@ async fn main() -> Result<()> {
         None
     };
 
-    let stats = StatsCollector::new(args.vcs, token.clone());
-    let stats_tx = stats.event_tx();
-
     // DataChannel メッセージング設定のパース
-    let (connect_data_channels, message_channels) = if let Some(ref dc_json) = args.data_channels {
-        let (connect, msg) = data_channel::parse_data_channels(dc_json)?;
-        (Some(connect), msg)
-    } else {
-        (None, Vec::new())
-    };
+    let (connect_data_channels, message_channels) =
+        if let Some(ref dc_json) = instance.data_channels {
+            let (connect, msg) = data_channel::parse_data_channels(dc_json)?;
+            (Some(connect), msg)
+        } else {
+            (None, Vec::new())
+        };
 
     // メタデータの JSON パース
     let metadata =
-        if let Some(ref s) = args.metadata {
+        if let Some(ref s) = instance.metadata {
             Some(s.parse::<JsonString>().map_err(|e| {
                 ErrorMessage::new(format!("--sora-metadata の JSON が不正です: {e}"))
             })?)
         } else {
             None
         };
-    let signaling_notify_metadata = if let Some(ref s) = args.signaling_notify_metadata {
+    let signaling_notify_metadata = if let Some(ref s) = instance.signaling_notify_metadata {
         Some(s.parse::<JsonString>().map_err(|e| {
             ErrorMessage::new(format!(
                 "--sora-signaling-notify-metadata の JSON が不正です: {e}"
@@ -280,131 +452,81 @@ async fn main() -> Result<()> {
         None
     };
 
-    // mTLS 証明書の読み込み
-    let client_cert_pem = if let Some(ref path) = args.client_cert {
-        Some(std::fs::read_to_string(path).map_err(|e| {
-            ErrorMessage::new(format!("Failed to read client cert '{}': {}", path, e))
-        })?)
-    } else {
-        None
-    };
-    let client_key_pem = if let Some(ref path) = args.client_key {
-        Some(std::fs::read_to_string(path).map_err(|e| {
-            ErrorMessage::new(format!("Failed to read client key '{}': {}", path, e))
-        })?)
-    } else {
-        None
-    };
-
     let vc_config = VirtualClientConfig {
-        signaling_urls: args.signaling_urls.clone(),
-        channel_id: args.channel_id.clone(),
-        role: args.role,
-        client_id: args.client_id.clone(),
-        bundle_id: args.bundle_id.clone(),
+        signaling_urls: instance.signaling_urls.clone(),
+        channel_id: instance.channel_id.clone(),
+        role: instance.role,
+        client_id: instance.client_id.clone(),
+        bundle_id: instance.bundle_id.clone(),
         metadata,
         signaling_notify_metadata,
-        duration: args.duration,
-        repeat_interval: args.repeat_interval,
-        max_retry: args.max_retry,
-        retry_interval: args.retry_interval,
-        video: build_video(&args),
-        audio: build_audio(&args),
+        duration: instance.duration,
+        repeat_interval: instance.repeat_interval,
+        max_retry: instance.max_retry,
+        retry_interval: instance.retry_interval,
+        video: build_video(&instance),
+        audio: build_audio(&instance),
         connect_data_channels,
         message_channels,
-        data_channel_signaling: args.data_channel_signaling,
-        ignore_disconnect_websocket: args.ignore_disconnect_websocket,
-        disconnect_wait_timeout: args.disconnect_wait_timeout.map(Duration::from_secs_f64),
-        simulcast: args.simulcast,
-        simulcast_request_rid: args.simulcast_request_rid.clone(),
-        spotlight: args.spotlight,
-        spotlight_focus_rid: args.spotlight_focus_rid.clone(),
-        spotlight_unfocus_rid: args.spotlight_unfocus_rid.clone(),
-        insecure: args.insecure,
+        data_channel_signaling: instance.data_channel_signaling,
+        ignore_disconnect_websocket: instance.ignore_disconnect_websocket,
+        disconnect_wait_timeout: instance
+            .disconnect_wait_timeout
+            .map(Duration::from_secs_f64),
+        simulcast: instance.simulcast,
+        simulcast_request_rid: instance.simulcast_request_rid.clone(),
+        spotlight: instance.spotlight,
+        spotlight_focus_rid: instance.spotlight_focus_rid.clone(),
+        spotlight_unfocus_rid: instance.spotlight_unfocus_rid.clone(),
+        insecure: common.insecure,
         client_cert: client_cert_pem,
         client_key: client_key_pem,
-        scenario: args.scenario.map(scenario::build_scenario),
+        scenario: instance.scenario.map(scenario::build_scenario),
     };
 
-    let mut clients = JoinSet::new();
+    // vcs-hatch-rate 制御の DelayQueue を構築
+    let vc_hatch_start = tokio::time::Instant::now();
+    let vc_interval = Duration::from_secs_f64(1.0 / instance.vcs_hatch_rate);
+    let mut vc_delay: DelayQueue<u32> = DelayQueue::new();
+    for i in 0..instance.vcs {
+        vc_delay.insert(i, vc_interval * i);
+    }
 
-    // hatch rate 制御
-    let hatch_start = tokio::time::Instant::now();
-    let interval_per_client = Duration::from_secs_f64(1.0 / args.vcs_hatch_rate);
+    let mut clients: JoinSet<()> = JoinSet::new();
 
-    for i in 0..args.vcs {
-        if token.is_cancelled() {
-            break;
-        }
-
-        // hatch タイミングまで待機（初回は即座に起動）
-        if i > 0 {
-            let target = hatch_start + interval_per_client * i;
-            tokio::select! {
-                biased;
-                _ = token.cancelled() => break,
-                _ = tokio::time::sleep_until(target) => {}
+    loop {
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => break,
+            maybe_expired = vc_delay.next() => {
+                let Some(expired) = maybe_expired else { break };
+                let vc_id = expired.into_inner();
+                rtc_log_info!(
+                    "[i{}/vc-{}] starting virtual client (+{:.2}s)",
+                    instance_id,
+                    vc_id,
+                    vc_hatch_start.elapsed().as_secs_f64(),
+                );
+                let child_token = token.child_token();
+                clients.spawn_local(virtual_client::run(
+                    instance_id,
+                    vc_id,
+                    context.clone(),
+                    video_source.clone(),
+                    vc_config.clone(),
+                    child_token,
+                    stats_tx.clone(),
+                ));
             }
         }
-
-        rtc_log_info!("仮想クライアント {} を起動します", i);
-
-        let child_token = token.child_token();
-        clients.spawn(virtual_client::run(
-            i,
-            context.clone(),
-            video_source.clone(),
-            vc_config.clone(),
-            child_token,
-            stats_tx.clone(),
-        ));
     }
 
-    // main 側の stats_tx を drop して、全クライアント終了時に channel が閉じるようにする
-    drop(stats_tx);
-
-    // HTTP サーバーの起動
-    if let (Some(host), Some(port)) = (&args.http_host, args.http_port) {
-        let server = http_server::HttpServer::bind(host, port, token.clone())
-            .await
-            .map_err(|e| error::ErrorMessage::new(format!("HTTP server bind failed: {e}")))?;
-        let handler = http_server::DefaultHandler;
-        tokio::spawn(async move {
-            server.run(handler).await;
-        });
-    }
-
-    // Ctrl+C で CancellationToken を発火
-    let shutdown_token = token.clone();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        rtc_log_info!("Ctrl+C を受信しました。シャットダウンします...");
-        shutdown_token.cancel();
-    });
-
-    // 全仮想クライアントの完了を待機
+    // vc 群の完了を待機
     while let Some(result) = clients.join_next().await {
         if let Err(e) = result {
-            rtc_log_warning!("仮想クライアントタスクがパニックしました: {}", e);
+            rtc_log_warning!("[i{}] virtual client task panicked: {}", instance_id, e,);
         }
     }
 
-    // 統計タスク等を停止
-    token.cancel();
-
-    rtc_log_info!("zakuro: 全ての仮想クライアントが終了しました");
-
     Ok(())
-}
-
-/// --sora-video-codec-type の文字列を VideoCodecType に変換する
-fn parse_video_codec_type(s: &str) -> Option<VideoCodecType> {
-    match s {
-        "vp8" => Some(VideoCodecType::Vp8),
-        "vp9" => Some(VideoCodecType::Vp9),
-        "av1" => Some(VideoCodecType::Av1),
-        "h264" => Some(VideoCodecType::H264),
-        "h265" => Some(VideoCodecType::H265),
-        _ => None,
-    }
 }

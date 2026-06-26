@@ -131,7 +131,7 @@ POST /rpc          → JSON-RPC 2.0
 # 仮想クライアント
 --vcs <N>                           仮想クライアント数 (1-1000)
 --vcs-hatch-rate <F>                1 秒間に起動する VC 数
---instance-hatch-rate <F>           インスタンス生成レート
+--instance-hatch-rate <F>           インスタンス生成レート (JSONC `instances` 配列との併用)
 
 # 映像
 --resolution {QVGA,VGA,HD,FHD,4K,WxH}
@@ -266,7 +266,7 @@ POST /rpc          → JSON-RPC 2.0
 - [ ] シナリオ操作 PlayVoiceNumberClient (音声未対応のため)
 - [ ] シナリオ操作 SendDataChannelMessage
 - [ ] シナリオ操作 Exit
-- [ ] instance-hatch-rate (zakuro-rs はシングルプロセス前提)
+- [x] instance-hatch-rate (JSONC `instances` 配列と組み合わせて使用)
 
 ### その他
 
@@ -303,4 +303,4 @@ POST /rpc          → JSON-RPC 2.0
 | シグナル処理 | SIGINT/SIGTERM | tokio::signal (Ctrl+C) |
 | 統計通知 | コールバック | mpsc + watch チャネル |
 | シャットダウン | io_context 停止 | CancellationToken |
-| インスタンス起動 | instance-hatch-rate でマルチプロセス | シングルプロセス内の vcs-hatch-rate のみ |
+| インスタンス起動 | シングルプロセス・マルチスレッド (`std::thread`) で instance-hatch-rate を実装 | シングルプロセス内の tokio タスクで instance-hatch-rate を実装 (DelayQueue + JoinSet) |

@@ -49,7 +49,8 @@ enum DisconnectReason {
 }
 
 pub(crate) async fn run(
-    id: u32,
+    instance_id: u32,
+    vc_id: u32,
     context: Arc<SoraConnectionContext>,
     video_source: Option<VideoTrackSource>,
     config: VirtualClientConfig,
@@ -65,18 +66,28 @@ pub(crate) async fn run(
         let (client, handle) = match build_client(&context, &video_source, &config) {
             Ok(pair) => pair,
             Err(e) => {
-                rtc_log_warning!("[vc-{}] クライアント構築に失敗: {}", id, e);
+                rtc_log_warning!(
+                    "[i{}/vc-{}] failed to build client: {}",
+                    instance_id,
+                    vc_id,
+                    e,
+                );
                 retry_count += 1;
                 if retry_count > config.max_retry {
                     rtc_log_info!(
-                        "[vc-{}] 最大リトライ回数 ({}) に達しました",
-                        id,
+                        "[i{}/vc-{}] reached max retry count ({})",
+                        instance_id,
+                        vc_id,
                         config.max_retry,
                     );
                     break;
                 }
                 let _ = stats_tx
-                    .send(StatsEvent::Retrying { id, retry_count })
+                    .send(StatsEvent::Retrying {
+                        instance_id,
+                        vc_id,
+                        retry_count,
+                    })
                     .await;
                 tokio::select! {
                     biased;
@@ -85,8 +96,10 @@ pub(crate) async fn run(
                 }
             }
         };
-        let _ = stats_tx.send(StatsEvent::Connected { id }).await;
-        rtc_log_info!("[vc-{}] 接続しました", id);
+        let _ = stats_tx
+            .send(StatsEvent::Connected { instance_id, vc_id })
+            .await;
+        rtc_log_info!("[i{}/vc-{}] connected", instance_id, vc_id);
 
         // DataChannel メッセージングタスクの起動
         let messaging_token = connection_token.child_token();
@@ -95,7 +108,14 @@ pub(crate) async fn run(
             let msg_channels = config.message_channels.clone();
             let msg_token = messaging_token.clone();
             tokio::spawn(async move {
-                crate::data_channel::run_messaging(id, msg_handle, msg_channels, msg_token).await;
+                crate::data_channel::run_messaging(
+                    instance_id,
+                    vc_id,
+                    msg_handle,
+                    msg_channels,
+                    msg_token,
+                )
+                .await;
             });
         }
 
@@ -121,7 +141,7 @@ pub(crate) async fn run(
 
         match reason {
             DisconnectReason::Shutdown => {
-                rtc_log_info!("[vc-{}] シャットダウンします", id);
+                rtc_log_info!("[i{}/vc-{}] shutting down", instance_id, vc_id);
                 tokio::select! {
                     _ = handle.disconnect() => {}
                     _ = &mut run_future => {}
@@ -129,18 +149,25 @@ pub(crate) async fn run(
                 break;
             }
             DisconnectReason::DurationExpired => {
-                rtc_log_info!("[vc-{}] duration が経過しました", id);
+                rtc_log_info!("[i{}/vc-{}] duration expired", instance_id, vc_id);
                 tokio::select! {
                     _ = handle.disconnect() => {}
                     _ = &mut run_future => {}
                 }
                 connection_token.cancel();
-                let _ = stats_tx.send(StatsEvent::Disconnected { id }).await;
+                let _ = stats_tx
+                    .send(StatsEvent::Disconnected { instance_id, vc_id })
+                    .await;
                 retry_count = 0;
 
                 match config.repeat_interval {
                     Some(interval) if interval > 0.0 => {
-                        rtc_log_info!("[vc-{}] {:.1} 秒後に再接続します", id, interval);
+                        rtc_log_info!(
+                            "[i{}/vc-{}] reconnecting in {:.1}s",
+                            instance_id,
+                            vc_id,
+                            interval,
+                        );
                         tokio::select! {
                             biased;
                             _ = token.cancelled() => break,
@@ -151,38 +178,53 @@ pub(crate) async fn run(
                 }
             }
             DisconnectReason::ScenarioDisconnect => {
-                rtc_log_info!("[vc-{}] シナリオにより切断します", id);
+                rtc_log_info!("[i{}/vc-{}] disconnecting per scenario", instance_id, vc_id,);
                 tokio::select! {
                     _ = handle.disconnect() => {}
                     _ = &mut run_future => {}
                 }
                 connection_token.cancel();
-                let _ = stats_tx.send(StatsEvent::Disconnected { id }).await;
+                let _ = stats_tx
+                    .send(StatsEvent::Disconnected { instance_id, vc_id })
+                    .await;
                 retry_count = 0;
                 // シナリオは無限ループなので即座に再接続する
                 continue;
             }
             DisconnectReason::Unexpected(result) => {
                 connection_token.cancel();
-                let _ = stats_tx.send(StatsEvent::Disconnected { id }).await;
+                let _ = stats_tx
+                    .send(StatsEvent::Disconnected { instance_id, vc_id })
+                    .await;
                 if let Err(e) = result {
-                    rtc_log_warning!("[vc-{}] 予期しない切断: {}", id, e);
+                    rtc_log_warning!(
+                        "[i{}/vc-{}] unexpected disconnect: {}",
+                        instance_id,
+                        vc_id,
+                        e,
+                    );
                 }
                 retry_count += 1;
                 if retry_count > config.max_retry {
                     rtc_log_info!(
-                        "[vc-{}] 最大リトライ回数 ({}) に達しました",
-                        id,
+                        "[i{}/vc-{}] reached max retry count ({})",
+                        instance_id,
+                        vc_id,
                         config.max_retry,
                     );
                     break;
                 }
                 let _ = stats_tx
-                    .send(StatsEvent::Retrying { id, retry_count })
+                    .send(StatsEvent::Retrying {
+                        instance_id,
+                        vc_id,
+                        retry_count,
+                    })
                     .await;
                 rtc_log_info!(
-                    "[vc-{}] {:.1} 秒後にリトライします ({}/{})",
-                    id,
+                    "[i{}/vc-{}] retrying in {:.1}s ({}/{})",
+                    instance_id,
+                    vc_id,
                     config.retry_interval,
                     retry_count,
                     config.max_retry,
@@ -196,7 +238,9 @@ pub(crate) async fn run(
         }
     }
 
-    let _ = stats_tx.send(StatsEvent::Stopped { id }).await;
+    let _ = stats_tx
+        .send(StatsEvent::Stopped { instance_id, vc_id })
+        .await;
 }
 
 async fn duration_timer(duration: Option<f64>) {

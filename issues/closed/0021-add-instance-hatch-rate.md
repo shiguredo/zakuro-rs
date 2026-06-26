@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-06-24
-- Completed:
+- Completed: 2026-06-26
 - Model: Opus 4.7
 - Branch: feature/add-instance-hatch-rate
 - Polished: 2026-06-26
@@ -641,7 +641,38 @@ tokio-stream = "0.1"
 
 ## 解決方法
 
-設計方針 (1〜12 節) に従い `Cargo.toml` / `src/args.rs` / `src/main.rs` / `src/stats.rs` / `src/virtual_client.rs` / `src/data_channel.rs` / `docs/ZAKURO.md` を修正する。`src/json_rpc.rs` は本 issue では変更しない (現状の `GetVersion` は引数なしで instance 概念に無関係)。
+### 変更ファイル
+
+`Cargo.toml` / `src/args.rs` / `src/main.rs` / `src/stats.rs` / `src/virtual_client.rs` / `src/data_channel.rs` / `docs/ZAKURO.md` を設計方針 (1〜12 節) に従い修正した。`src/json_rpc.rs` は本対応では変更していない (現状の `GetVersion` は引数なしで instance 概念に無関係)。
+
+### 主要変更点
+
+- `Cargo.toml`: `tokio-util = { version = "0.7", features = ["time"] }` に変更 (DelayQueue 用)、`tokio-stream = "0.1"` を新規追加 (ReceiverStream / IntervalStream 用)
+- `src/args.rs`: `Args` 構造体を `CommonArgs` と `InstanceArgs` に分割。JSONC `instances` 配列のパースを `load_jsonc_config()` / `parse_jsonc_config()` で実装。CLI 引数の Common/Instance 分割を `split_cli_argv()`、後勝ち重複除去を `dedupe_argv_last_wins()` で実装 (理由: noargs::OptSpec::take は先勝ち消費で残りが「unexpected argument」エラーになるため、テンプレート + CLI の連結後に dedupe する必要があった)。`--instance-hatch-rate` を新規追加し `> 0.0` でバリデーション。`parse_video_codec_type()` を `pub(crate)` に格上げ
+- `src/stats.rs`: `StatsEvent` の各 variant に `instance_id` を追加し `id` を `vc_id` にリネーム。`StatsSnapshot::initial(total, instances)` と `StatsCollector::new(total, instances, token)` のシグネチャ変更。aggregator / reporter を `tokio_stream::wrappers::ReceiverStream` / `IntervalStream` に置き換え
+- `src/virtual_client.rs`: `run(id, ...)` を `run(instance_id, vc_id, ...)` に変更、日本語ログを英語化、プレフィックスを `[i{}/vc-{}]` に統一
+- `src/data_channel.rs`: `run_messaging` のシグネチャに `instance_id` を追加。`compute_seed(instance_id, vc_id) -> u32` を `pub(crate)` で切り出し (state=0 回避付き、`instance_id` と `vc_id` で別の係数を XOR)
+- `src/main.rs`: `main` を `fn main()` + `LocalSet::block_on(&rt, async_main())` に変更し、`async_main` 内で instance hatch スケジューリングを `tokio_util::time::DelayQueue<u32>` + `JoinSet<(u32, Result<()>)>` で実装。`run_zakuro_instance()` を新設し、`SoraConnectionContext` 構築 / 映像音声キャプチャ初期化 / vc 群の起動 (DelayQueue + JoinSet) を担当。`FakeAudioCapturer` などが `!Send` のため `JoinSet::spawn_local` を使用
+- `docs/ZAKURO.md`: instance-hatch-rate を `[x]` に変更、設計差分表のマルチプロセス記述を「シングルプロセス・マルチスレッド」に修正、主要 CLI 引数表の説明を更新
+
+### 設計方針との差異
+
+- 設計方針 3 節「noargs の後勝ちセマンティクス」は実態と異なっていた (noargs::OptSpec::take は先勝ち)。これに対し `dedupe_argv_last_wins()` を追加して、argv 連結後に後勝ち重複除去を行う形で対応した
+- 設計方針 5 節は `JoinSet::spawn` 前提だが、`FakeAudioCapturer` などの !Send オブジェクトを future が保持するため `JoinSet::spawn_local` + `tokio::task::LocalSet` パターンに変更した。`#[tokio::main]` も `fn main() -> Result<()>` + `LocalSet::block_on` に置き換えている
+- 設計方針の `--help` / `--version` ハンドリングは、`parse_common_args` / `parse_instance_args` の冒頭で `noargs::HELP_FLAG.take_help` を呼び、ファイル存在チェックを `help_mode` で skip する設計に変更した
+
+### テスト
+
+- `src/args.rs` 末尾の `#[cfg(test)] mod tests` に単体テスト 13 件 (parse_jsonc_config 系 9 件、parse_args_from_argv 系 4 件)
+- `src/data_channel.rs` 末尾の `#[cfg(test)] mod tests` に compute_seed テスト 3 件 (旧実装一致網羅、state=0 回避、instance 間 seed 分離)
+- 合計 16 件、`cargo test --workspace` で全件パス、`cargo clippy --all-targets --all-features -- -D warnings` 通過、`cargo fmt --all -- --check` 通過
+
+### 残課題 (別 issue として起票候補)
+
+- shiguredo-rust 規約「単体テストは `tests/test_<module>.rs` に配置」「PBT は proptest で書く」未対応。本対応では issue 設計方針 (`src/<module>.rs` の `#[cfg(test)] mod tests` 配置、PBT 不採用) に従ったが、規約準拠の整備は別途必要
+- `Duration::from_secs_f64()` の NaN / inf / 極小値防御 (現バリデーションは `> 0.0` のみ)
+- `dedupe_argv_last_wins()` の未知オプション扱い (未知 `--key` を値付きとして 2 トークン化する挙動の妥当性検証)
+- 設計改善 (run_zakuro_instance の引数構造体化、is_common_key/is_flag の運用ルール一元化など、観点 2 レビューで指摘された設計改善)
 
 新規追加・置換ログ (英語、`f64` は `{}` Display、`Option<f64>` は `{:?}` Debug、経過秒は `{:.2}`):
 
