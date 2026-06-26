@@ -184,17 +184,36 @@ fn xorshift32(state: &mut u32) -> u32 {
     x
 }
 
+/// xorshift32 の初期 seed を `instance_id` と `vc_id` から計算する
+///
+/// 黄金比 * 2^32 を表す 2 つの定数 (`2654435761` = `0x9E3779B1` と `0x9E3779B9`)
+/// を使い、`instance_id` と `vc_id` が混ざらないように別の係数を適用する。
+/// `0xDEAD_BEEF` の XOR は元実装と同じ。
+///
+/// xorshift32 は state=0 のとき永久に 0 を返す LFSR 性質を持つため、計算結果が
+/// 0 になった場合は 1 を返してフェイルセーフにする。
+///
+/// 後方互換: `instance_id=0` のとき `instance_id.wrapping_mul(0x9E3779B9) == 0`
+/// で XOR の単位元として作用し、`state == 0xDEAD_BEEF ^ vc_id.wrapping_mul(2654435761)`
+/// となる。`vcs <= 1000` の実用範囲で state=0 にはならないため、現行実装の
+/// xorshift32 出力と完全一致する。
+pub(crate) fn compute_seed(instance_id: u32, vc_id: u32) -> u32 {
+    let state = 0xDEAD_BEEF ^ vc_id.wrapping_mul(2654435761) ^ instance_id.wrapping_mul(0x9E3779B9);
+    if state == 0 { 1 } else { state }
+}
+
 /// DataChannel メッセージ送信タスク
 ///
 /// 各チャネルに対して interval_ms ごとに ZAKURO ヘッダ付きメッセージを送信する
 pub(crate) async fn run_messaging(
-    id: u32,
+    instance_id: u32,
+    vc_id: u32,
     handle: SoraConnectionHandle,
     channels: Vec<MessageChannel>,
     token: CancellationToken,
 ) {
     let mut counters: HashMap<String, u64> = HashMap::new();
-    let mut xorshift_state: u32 = 0xDEAD_BEEF ^ (id.wrapping_mul(2654435761));
+    let mut xorshift_state: u32 = compute_seed(instance_id, vc_id);
 
     // 各チャネルごとの次の送信時刻を管理
     let mut next_send: Vec<tokio::time::Instant> = channels
@@ -204,11 +223,10 @@ pub(crate) async fn run_messaging(
 
     loop {
         // 最も早い次の送信時刻を探す
-        let (idx, &earliest) = next_send
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, t)| *t)
-            .unwrap();
+        let (idx, &earliest) =
+            next_send.iter().enumerate().min_by_key(|(_, t)| *t).expect(
+                "logical invariant: run_messaging is only spawned when channels is non-empty",
+            );
 
         tokio::select! {
             biased;
@@ -232,8 +250,9 @@ pub(crate) async fn run_messaging(
         let msg = build_message(*counter, "", payload_size, &mut xorshift_state);
 
         rtc_log_info!(
-            "[vc-{}] Send DataChannel label={} counter={} size={}",
-            id,
+            "[i{}/vc-{}] Send DataChannel label={} counter={} size={}",
+            instance_id,
+            vc_id,
             ch.label,
             counter,
             msg.len(),
@@ -241,8 +260,9 @@ pub(crate) async fn run_messaging(
 
         if let Err(e) = handle.send_message(&ch.label, &msg).await {
             rtc_log_info!(
-                "[vc-{}] DataChannel send failed: label={} error={}",
-                id,
+                "[i{}/vc-{}] DataChannel send failed: label={} error={}",
+                instance_id,
+                vc_id,
                 ch.label,
                 e,
             );
@@ -251,5 +271,71 @@ pub(crate) async fn run_messaging(
 
         *counter += 1;
         next_send[idx] = tokio::time::Instant::now() + Duration::from_millis(ch.interval_ms as u64);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 旧実装 (instance_id 概念なし) の seed 計算
+    ///
+    /// `vcs <= 1000` バリデーション範囲内では旧実装は state=0 にならない
+    /// (state=0 となる vc_id = 416_041_631 は範囲外) ため、補正前の値そのものを返す。
+    fn legacy_seed(vc_id: u32) -> u32 {
+        0xDEAD_BEEFu32 ^ vc_id.wrapping_mul(2654435761)
+    }
+
+    #[test]
+    fn compute_seed_matches_legacy_when_instance_id_is_zero() {
+        // 後方互換: instance_id=0 のとき、vcs バリデーション範囲 (0..=1000) で
+        // 旧実装と完全に一致することを網羅的に検証する
+        for vc_id in 0u32..=1000 {
+            assert_eq!(
+                compute_seed(0, vc_id),
+                legacy_seed(vc_id),
+                "instance_id=0, vc_id={} で旧実装と seed が一致しない",
+                vc_id,
+            );
+        }
+    }
+
+    #[test]
+    fn compute_seed_is_never_zero_in_valid_range() {
+        // vc_id ∈ 0..=1000 (バリデーション範囲) の代表値と境界値で state=0 にならないこと
+        // (xorshift32 の LFSR 退化防止)
+        let representatives = [0u32, 1, 2, 100, 500, 999, 1000];
+        for instance_id in [0u32, 1, 8, 64] {
+            for vc_id in representatives {
+                let seed = compute_seed(instance_id, vc_id);
+                assert_ne!(
+                    seed, 0,
+                    "instance_id={}, vc_id={} で seed=0 になっている",
+                    instance_id, vc_id,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compute_seed_differs_between_instances_for_same_vc_id() {
+        // 同じ vc_id でも instance_id が違えば seed が分かれるはず
+        // (DataChannel payload 乱数列が複数 instance で同一にならないことを保証)
+        let vc_id = 0u32;
+        let seed_i0 = compute_seed(0, vc_id);
+        let seed_i1 = compute_seed(1, vc_id);
+        let seed_i2 = compute_seed(2, vc_id);
+        assert_ne!(
+            seed_i0, seed_i1,
+            "instance_id=0,1 の seed が同じになっている"
+        );
+        assert_ne!(
+            seed_i1, seed_i2,
+            "instance_id=1,2 の seed が同じになっている"
+        );
+        assert_ne!(
+            seed_i0, seed_i2,
+            "instance_id=0,2 の seed が同じになっている"
+        );
     }
 }

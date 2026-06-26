@@ -48,5 +48,7 @@ tokio = {
     "time",
   ]
 }
-# tokio ユーティリティ (CancellationToken)
-tokio-util = "0.7"
+# tokio ユーティリティ (CancellationToken, DelayQueue)
+tokio-util = { version = "0.7", features = ["time"] }
+# tokio Stream ラッパー (ReceiverStream, IntervalStream)
+tokio-stream = "0.1"
