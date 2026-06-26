@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-06-26
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-26
 - Model: Opus 4.7
 - Branch: feature/change-input-y4m
 - Polished: {YYYY-MM-DD}
@@ -47,23 +47,26 @@ zakuro (C++) では `--fake-video-capture` のままだが、zakuro-rs は機能
 
 ### 1. `src/args.rs`
 
-- `fake_video_capture` フィールド → `input_y4m` にリネーム
-- `noargs::opt("fake-video-capture")` → `noargs::opt("input-y4m")` にリネーム
-- ヘルプ doc 文言を「Y4M ファイルを映像入力として再生する」相当に修正
-- ファイル存在チェックのエラーメッセージを新名称に更新
-- 排他バリデーション 3 箇所のメッセージを新名称に更新 (`--sandstorm`, `--video-input-device`, `--input-mp4` との組み合わせ)
-- JSON 入力で `fake-video-capture` キーを参照している箇所も `input-y4m` に変更
-- 既存の `args.rs` 内のテストで `fake-video-capture` を参照しているものを `input-y4m` に更新
+- `fake_video_capture` フィールドを `input_y4m` にリネーム
+- `noargs::opt("fake-video-capture")` を `noargs::opt("input-y4m")` にリネーム
+- ヘルプ doc を「Y4M ファイルを映像入力として再生する」に変更
+- ファイル存在チェックのエラーメッセージを `input-y4m: file not found` に更新
+- 排他バリデーションのメッセージを `--sandstorm` / `--video-input-device` / `--input-mp4` の 3 箇所で新名称に更新
+- JSONC 由来の引数群でも `--input-y4m` がそのまま受理される (キー名共有のため追加変更なし)
 
 ### 2. `src/main.rs`
 
-- `instance.fake_video_capture` → `instance.input_y4m`
+- `instance.fake_video_capture` を `instance.input_y4m` に変更
 
 ### 3. ドキュメント
 
-- `README.md` の例 / 引数一覧 / 排他制約の記載を更新
-- `docs/ZAKURO.md` の CLI 一覧と実装状況リストを更新
+- `README.md` の使用例・引数一覧表・排他制約 2 箇所を新名称に更新
+- `docs/ZAKURO.md` の実装状況リスト 1 箇所を新名称に更新 (zakuro 互換 CLI 一覧の箇所は原典のため未変更)
 
 ### 4. CHANGES.md
 
-- `[CHANGE]` カテゴリで「`--fake-video-capture` を `--input-y4m` にリネーム」を追記
+- `[CHANGE] CLI 引数 `--fake-video-capture` を `--input-y4m` にリネームする` を追記
+
+### 5. 確認
+
+- `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test` (16 件) が全てパス
