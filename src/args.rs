@@ -39,7 +39,7 @@ pub(crate) struct InstanceArgs {
     pub(crate) resolution: (i32, i32),
     pub(crate) framerate: u32,
     pub(crate) sandstorm: bool,
-    pub(crate) fake_video_capture: Option<String>,
+    pub(crate) input_y4m: Option<String>,
     pub(crate) input_mp4: Option<String>,
     pub(crate) video_codec_type: Option<String>,
     pub(crate) video_bit_rate: Option<u32>,
@@ -752,14 +752,14 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         .take(&mut args)
         .is_present();
 
-    let fake_video_capture: Option<String> = noargs::opt("fake-video-capture")
-        .doc("Y4M 動画ファイルからフェイク映像を生成する")
+    let input_y4m: Option<String> = noargs::opt("input-y4m")
+        .doc("Y4M ファイルを映像入力として再生する")
         .example("video.y4m")
         .take(&mut args)
         .present_and_then(|o| {
             let path = o.value().to_string();
             if !help_mode && !std::path::Path::new(&path).exists() {
-                return Err("fake-video-capture: file not found");
+                return Err("input-y4m: file not found");
             }
             Ok(path)
         })?;
@@ -908,7 +908,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
                 resolution,
                 framerate,
                 sandstorm,
-                fake_video_capture,
+                input_y4m,
                 input_mp4,
                 video_codec_type,
                 video_bit_rate,
@@ -940,15 +940,12 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
     if framerate == 0 || framerate > 60 {
         return Err(ErrorMessage::new("framerate は 1 から 60 の範囲で指定してください").into());
     }
-    if sandstorm && fake_video_capture.is_some() {
-        return Err(ErrorMessage::new(
-            "--sandstorm と --fake-video-capture は同時に指定できません",
-        )
-        .into());
+    if sandstorm && input_y4m.is_some() {
+        return Err(ErrorMessage::new("--sandstorm と --input-y4m は同時に指定できません").into());
     }
-    if video_input_device.is_some() && fake_video_capture.is_some() {
+    if video_input_device.is_some() && input_y4m.is_some() {
         return Err(ErrorMessage::new(
-            "--video-input-device と --fake-video-capture は同時に指定できません",
+            "--video-input-device と --input-y4m は同時に指定できません",
         )
         .into());
     }
@@ -964,11 +961,8 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         )
         .into());
     }
-    if input_mp4.is_some() && fake_video_capture.is_some() {
-        return Err(ErrorMessage::new(
-            "--input-mp4 と --fake-video-capture は同時に指定できません",
-        )
-        .into());
+    if input_mp4.is_some() && input_y4m.is_some() {
+        return Err(ErrorMessage::new("--input-mp4 と --input-y4m は同時に指定できません").into());
     }
     if input_mp4.is_some() && sandstorm {
         return Err(ErrorMessage::new("--input-mp4 と --sandstorm は同時に指定できません").into());
@@ -1007,7 +1001,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
             resolution,
             framerate,
             sandstorm,
-            fake_video_capture,
+            input_y4m,
             input_mp4,
             video_codec_type,
             video_bit_rate,

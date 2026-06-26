@@ -408,10 +408,7 @@ async fn run_zakuro_instance(
                 height: instance.resolution.1,
                 fps: instance.framerate as i32,
                 sandstorm: instance.sandstorm,
-                y4m_path: instance
-                    .fake_video_capture
-                    .as_ref()
-                    .map(std::path::PathBuf::from),
+                y4m_path: instance.input_y4m.as_ref().map(std::path::PathBuf::from),
                 beep_trigger: beep_trigger.clone(),
             };
             let mut capturer = FakeVideoCapturer::new(config)?;

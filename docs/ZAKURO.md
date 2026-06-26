@@ -213,7 +213,7 @@ POST /rpc          → JSON-RPC 2.0
 - [x] 砂嵐映像生成
 - [x] 解像度指定 (QVGA/VGA/HD/FHD/4K/WxH)
 - [x] フレームレート指定 (1-60)
-- [x] Y4M 動画ファイル読込 (`--fake-video-capture`)
+- [x] Y4M 動画ファイル読込 (`--input-y4m`)
 - [x] 実デバイスキャプチャ (`--video-input-device`)
 - [x] MP4 パススルー送信 (`--input-mp4`)
 - [ ] 解像度固定モード (`--fixed-resolution`)
