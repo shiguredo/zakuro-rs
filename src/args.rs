@@ -41,6 +41,7 @@ pub(crate) struct InstanceArgs {
     pub(crate) sandstorm: bool,
     pub(crate) input_y4m: Option<String>,
     pub(crate) input_mp4: Option<String>,
+    pub(crate) input_wav: Option<String>,
     pub(crate) video_codec_type: Option<String>,
     pub(crate) video_bit_rate: Option<u32>,
     pub(crate) audio: bool,
@@ -776,6 +777,18 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
             Ok(path)
         })?;
 
+    let input_wav: Option<String> = noargs::opt("input-wav")
+        .doc("WAV ファイル (PCM 16bit) を音声入力としてループ再生する")
+        .example("audio.wav")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let path = o.value().to_string();
+            if !help_mode && !std::path::Path::new(&path).exists() {
+                return Err("input-wav: file not found");
+            }
+            Ok(path)
+        })?;
+
     let video_codec_type: Option<String> = noargs::opt("sora-video-codec-type")
         .doc("映像コーデック (vp8/vp9/av1/h264/h265)")
         .take(&mut args)
@@ -910,6 +923,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
                 sandstorm,
                 input_y4m,
                 input_mp4,
+                input_wav,
                 video_codec_type,
                 video_bit_rate,
                 audio,
@@ -967,6 +981,16 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
     if input_mp4.is_some() && sandstorm {
         return Err(ErrorMessage::new("--input-mp4 と --sandstorm は同時に指定できません").into());
     }
+    if input_wav.is_some() && no_audio_device {
+        return Err(
+            ErrorMessage::new("--input-wav と --no-audio-device は同時に指定できません").into(),
+        );
+    }
+    if input_wav.is_some() && !audio {
+        return Err(
+            ErrorMessage::new("--input-wav 使用時は --sora-audio=false を指定できません").into(),
+        );
+    }
     if input_mp4.is_some() && video_codec_type.is_none() {
         return Err(ErrorMessage::new(
             "--input-mp4 使用時は --sora-video-codec-type の指定が必須です",
@@ -1003,6 +1027,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
             sandstorm,
             input_y4m,
             input_mp4,
+            input_wav,
             video_codec_type,
             video_bit_rate,
             audio,

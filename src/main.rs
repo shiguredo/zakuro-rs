@@ -11,6 +11,7 @@ mod scenario;
 mod stats;
 mod video_device_capturer;
 mod virtual_client;
+mod wav_reader;
 mod y4m_reader;
 
 use std::time::Duration;
@@ -303,14 +304,26 @@ async fn run_zakuro_instance(
     };
 
     // フェイク音声キャプチャの初期化
-    // 音声有効かつフェイク映像モード時にビープ音連携を行う
+    // 音声有効かつフェイク映像モード時にビープ音または WAV ファイル再生を行う
     let use_fake_audio = !instance.no_audio_device
         && instance.audio
         && instance.role.wants_send()
         && instance.input_mp4.is_none()
         && instance.video_input_device.is_none();
-    let beep_trigger = if use_fake_audio {
+    // WAV モードでは映像連動ビープが意味を持たないため、ビープトリガーは生成しない
+    let use_wav_audio = use_fake_audio && instance.input_wav.is_some();
+    let beep_trigger = if use_fake_audio && !use_wav_audio {
         Some(fake_audio_capturer::BeepTrigger::new())
+    } else {
+        None
+    };
+    // WAV モードの場合は事前にファイルを開いて 48kHz モノラルにリサンプル済みのサンプル列を保持する
+    let wav_source = if use_wav_audio {
+        let wav_path = instance
+            .input_wav
+            .as_ref()
+            .expect("use_wav_audio は input_wav の存在を含意する");
+        Some(wav_reader::WavReader::open(wav_path)?)
     } else {
         None
     };
@@ -329,9 +342,16 @@ async fn run_zakuro_instance(
             ..Default::default()
         };
 
-        // フェイク音声 ADM の登録
-        let pending = if let Some(ref trigger) = beep_trigger {
-            let mut capturer = fake_audio_capturer::FakeAudioCapturer::new(trigger.clone());
+        // フェイク音声 ADM の登録 (WAV モードまたはビープモード)
+        let fake_source = if let Some(reader) = wav_source {
+            Some(fake_audio_capturer::FakeAudioSource::Wav(reader))
+        } else {
+            beep_trigger
+                .as_ref()
+                .map(|t| fake_audio_capturer::FakeAudioSource::Beep(t.clone()))
+        };
+        let pending = if let Some(source) = fake_source {
+            let mut capturer = fake_audio_capturer::FakeAudioCapturer::new(source);
             capturer.start();
             config.adm_config = AdmConfig::UseExternal(capturer.audio_device_module());
             Some(capturer)
