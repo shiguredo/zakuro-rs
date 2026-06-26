@@ -6,6 +6,7 @@ Sora WebRTC SFU の負荷試験ツール `zakuro` の Rust 実装です。
 
 ## 主な機能
 
+- 1 プロセスで複数の Zakuro インスタンスを段階的に起動 (JSONC `instances` 配列、`--instance-hatch-rate`)
 - 複数の仮想クライアントを段階的に起動
 - Sora への `sendonly` / `recvonly` / `sendrecv` 接続
 - フェイク映像、砂嵐映像、Y4M 入力、実カメラ入力、MP4 パススルー送信
@@ -124,6 +125,41 @@ cargo run -- \
 cargo run -- --config ./config.jsonc
 ```
 
+### 複数の Zakuro インスタンスを起動する
+
+1 プロセスで複数の Zakuro インスタンスを起動するには JSONC `instances` 配列を使います。各要素が独立した `SoraConnectionContext` と仮想クライアント群を持ち、i 番目のインスタンスは `i / instance-hatch-rate` 秒の遅延後に起動します。最上位のキーはインスタンス共通設定 (HTTP サーバー、`--instance-hatch-rate`、mTLS、`--openh264`) と全インスタンス向けテンプレート (`instances[i]` で上書き可) を兼ねます。
+
+```jsonc
+{
+  // 全インスタンス共通設定
+  "instance-hatch-rate": 1.0,
+  "http-host": "127.0.0.1",
+  "http-port": 8080,
+
+  // インスタンスごとの設定
+  "instances": [
+    {
+      "vcs": 50,
+      "sora": {
+        "signaling-url": "wss://sora.example.com/signaling",
+        "channel-id": "zakuro-send",
+        "role": "sendonly"
+      }
+    },
+    {
+      "vcs": 100,
+      "sora": {
+        "signaling-url": "wss://sora.example.com/signaling",
+        "channel-id": "zakuro-recv",
+        "role": "recvonly"
+      }
+    }
+  ]
+}
+```
+
+`instances` が無い JSONC や CLI 単独起動は従来通り単一インスタンスとして動作します。
+
 ## 主なオプション
 
 | オプション | 説明 |
@@ -133,6 +169,7 @@ cargo run -- --config ./config.jsonc
 | `--sora-role` | `sendonly` / `recvonly` / `sendrecv` |
 | `--vcs` | 仮想クライアント数 (`1` - `1000`) |
 | `--vcs-hatch-rate` | 仮想クライアントの起動レート |
+| `--instance-hatch-rate` | Zakuro インスタンスの起動レート (JSONC `instances` 配列と組み合わせて使用) |
 | `--duration` | 接続維持秒数 |
 | `--repeat-interval` | 再接続間隔 |
 | `--video-input-device` | 映像入力デバイス名または ID |
