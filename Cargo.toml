@@ -18,7 +18,9 @@ path = "src/main.rs"
 # 暗号ライブラリ (乱数生成に利用)
 aws-lc-rs = "1.17"
 # DuckDB バインディング (統計記録に利用)
-duckdb = { version = "1.10504", features = ["bundled"] }
+# bundled は CI でビルド時間 30 分以上かかるため使用しない
+# 代わりに DUCKDB_DOWNLOAD_LIB=1 で prebuilt バイナリをダウンロードする
+duckdb = { version = "1.10504", default-features = false }
 # UTC タイムスタンプ整形 (DuckDB ファイル名生成用)
 jiff = "0.2"
 # CLI 引数パース

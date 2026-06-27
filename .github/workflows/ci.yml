@@ -23,7 +23,10 @@ jobs:
           # - ubuntu-24.04-arm
           # - macos-26
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 15
+    env:
+      # libduckdb-sys に prebuilt バイナリをダウンロードさせる (bundled ビルドは CI で 30 分以上かかるため)
+      DUCKDB_DOWNLOAD_LIB: "1"
     steps:
       - uses: actions/checkout@v6
       - run: rustup update stable
