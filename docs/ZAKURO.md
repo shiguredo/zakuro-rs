@@ -192,9 +192,10 @@ POST /rpc          → JSON-RPC 2.0
 | nojson | 0.3 | JSON / JSONC パース |
 | noargs | 0.4 | CLI 引数パース |
 | aws-lc-rs | 1.17 | 暗号ライブラリ (乱数生成) |
+| jiff | 0.2 | UTC タイムスタンプ整形 (DuckDB ファイル名生成用) |
 | tokio | 1.52 | 非同期ランタイム |
 | tokio-util | 0.7 | CancellationToken |
-| duckdb | 1.10504 | DuckDB バインディング (将来の統計記録用) |
+| duckdb | 1.10504 | DuckDB バインディング (統計記録に利用) |
 
 ### コア機能
 
@@ -272,6 +273,7 @@ POST /rpc          → JSON-RPC 2.0
 
 - [x] JSONC 設定ファイル (`--config`)
 - [x] NopVideoDecoder (受信映像廃棄)
+- [x] DuckDB ファイルへの統計情報出力 (`--duckdb-output-dir` / `--duckdb-interval` / `--no-duckdb-output`)
 - [ ] ログレベル制御 (`--log-level`)
 - [ ] 埋め込みリソース (フォント・音声)
 

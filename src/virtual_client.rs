@@ -1,12 +1,18 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use shiguredo_webrtc::{VideoTrackSource, rtc_log_info, rtc_log_warning};
-use sora_sdk::{ConnectDataChannel, JsonString, Role, SoraConnection, SoraConnectionContext};
+use sora_sdk::{
+    ConnectDataChannel, JsonString, Role, SignalingDirection, SoraConnection, SoraConnectionContext,
+};
 use tokio::sync::mpsc;
+use tokio_stream::{StreamExt, wrappers::IntervalStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::data_channel::MessageChannel;
+use crate::duckdb_stats::{
+    ConnectionIds, DuckDBClient, InsertConnectionRow, WriteCommand, dispatch_stats, parse_offer_ids,
+};
 use crate::scenario::{Scenario, ScenarioPlayer};
 use crate::stats::StatsEvent;
 
@@ -39,6 +45,10 @@ pub(crate) struct VirtualClientConfig {
     pub(crate) client_cert: Option<String>,
     pub(crate) client_key: Option<String>,
     pub(crate) scenario: Option<Scenario>,
+    /// DuckDB 統計書き込みクライアント (disabled 時は noop)
+    pub(crate) duckdb_client: DuckDBClient,
+    /// DuckDB への統計書き込み間隔
+    pub(crate) duckdb_interval: Duration,
 }
 
 enum DisconnectReason {
@@ -62,8 +72,18 @@ pub(crate) async fn run(
 
     loop {
         let connection_token = token.child_token();
+        // 接続ごとに identifiers を新規生成する (再接続時は別 connection_id が記録される)
+        let ids: Arc<std::sync::Mutex<Option<ConnectionIds>>> =
+            Arc::new(std::sync::Mutex::new(None));
 
-        let (client, handle) = match build_client(&context, &video_source, &config) {
+        let (client, handle) = match build_client(
+            &context,
+            &video_source,
+            &config,
+            &ids,
+            instance_id,
+            vc_id,
+        ) {
             Ok(pair) => pair,
             Err(e) => {
                 rtc_log_warning!(
@@ -114,6 +134,29 @@ pub(crate) async fn run(
                     msg_handle,
                     msg_channels,
                     msg_token,
+                )
+                .await;
+            });
+        }
+
+        // DuckDB 統計収集タスクの起動 (disabled 時は起動しない)
+        if config.duckdb_client.is_enabled() {
+            let stats_client = config.duckdb_client.clone();
+            let stats_ids = ids.clone();
+            let stats_handle = handle.clone();
+            let stats_token = connection_token.child_token();
+            let interval = config.duckdb_interval;
+            let channel_id = config.channel_id.clone();
+            tokio::task::spawn_local(async move {
+                run_stats_collection(
+                    instance_id,
+                    vc_id,
+                    channel_id,
+                    stats_client,
+                    stats_ids,
+                    stats_handle,
+                    stats_token,
+                    interval,
                 )
                 .await;
             });
@@ -250,10 +293,87 @@ async fn duration_timer(duration: Option<f64>) {
     }
 }
 
+/// DuckDB 統計収集ループ
+///
+/// `--duckdb-interval` 秒ごとに `handle.get_stats()` を呼び、戻り JSON を
+/// `dispatch_stats` で各テーブルに振り分ける。connection_id 確定前の初回 tick は
+/// スキップし、確定後にログを出す。
+#[expect(clippy::too_many_arguments)]
+async fn run_stats_collection(
+    instance_id: u32,
+    vc_id: u32,
+    channel_id: String,
+    client: DuckDBClient,
+    ids: Arc<std::sync::Mutex<Option<ConnectionIds>>>,
+    handle: sora_sdk::SoraConnectionHandle,
+    token: CancellationToken,
+    interval: Duration,
+) {
+    let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // 初回 tick は即座に発火するが、connection_id 未確定の可能性が高いため
+    // 1 回目をスキップする (interval.tick() で消費)
+    tick.tick().await;
+    let mut ticks = IntervalStream::new(tick);
+    let mut skipped_iters: u32 = 0;
+    loop {
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => break,
+            _ = ticks.next() => {
+                let Some(parsed) = ids
+                    .lock()
+                    .expect("connection_ids mutex poisoned")
+                    .clone()
+                else {
+                    skipped_iters += 1;
+                    continue;
+                };
+                if skipped_iters > 0 {
+                    rtc_log_info!(
+                        "[i{}/vc-{}][duckdb] connection identifiers confirmed after {} skipped iterations",
+                        instance_id,
+                        vc_id,
+                        skipped_iters,
+                    );
+                    skipped_iters = 0;
+                }
+                let stats = match handle.get_stats().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        rtc_log_warning!(
+                            "[i{}/vc-{}][duckdb] get_stats failed: {}",
+                            instance_id,
+                            vc_id,
+                            e,
+                        );
+                        continue;
+                    }
+                };
+                // JsonString から RawJsonOwned への抽出は再 parse 経由
+                // (sora_sdk に as_raw() / into_raw() が無いため)
+                let stats_text = stats.to_string();
+                dispatch_stats(
+                    instance_id,
+                    vc_id,
+                    &channel_id,
+                    &parsed,
+                    &client,
+                    &stats_text,
+                    SystemTime::now(),
+                );
+            }
+        }
+    }
+}
+
 fn build_client(
     context: &Arc<SoraConnectionContext>,
     video_source: &Option<VideoTrackSource>,
     config: &VirtualClientConfig,
+    ids: &Arc<std::sync::Mutex<Option<ConnectionIds>>>,
+    instance_id: u32,
+    vc_id: u32,
 ) -> sora_sdk::Result<(sora_sdk::SoraConnection, sora_sdk::SoraConnectionHandle)> {
     let mut builder = SoraConnection::builder(
         context.clone(),
@@ -265,6 +385,41 @@ fn build_client(
     .on_push(|_text| {})
     .on_track(|_transceiver| {})
     .on_remove_track(|_receiver| {});
+
+    // offer 受信時に connection_id / session_id を抽出し DuckDB へ記録する
+    // (on_notify の connection.created は同一チャネル内の他 client 接続でも届きうるため不採用)
+    let ids_for_sig = ids.clone();
+    let duckdb_for_sig = config.duckdb_client.clone();
+    let channel_id_for_sig = config.channel_id.clone();
+    let role_str = config.role.as_sora_role().to_string();
+    // Audio::Bool(false) は音声無効、それ以外 (None / Audio{...}) は音声有効
+    let audio_value = !matches!(&config.audio, Some(sora_sdk::Audio::Bool(false)));
+    // Video::Bool(false) は映像無効、それ以外 (None / Video{...}) は映像有効
+    let video_value = !matches!(&config.video, Some(sora_sdk::Video::Bool(false)));
+    builder = builder.on_signaling_message(move |_type_, direction, text| {
+        if direction != SignalingDirection::Received {
+            return;
+        }
+        let Some(parsed) = parse_offer_ids(text) else {
+            return;
+        };
+        // lock を取らずに try_send → その後 lock を取って set する
+        // (lock 保持中の try_send は呼ばない)
+        duckdb_for_sig.try_send(WriteCommand::InsertConnection(Box::new(
+            InsertConnectionRow {
+                instance_id,
+                vc_id,
+                timestamp: SystemTime::now(),
+                channel_id: channel_id_for_sig.clone(),
+                connection_id: parsed.connection_id.clone(),
+                session_id: parsed.session_id.clone(),
+                role: role_str.clone(),
+                audio: audio_value,
+                video: video_value,
+            },
+        )));
+        *ids_for_sig.lock().expect("connection_ids mutex poisoned") = Some(parsed);
+    });
 
     if let Some(ref id) = config.client_id {
         builder = builder.client_id(id.clone());

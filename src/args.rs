@@ -5,7 +5,7 @@ use sora_sdk::Role;
 use crate::error::{ErrorMessage, Result};
 use crate::scenario::ScenarioType;
 
-/// プロセス全体で共有する設定 (HTTP サーバー / Ctrl+C ハンドラ / OpenH264 ライブラリ / mTLS 等)
+/// プロセス全体で共有する設定 (HTTP サーバー / Ctrl+C ハンドラ / OpenH264 ライブラリ / mTLS / DuckDB 等)
 #[derive(Debug, Clone)]
 pub(crate) struct CommonArgs {
     pub(crate) instance_hatch_rate: f64,
@@ -15,6 +15,12 @@ pub(crate) struct CommonArgs {
     pub(crate) insecure: bool,
     pub(crate) client_cert: Option<String>,
     pub(crate) client_key: Option<String>,
+    /// DuckDB ファイルの出力ディレクトリ (デフォルトはカレントディレクトリ)
+    pub(crate) duckdb_output_dir: String,
+    /// DuckDB への統計書き込み間隔 (秒)
+    pub(crate) duckdb_interval: f64,
+    /// DuckDB 出力を無効化する (`--no-duckdb-output`)
+    pub(crate) no_duckdb_output: bool,
 }
 
 /// インスタンスごとの設定 (vc 群・Sora 接続 / 映像音声キャプチャ / シナリオ等)
@@ -84,6 +90,9 @@ fn is_common_key(key: &str) -> bool {
             | "insecure"
             | "client-cert"
             | "client-key"
+            | "duckdb-output-dir"
+            | "duckdb-interval"
+            | "no-duckdb-output"
     )
 }
 
@@ -95,7 +104,8 @@ fn is_common_key(key: &str) -> bool {
 fn is_flag(key: &str) -> bool {
     matches!(
         key,
-        "insecure"           // CommonArgs
+        "insecure"  // CommonArgs
+            | "no-duckdb-output"  // CommonArgs
             | "no-video-device"  // InstanceArgs
             | "no-audio-device"  // InstanceArgs
             | "sandstorm" // InstanceArgs
@@ -586,6 +596,54 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
             Ok(path)
         })?;
 
+    // --no-duckdb-output は単独フラグ
+    let no_duckdb_output = noargs::flag("no-duckdb-output")
+        .doc("DuckDB への統計情報出力を無効化する")
+        .take(&mut args)
+        .is_present();
+
+    // --duckdb-output-dir は値付きオプション
+    // `--no-duckdb-output` 指定時はディレクトリ存在検証をスキップする (優先されるため)
+    // 明示指定されたかは `dir_presented` フラグで記録し、あとで --no-duckdb-output 併用を警告する
+    let mut dir_presented = false;
+    let duckdb_output_dir: String = noargs::opt("duckdb-output-dir")
+        .doc("DuckDB ファイルの出力ディレクトリ (デフォルト: カレントディレクトリ)")
+        .example(".")
+        .take(&mut args)
+        .present_and_then(|o| {
+            dir_presented = true;
+            let dir = o.value().to_string();
+            if !help_mode && !no_duckdb_output && !std::path::Path::new(&dir).is_dir() {
+                return Err("duckdb-output-dir: directory not found");
+            }
+            Ok(dir)
+        })?
+        .unwrap_or_else(|| ".".to_string());
+
+    // --duckdb-interval は 0.1 以上 86400 以下の inclusive 範囲
+    let mut interval_presented = false;
+    let duckdb_interval: f64 = noargs::opt("duckdb-interval")
+        .doc("DuckDB への統計書き込み間隔 (秒, デフォルト: 1.0)")
+        .take(&mut args)
+        .present_and_then(|o| {
+            interval_presented = true;
+            let v: f64 = o
+                .value()
+                .parse()
+                .map_err(|_| "duckdb-interval は 0.1 から 86400 の範囲で指定してください")?;
+            if !(0.1..=86400.0).contains(&v) {
+                return Err("duckdb-interval は 0.1 から 86400 の範囲で指定してください");
+            }
+            Ok(v)
+        })?
+        .unwrap_or(1.0);
+
+    // --no-duckdb-output と他の --duckdb-* 引数の併用検知
+    // (引数の登場順を問わず --no-duckdb-output が指定されていれば警告 1 回)
+    if no_duckdb_output && (dir_presented || interval_presented) {
+        rtc_log_warning!("--no-duckdb-output specified, ignoring other --duckdb-* options");
+    }
+
     let help = args.finish()?.unwrap_or_default();
 
     // help_mode のときは早期 return: バリデーションは skip し、戻り値の CommonArgs はダミー値とする
@@ -600,6 +658,9 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
                 insecure,
                 client_cert,
                 client_key,
+                duckdb_output_dir,
+                duckdb_interval,
+                no_duckdb_output,
             },
             help,
         ));
@@ -629,6 +690,9 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
             insecure,
             client_cert,
             client_key,
+            duckdb_output_dir,
+            duckdb_interval,
+            no_duckdb_output,
         },
         help,
     ))
@@ -1080,7 +1144,7 @@ fn parse_args_from_argv(
 /// 2. JSONC をロードして `JsoncConfig` を構築
 /// 3. 残り CLI 引数を CommonArgs / InstanceArgs 用に分割
 /// 4. `parse_args_from_argv()` に流す
-pub(crate) fn parse_args() -> Result<(CommonArgs, Vec<InstanceArgs>)> {
+pub(crate) fn parse_args() -> Result<(CommonArgs, Vec<InstanceArgs>, Option<String>)> {
     let env_argv: Vec<String> = std::env::args().collect();
     let program_name = env_argv.first().cloned().unwrap_or_default();
 
@@ -1127,8 +1191,8 @@ pub(crate) fn parse_args() -> Result<(CommonArgs, Vec<InstanceArgs>)> {
     let JsoncConfig {
         common_argv,
         instance_argvs,
-    } = if let Some(path) = config_path {
-        load_jsonc_config(&path)?
+    } = if let Some(ref path) = config_path {
+        load_jsonc_config(path)?
     } else {
         JsoncConfig {
             common_argv: Vec::new(),
@@ -1151,13 +1215,15 @@ pub(crate) fn parse_args() -> Result<(CommonArgs, Vec<InstanceArgs>)> {
     // CLI 引数を CommonArgs / InstanceArgs 用に分割
     let (common_cli_argv, instance_cli_argv) = split_cli_argv(cli_after_config);
 
-    parse_args_from_argv(
+    let (common, instances) = parse_args_from_argv(
         &program_name,
         common_argv,
         common_cli_argv,
         instance_argvs,
         instance_cli_argv,
-    )
+    )?;
+
+    Ok((common, instances, config_path))
 }
 
 #[cfg(test)]
@@ -1436,5 +1502,240 @@ mod tests {
             msg.contains("vcs-hatch-rate"),
             "エラーメッセージに vcs-hatch-rate が含まれていない: {msg}"
         );
+    }
+
+    // ---- DuckDB 系引数のテスト ----
+
+    /// DuckDB 引数を含む argv を CommonArgs 用に組み立てる
+    /// (instance 側は最小限の sora argv を別途用意する)
+    fn common_duckdb_argv(dir: &str, interval: &str, no_output: bool) -> Vec<String> {
+        let mut v: Vec<String> = Vec::new();
+        if !dir.is_empty() {
+            v.push("--duckdb-output-dir".into());
+            v.push(dir.into());
+        }
+        if !interval.is_empty() {
+            v.push("--duckdb-interval".into());
+            v.push(interval.into());
+        }
+        if no_output {
+            v.push("--no-duckdb-output".into());
+        }
+        v
+    }
+
+    #[test]
+    fn duckdb_output_dir_defaults_to_current_directory() {
+        // --duckdb-output-dir 未指定時はカレントディレクトリ "." になる
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            Vec::new(),
+            Vec::new(),
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect("有効な argv のパースに失敗してはならない");
+        assert_eq!(
+            common.duckdb_output_dir, ".",
+            "未指定時はカレントディレクトリになるべき"
+        );
+    }
+
+    #[test]
+    fn duckdb_interval_defaults_to_one_second() {
+        // --duckdb-interval 未指定時は 1.0 になる
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            Vec::new(),
+            Vec::new(),
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect("有効な argv のパースに失敗してはならない");
+        assert_eq!(common.duckdb_interval, 1.0, "未指定時は 1.0 になるべき");
+    }
+
+    #[test]
+    fn duckdb_no_output_flag_parses() {
+        // --no-duckdb-output 単独フラグのパース
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            common_duckdb_argv("", "", true),
+            Vec::new(),
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect("有効な argv のパースに失敗してはならない");
+        assert!(
+            common.no_duckdb_output,
+            "no_duckdb_output が true になるべき"
+        );
+    }
+
+    #[test]
+    fn duckdb_interval_boundary_values_accepted() {
+        // 0.1 と 86400 は inclusive 範囲なので受け入れる
+        let dir = tempfile::TempDir::new()
+            .expect("一時ディレクトリの作成に失敗")
+            .keep();
+        let dir_str = dir.to_string_lossy().to_string();
+        for &val in &["0.1", "86400"] {
+            let (common, _instances) = parse_args_from_argv(
+                "zakuro",
+                common_duckdb_argv(&dir_str, val, false),
+                Vec::new(),
+                vec![minimal_sora_argv()],
+                Vec::new(),
+            )
+            .expect(&format!("duckdb-interval={val} は受け入れられるべき"));
+            assert_eq!(
+                common.duckdb_interval.to_string(),
+                val,
+                "duckdb-interval={val} が正しくパースされていない"
+            );
+        }
+    }
+
+    #[test]
+    fn duckdb_interval_out_of_range_rejected() {
+        // 0.099 と 86400.1 は範囲外なのでエラー
+        let dir = tempfile::TempDir::new()
+            .expect("一時ディレクトリの作成に失敗")
+            .keep();
+        let dir_str = dir.to_string_lossy().to_string();
+        for &val in &["0.099", "86400.1"] {
+            let err = parse_args_from_argv(
+                "zakuro",
+                common_duckdb_argv(&dir_str, val, false),
+                Vec::new(),
+                vec![minimal_sora_argv()],
+                Vec::new(),
+            )
+            .expect_err(&format!("duckdb-interval={val} は拒否されるべき"));
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("duckdb-interval"),
+                "エラーメッセージに duckdb-interval が含まれていない: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn duckdb_output_dir_missing_rejected() {
+        // 存在しないディレクトリはエラー
+        let dir = tempfile::TempDir::new()
+            .expect("一時ディレクトリの作成に失敗")
+            .keep();
+        let missing = dir.join("does-not-exist");
+        let missing_str = missing.to_string_lossy().to_string();
+        let err = parse_args_from_argv(
+            "zakuro",
+            common_duckdb_argv(&missing_str, "", false),
+            Vec::new(),
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect_err("存在しないディレクトリを許容してはならない");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("duckdb-output-dir"),
+            "エラーメッセージに duckdb-output-dir が含まれていない: {msg}"
+        );
+    }
+
+    #[test]
+    fn duckdb_no_output_skips_directory_validation() {
+        // --no-duckdb-output 指定時はディレクトリ存在検証をスキップする
+        let dir = tempfile::TempDir::new()
+            .expect("一時ディレクトリの作成に失敗")
+            .keep();
+        let missing = dir.join("does-not-exist");
+        let missing_str = missing.to_string_lossy().to_string();
+        // 存在しないディレクトリ + --no-duckdb-output はエラーにならない
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            common_duckdb_argv(&missing_str, "", true),
+            Vec::new(),
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect("--no-duckdb-output 時はディレクトリ検証をスキップするべき");
+        assert!(
+            common.no_duckdb_output,
+            "no_duckdb_output が true になるべき"
+        );
+    }
+
+    #[test]
+    fn is_common_key_includes_duckdb_keys() {
+        // is_common_key に DuckDB 系 3 キーが含まれている
+        assert!(is_common_key("duckdb-output-dir"));
+        assert!(is_common_key("duckdb-interval"));
+        assert!(is_common_key("no-duckdb-output"));
+    }
+
+    #[test]
+    fn is_flag_includes_no_duckdb_output() {
+        // is_flag に --no-duckdb-output が含まれている
+        assert!(is_flag("no-duckdb-output"));
+    }
+
+    #[test]
+    fn split_cli_argv_routes_duckdb_keys_to_common() {
+        // --duckdb-output-dir (値付き) と --no-duckdb-output (フラグ) が common 側に振り分けられる
+        let dir = tempfile::TempDir::new()
+            .expect("一時ディレクトリの作成に失敗")
+            .keep();
+        let dir_str = dir.to_string_lossy().to_string();
+        let cli: Vec<String> = vec![
+            "--duckdb-output-dir".into(),
+            dir_str.clone(),
+            "--no-duckdb-output".into(),
+            "--vcs".into(),
+            "5".into(),
+        ];
+        let (common, instance) = split_cli_argv(cli);
+        assert!(
+            common
+                .windows(2)
+                .any(|w| w[0] == "--duckdb-output-dir" && w[1] == dir_str),
+            "common 側に --duckdb-output-dir が振り分けられていない"
+        );
+        assert!(
+            common.iter().any(|s| s == "--no-duckdb-output"),
+            "common 側に --no-duckdb-output が振り分けられていない"
+        );
+        assert!(
+            instance.windows(2).any(|w| w[0] == "--vcs" && w[1] == "5"),
+            "instance 側に --vcs が振り分けられていない"
+        );
+    }
+
+    #[test]
+    fn dedupe_argv_last_wins_duckdb_output_dir() {
+        // --duckdb-output-dir が複数登場した場合は後勝ち
+        let dir1 = tempfile::TempDir::new()
+            .expect("一時ディレクトリの作成に失敗")
+            .keep();
+        let dir2 = tempfile::TempDir::new()
+            .expect("一時ディレクトリの作成に失敗")
+            .keep();
+        let dir1_str = dir1.to_string_lossy().to_string();
+        let dir2_str = dir2.to_string_lossy().to_string();
+        let argv: Vec<String> = vec![
+            "--duckdb-output-dir".into(),
+            dir1_str.clone(),
+            "--duckdb-output-dir".into(),
+            dir2_str.clone(),
+        ];
+        let deduped = dedupe_argv_last_wins(argv);
+        // 後勝ちで dir2 だけ残る
+        let dirs: Vec<&String> = deduped
+            .windows(2)
+            .filter(|w| w[0] == "--duckdb-output-dir")
+            .map(|w| &w[1])
+            .collect();
+        assert_eq!(dirs.len(), 1, "重複除去後に 1 件だけ残るべき");
+        assert_eq!(dirs[0], &dir2_str, "後勝ちで dir2 が残るべき");
     }
 }

@@ -24,6 +24,7 @@ pub(crate) enum AppError {
     Args(noargs::Error),
     Sora(sora_sdk::Error),
     VideoDevice(shiguredo_video_device::Error),
+    DuckDb(duckdb::Error),
     Message(ErrorMessage),
     Io(io::Error),
 }
@@ -35,6 +36,7 @@ impl std::fmt::Display for AppError {
             AppError::Sora(err) => write!(f, "AppError::Sora: {err}"),
             AppError::Message(err) => write!(f, "AppError::Message: {err}"),
             AppError::VideoDevice(err) => write!(f, "AppError::VideoDevice: {err}"),
+            AppError::DuckDb(err) => write!(f, "AppError::DuckDb: {err}"),
             AppError::Io(err) => write!(f, "AppError::Io: {err}"),
         }
     }
@@ -44,6 +46,7 @@ impl std::error::Error for AppError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             AppError::Sora(err) => Some(err),
+            AppError::DuckDb(err) => Some(err),
             _ => None,
         }
     }
@@ -70,6 +73,12 @@ impl From<ErrorMessage> for AppError {
 impl From<shiguredo_video_device::Error> for AppError {
     fn from(err: shiguredo_video_device::Error) -> Self {
         AppError::VideoDevice(err)
+    }
+}
+
+impl From<duckdb::Error> for AppError {
+    fn from(err: duckdb::Error) -> Self {
+        AppError::DuckDb(err)
     }
 }
 

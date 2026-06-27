@@ -2,6 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-03-27
+- Completed: 2026-06-27
 - Model: Opus 4.7
 - Branch: feature/add-duckdb-stats-writer
 - Polished: 2026-06-27
@@ -746,4 +747,42 @@ PBT (`proptest`) は本 issue では採用しない。範囲外検証は単体�
 
 ## 解決方法
 
-(実装完了後に追記)
+### 新規ファイル
+
+- `src/duckdb_stats.rs` — DuckDB 統計書き込みモジュール (Writer / Client / WriteCommand / Row 構造体 / DDL 投入 / INSERT 実行 / RTCStats JSON 振り分け / offer からの connection_id 抽出 / config_json 構築 + テスト)
+- `src/duckdb_schema.sql` — DuckDB スキーマ (シーケンス 8 個 + テーブル 10 個 + インデックス 9 個)
+- `docs/DUCKDB.md` — DuckDB スキーマドキュメント
+
+### 変更ファイル
+
+- `Cargo.toml` — `duckdb` に `features = ["bundled"]` を追加、`jiff = "0.2"` を追加、`tempfile = "3.10"` を dev-dependencies に追加
+- `src/error.rs` — `AppError` に `DuckDb(duckdb::Error)` バリアントを追加
+- `src/args.rs` — `CommonArgs` に `duckdb_output_dir` / `duckdb_interval` / `no_duckdb_output` の 3 フィールドを追加、`is_common_key()` / `is_flag()` を更新、`parse_args()` の戻り値に `config_path` を追加、DuckDB 引数のテストを追加
+- `src/main.rs` — `DuckDBStatsWriter` の起動 / `InsertZakuro` / `InsertZakuroScenario` / shutdown ハンドシェイク / `run_zakuro_instance` への `duckdb_client` 受け渡し
+- `src/virtual_client.rs` — `VirtualClientConfig` に `duckdb_client` / `duckdb_interval` を追加、`on_signaling_message` ハンドラで offer 受信時に `connection` テーブルへ INSERT、`run_stats_collection` で `get_stats` ループを起動
+- `CHANGES.md` — `[ADD]` エントリを追加
+- `README.md` — 主な機能とオプション表に DuckDB 系を追加
+- `docs/ZAKURO.md` — 依存ライブラリ表に `jiff` を追加、実装状況に DuckDB 出力を追加
+
+### 設計の要点
+
+- `Connection` は `Send` だが `!Sync` のため、`spawn_blocking` 内で `Handle::current().block_on` して mpsc 受信ループを回す
+- VirtualClient からは `DuckDBClient::try_send` で `Send` 可能な `WriteCommand` を投げる
+- mpsc バッファ容量 8192、満杯時は `try_send` で drop し `dropped_count` をインクリメント、reporter task が 5 秒ごとに warn 出力
+- `type:offer` メッセージから `connection_id` / `session_id` を抽出し `connection` テーブルに 1 行 INSERT
+- `get_stats` の戻り JSON を `type` で振り分けて各 `rtc_stats_*` テーブルに INSERT
+- 未知 type は `OnceLock<Mutex<HashSet>>` で初回のみ warn
+- `config_json` は `nojson::DisplayJson` 手書きで構築、機密 4 フィールドは `"<masked>"` で出力
+- `--no-duckdb-output` 指定時は writer task を起動せず noop クライアントを使用
+
+### テスト
+
+- スキーマ生成 (テーブル 10 / シーケンス 8 / インデックス 9 / `instance_id` 列位置)
+- `rtc_stats_codec` UNIQUE 制約の重複排除
+- RTCStats JSON 振り分け (既知 7 type + 未知 1 type)
+- 未知 type の warn 抑制 (投入前後の差分で検証)
+- `zakuro` テーブルの INSERT + UPDATE フロー
+- `config_json` の機密マスクと None 省略
+- `parse_offer_ids` の正常 / 異常系
+- ファイル名生成のパターン
+- DuckDB 引数のパース / 境界値 / ディレクトリ検証 / `--no-duckdb-output` 優先

@@ -12,6 +12,7 @@ Sora WebRTC SFU の負荷試験ツール `zakuro` の Rust 実装です。
 - フェイク映像、砂嵐映像、Y4M 入力、実カメラ入力、MP4 パススルー送信
 - 音声の有効 / 無効切り替え
 - DataChannel 設定
+- DuckDB ファイルへの統計情報出力 (`--duckdb-output-dir` / `--duckdb-interval` / `--no-duckdb-output`)
 - JSONC 設定ファイルの読み込み
 - HTTP API (`GET /.ok`, `POST /rpc`)
 - 再接続シナリオ (`--scenario reconnect`)
@@ -202,6 +203,9 @@ cargo run -- --config ./config.jsonc
 | `--http-host`, `--http-port` | HTTP API を有効化 |
 | `--client-cert`, `--client-key` | mTLS 設定 |
 | `--insecure` | TLS 証明書検証をスキップ |
+| `--duckdb-output-dir` | DuckDB ファイルの出力ディレクトリ (デフォルト: カレントディレクトリ) |
+| `--duckdb-interval` | DuckDB への統計書き込み間隔 (秒、デフォルト: 1.0) |
+| `--no-duckdb-output` | DuckDB への統計情報出力を無効化 |
 
 ## HTTP API
 

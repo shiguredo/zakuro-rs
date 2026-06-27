@@ -1,5 +1,6 @@
 mod args;
 mod data_channel;
+mod duckdb_stats;
 mod error;
 mod fake_audio_capturer;
 mod fake_video_capturer;
@@ -29,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::time::DelayQueue;
 
 use crate::args::{CommonArgs, InstanceArgs};
+use crate::duckdb_stats::WriteCommand;
 use crate::error::{ErrorMessage, Result};
 use crate::fake_video_capturer::{FakeVideoCapturer, FakeVideoCapturerConfig};
 use crate::stats::{StatsCollector, StatsEvent};
@@ -116,7 +118,7 @@ async fn async_main() -> Result<()> {
     log::enable_timestamps();
     log::enable_threads();
 
-    let (common, instance_args_vec) = args::parse_args()?;
+    let (common, instance_args_vec, config_path) = args::parse_args()?;
 
     let total_vcs: u32 = instance_args_vec.iter().map(|i| i.vcs).sum();
     let instances_count = instance_args_vec.len() as u32;
@@ -134,6 +136,9 @@ async fn async_main() -> Result<()> {
     } else {
         None
     };
+    // OpenH264 ランタイムバージョン (ロード後に取得可能、zakuro テーブル用)
+    let openh264_runtime_version: Option<String> =
+        openh264_lib.as_ref().map(|lib| lib.runtime_version());
 
     // mTLS PEM の読み込み (プロセス全体で 1 回)
     let client_cert_pem: Option<String> = if let Some(ref path) = common.client_cert {
@@ -152,6 +157,75 @@ async fn async_main() -> Result<()> {
     } else {
         None
     };
+
+    // DuckDB ファイルパスの生成 (UTC タイムスタンプ付き、1 プロセス 1 ファイル)
+    // --no-duckdb-output 指定時はファイルを生成せず noop クライアントになる
+    let duckdb_enabled = !common.no_duckdb_output;
+    let duckdb_db_path = if duckdb_enabled {
+        let dir = std::path::Path::new(&common.duckdb_output_dir);
+        let filename = duckdb_stats::generate_filename();
+        let path = dir.join(&filename);
+        // 同名ファイル存在は起動エラー (ミリ秒単位で衝突することは通常無いが念のため)
+        if path.exists() {
+            return Err(ErrorMessage::new(format!(
+                "DuckDB file already exists: {}",
+                path.display()
+            ))
+            .into());
+        }
+        Some(path)
+    } else {
+        None
+    };
+
+    // DuckDB writer の起動 (init readiness ハンドシェイクでスキーマ投入完了を待つ)
+    let duckdb_config = duckdb_stats::DuckDBWriterConfig {
+        db_path: duckdb_db_path.unwrap_or_default(),
+        interval: Duration::from_secs_f64(common.duckdb_interval),
+        enabled: duckdb_enabled,
+    };
+    let (duckdb_writer, duckdb_version) =
+        duckdb_stats::DuckDBStatsWriter::start(duckdb_config).await?;
+    let duckdb_client = duckdb_writer.client();
+
+    // zakuro テーブルへの起動情報 INSERT
+    if duckdb_client.is_enabled() {
+        let config_mode = if config_path.is_some() {
+            "JSONC"
+        } else {
+            "ARGS"
+        };
+        let config_json = duckdb_stats::build_config_json(&common, &instance_args_vec);
+        duckdb_client.try_send(WriteCommand::InsertZakuro(Box::new(
+            duckdb_stats::InsertZakuroRow {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                sora_sdk_version: None, // sora_sdk に公開 version() 関数が無いため NULL
+                webrtc_version: Some(shiguredo_webrtc::version().to_string()),
+                openh264_version: openh264_runtime_version,
+                duckdb_version: Some(duckdb_version),
+                environment: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+                config_mode: config_mode.to_string(),
+                config_json,
+                start_timestamp: std::time::SystemTime::now(),
+            },
+        )));
+        // 各 InstanceArgs ごとに zakuro_scenario へ 1 行 INSERT
+        for (i, inst) in instance_args_vec.iter().enumerate() {
+            duckdb_client.try_send(WriteCommand::InsertZakuroScenario(Box::new(
+                duckdb_stats::InsertZakuroScenarioRow {
+                    instance_id: i as u32,
+                    vcs: inst.vcs,
+                    duration: inst.duration,
+                    repeat_interval: inst.repeat_interval,
+                    max_retry: inst.max_retry,
+                    retry_interval: inst.retry_interval,
+                    sora_signaling_urls: inst.signaling_urls.clone(),
+                    sora_channel_id: inst.channel_id.clone(),
+                    sora_role: inst.role.as_sora_role().to_string(),
+                },
+            )));
+        }
+    }
 
     let token = CancellationToken::new();
 
@@ -214,6 +288,8 @@ async fn async_main() -> Result<()> {
                 let client_cert_pem_cloned = client_cert_pem.clone();
                 let client_key_pem_cloned = client_key_pem.clone();
                 let stats_tx_cloned = stats_tx.clone();
+                let duckdb_client_cloned = duckdb_client.clone();
+                let duckdb_interval = Duration::from_secs_f64(common.duckdb_interval);
                 instances.spawn_local(async move {
                     let result = run_zakuro_instance(
                         i,
@@ -224,6 +300,8 @@ async fn async_main() -> Result<()> {
                         client_key_pem_cloned,
                         task_token,
                         stats_tx_cloned,
+                        duckdb_client_cloned,
+                        duckdb_interval,
                     ).await;
                     (i, result)
                 });
@@ -252,6 +330,20 @@ async fn async_main() -> Result<()> {
     // token.cancel() は idempotent なため二度呼び出しても問題ない。
     token.cancel();
 
+    // DuckDB writer の shutdown ハンドシェイク
+    // 1. stop_timestamp UPDATE を確実に送る (try_send だと満杯時に drop されるため send.await)
+    // 2. main 側の client を drop して全 Sender を drop (writer の recv が None を返す)
+    // 3. writer task の完了を待つ (stop_timestamp UPDATE 完了を保証)
+    if duckdb_client.is_enabled() {
+        duckdb_client
+            .send(WriteCommand::UpdateZakuroStop {
+                stop_timestamp: std::time::SystemTime::now(),
+            })
+            .await;
+    }
+    drop(duckdb_client);
+    duckdb_writer.join().await?;
+
     rtc_log_info!("zakuro: all Zakuro instances finished");
 
     Ok(())
@@ -271,6 +363,8 @@ async fn run_zakuro_instance(
     client_key_pem: Option<String>,
     token: CancellationToken,
     stats_tx: mpsc::Sender<StatsEvent>,
+    duckdb_client: crate::duckdb_stats::DuckDBClient,
+    duckdb_interval: Duration,
 ) -> Result<()> {
     rtc_log_info!(
         "Zakuro instance {}: vcs={} vcs-hatch-rate={} duration={:?} repeat_interval={:?}",
@@ -499,6 +593,8 @@ async fn run_zakuro_instance(
         client_cert: client_cert_pem,
         client_key: client_key_pem,
         scenario: instance.scenario.map(scenario::build_scenario),
+        duckdb_client,
+        duckdb_interval,
     };
 
     // vcs-hatch-rate 制御の DelayQueue を構築
