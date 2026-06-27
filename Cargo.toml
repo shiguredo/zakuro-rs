@@ -3,10 +3,10 @@ name = "zakuro"
 version = "2026.0.0"
 edition = "2024"
 rust-version = "1.96"
-description = "Recording Composition Tool Hisui"
+description = "Recording Composition Tool Zakuro"
 readme = "README.md"
-homepage = "https://github.com/shiguredo/hisui"
-repository = "https://github.com/shiguredo/hisui"
+homepage = "https://github.com/shiguredo/zakuro-rs"
+repository = "https://github.com/shiguredo/zakuro-rs"
 license = "Apache-2.0"
 publish = false
 
