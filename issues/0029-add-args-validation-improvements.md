@@ -5,11 +5,11 @@
 - Completed: 2026-00-00
 - Model: DeepSeek V4 Pro
 - Branch: feature/add-args-validation-improvements
-- Polished: 2026-00-00
+- Polished: 2026-06-28
 
 ## 目的
 
-`src/args.rs` の引数パース・JSONC 設定ファイル処理に存在するバリデーション不足と境界値問題を修正する。
+`src/args.rs` の引数パース・JSONC 設定ファイル処理に存在するバリデーション不足と境界値問題を修正する。本 issue は 5 件の独立した修正を含む複合 issue であり、同一ファイルに対する変更のため 1 ブランチで対応する。
 
 ## 優先度根拠
 
@@ -19,38 +19,45 @@
 
 ### 1. signaling-url 空配列で空文字列が生成される
 
-`src/args.rs:217-241`: JSONC の `signaling-url` が空配列 `[]` の場合、空文字列が `--sora-signaling-url` の値になり、有効な URL 無しで起動する。
+`flatten_sora_object` (`src/args.rs:215-241`): JSONC の `signaling-url` が空配列 `[]` の場合、`joined` は空文字列 `""` になり、`--sora-signaling-url ""` が生成される。さらに `parse_instance_args` (`:714-718`) で `"".split(',')` → `[""]` となり、有効な URL 無しで起動する。
 
 ### 2. split_cli_argv が次トークンを無条件に値として消費する
 
-`src/args.rs:449-457`: `--vcs --sandstorm` のような指定で、`--sandstorm` が vcs の値として消費され消失する。
+`split_cli_argv` (`:449-457`): 非フラグキーに続くトークンが `--` 始まりかをチェックせず、常に値として消費する。`--vcs --sandstorm` のような指定で `--sandstorm` が vcs の値として消費され消失する。
 
 ### 3. no_video_device と映像ソース系の排他チェック欠落
 
-`src/args.rs:1012-1047`: `no_video_device` と `video_input_device` / `input_y4m` / `sandstorm` / `input_mp4` の排他チェックがない。
+`parse_instance_args` (`:1021-1047`): `no_video_device` と `video_input_device` / `input_y4m` / `sandstorm` / `input_mp4` の排他チェックがない。全 4 種の映像ソースとの排他が漏れている。
 
 ### 4. JSONC の boolean false がテンプレートの true を上書きできない
 
-`src/args.rs:164-173`: テンプレートに `"sandstorm": true` がある場合、インスタンスで `"sandstorm": false` を指定しても何も生成されない。
+`push_kv` (`:164-173`): boolean `false` は何も出力しない。テンプレートに `"sandstorm": true` がある場合、インスタンスで `"sandstorm": false` を指定しても CLI 引数が全く生成されず、`dedupe_argv_last_wins` (`:468-522`) に上書きの機会が与えられない。
 
 ### 5. `${...}` 環境変数置換がサイレントドロップされる
 
-`src/args.rs:293-300`: 警告ログは出るがキー全体が無視されユーザーが気づきにくい。
+`resolve_env_in_string` (`:293-300`): 警告ログは出るがキー全体が `continue` で無視される。必須キー (`sora-signaling-url` 等) が消失し、ユーザーが原因に気づきにくい。
 
 ## 設計方針
 
-1. signaling-url 空配列をエラーにする
-2. 次トークンが `--` 始まりの場合はエラーにする
-3. no_video_device の排他チェックを追加する
-4. JSONC の boolean false に対して警告ログを出す（上書き不可であることを通知する）
-5. `${...}` を含む値はエラーで起動を拒否する
+| # | 問題 | 修正方針 |
+|---|------|---------|
+| 1 | 空配列で空 URL | signaling-url が空配列または空文字列要素を含む場合、エラーで起動を拒否する |
+| 2 | 次トークンを無条件消費 | 非フラグキーの直後のトークンが `--` で始まる場合はエラーにする |
+| 3 | no_video_device 排他漏れ | `no_video_device` と `video_input_device` / `input_y4m` / `sandstorm` / `input_mp4` の排他チェックを追加する |
+| 4 | boolean false が上書き不可 | `push_kv` と `dedupe_argv_last_wins` の挙動は変更せず、テンプレート `true` が残った場合に警告ログを出力する |
+| 5 | `${...}` がサイレントドロップ | `${...}` を含む値はエラーで起動を拒否する |
 
 ## 完了条件
 
 - 上記 5 件すべてのバリデーションが追加されていること
 - 既存の args.rs のテストが通過すること
-- 追加したバリデーションに対応するテストが追加されていること
+- 新規に以下のテストを追加すること（テストのログメッセージは日本語にすること）:
+  - 空配列/空文字列要素の signaling-url がエラーになることのテスト
+  - `--vcs --sandstorm` がエラーになることのテスト
+  - `no_video_device` と各映像ソースの排他エラーのテスト
+  - テンプレート `true` + インスタンス `false` で警告ログが出ることのテスト
+  - `${...}` がエラーになることのテスト
 
 ## 解決方法
 
-`src/args.rs` の該当箇所にバリデーションを追加する。テストも合わせて追加する。
+`src/args.rs` の該当箇所にバリデーションを追加する。`ErrorMessage::new()` によるエラー生成には日本語メッセージを使用する（既存コードの慣習に従う）。
