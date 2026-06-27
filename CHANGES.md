@@ -18,3 +18,8 @@
   - @voluntas
 - [FIX] Cargo.toml のプロジェクトメタデータと CI 設定の誤りを修正する
   - @voluntas
+
+### misc
+
+- [UPDATE] build.rs の他プロジェクト由来の死にコードを削除する
+  - @voluntas
