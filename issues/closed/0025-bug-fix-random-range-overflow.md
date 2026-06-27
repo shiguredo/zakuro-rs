@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-06-28
-- Completed: 2026-00-00
+- Completed: 2026-06-28
 - Model: DeepSeek V4 Pro
 - Branch: feature/fix-random-range-overflow
 - Polished: 2026-06-28
@@ -51,15 +51,18 @@ fn random_range(min: u64, max: u64) -> u64 {
 
 ## 解決方法
 
-`src/scenario.rs:69-74` の `random_range` 関数を以下のように修正する:
+issue の設計方針どおり、`random_range` 関数を修正した。
 
-```rust
-fn random_range(min: u64, max: u64) -> u64 {
-    assert!(max >= min, "random_range: max ({}) must be >= min ({})", max, min);
-    // u128 で計算することで max=u64::MAX/min=0 の u64::MAX+1 も安全に扱える
-    let range = max as u128 - min as u128 + 1;
-    let mut buf = [0u8; 8];
-    aws_lc_rs::rand::fill(&mut buf).expect("random fill failed");
-    (min as u128 + (u64::from_ne_bytes(buf) as u128) % range) as u64
-}
-```
+- `assert!(max >= min, ...)` で不正な引数を早期検出
+- `range` 計算を `u128` で行い、`max=u64::MAX, min=0` のケースでも `u64::MAX+1` がオーバーフローしないようにした
+
+### 変更ファイル
+
+- `src/scenario.rs`: `random_range` 関数のオーバーフロー修正
+
+### テスト追加
+
+- `test_random_range_max_less_than_min_panics`: `max < min` で assert 発動 (should_panic)
+- `test_random_range_existing_range`: 既存呼び出し元 (1000-5000) で 1000 回の範囲内検証
+- `test_random_range_u64_max_boundary`: `(0, u64::MAX)` でパニックしないことの検証
+- `test_random_range_min_equals_max`: `min == max` で常に同一値が返ることの検証

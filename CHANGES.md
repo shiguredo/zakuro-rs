@@ -14,3 +14,5 @@
   - @voluntas
 - [FIX] FFI 境界越えの Mutex poison による未定義動作リスクを除去する
   - @voluntas
+- [FIX] random_range 関数の整数オーバーフローとゼロ除算の潜在バグを修正する
+  - @voluntas
