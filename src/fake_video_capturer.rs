@@ -43,6 +43,11 @@ enum ImageHolder {
     Y4m(Y4mReader, Vec<u8>),
 }
 
+/// ImageHolder が Y4m バリアントかどうかを判定する
+fn is_y4m(image: &ImageHolder) -> bool {
+    matches!(image, ImageHolder::Y4m(..))
+}
+
 impl FakeVideoCapturer {
     pub(crate) fn new(config: FakeVideoCapturerConfig) -> Result<Self> {
         let width = if config.width > 0 { config.width } else { 640 };
@@ -57,7 +62,7 @@ impl FakeVideoCapturer {
         let video_source = source.cast_to_video_track_source();
         let image = if let Some(ref y4m_path) = config.y4m_path {
             let reader = Y4mReader::open(y4m_path.as_path())?;
-            let buf = vec![0u8; reader.width() as usize * reader.height() as usize * 3 / 2];
+            let buf = vec![0u8; reader.frame_size()];
             ImageHolder::Y4m(reader, buf)
         } else if config.sandstorm {
             ImageHolder::Sandstorm(vec![0u32; (width * height) as usize])
@@ -104,10 +109,7 @@ impl FakeVideoCapturer {
         let fps = self.fps.max(1);
         let start_time_ms = self.start_time_ms;
         let sandstorm = self.sandstorm;
-        let has_y4m = self
-            .image
-            .as_ref()
-            .is_some_and(|i| matches!(i, ImageHolder::Y4m(..)));
+        let has_y4m = is_y4m(&image);
         let beep_trigger = self.beep_trigger.take();
         let stop = self.stop.clone();
         let handle = thread::Builder::new()
@@ -699,4 +701,71 @@ fn draw_colon(ctx: &mut Context<'_>, x: f64, y: f64, height: f64) {
     let dot_size = height * 0.1;
     ctx.fill_circle(&Circle::new(x + dot_size, y + height * 0.3, dot_size));
     ctx.fill_circle(&Circle::new(x + dot_size, y + height * 0.7, dot_size));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raden::{Image, PipelineRuntime, PixelFormat};
+
+    /// is_y4m が各バリアントに対して正しい判定結果を返すことを検証する
+    #[test]
+    fn test_is_y4m_all_variants() {
+        // Y4m バリアント — テスト用 Y4M ファイルを生成して検証する
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作成できること");
+        let path = dir.path().join("test.y4m");
+        let w = 640;
+        let h = 480;
+        let chroma_w = (w + 1) / 2;
+        let chroma_h = (h + 1) / 2;
+        let frame_data_size = (w * h + 2 * chroma_w * chroma_h) as usize;
+        let header = format!("YUV4MPEG2 W{w} H{h} F30:1 Ip C420\nFRAME\n");
+        let mut data = header.into_bytes();
+        data.resize(data.len() + frame_data_size, 0);
+        std::fs::write(&path, &data).expect("テスト用 Y4M ファイルを書き込めること");
+
+        let reader = Y4mReader::open(&path).expect("Y4M ファイルを開けること");
+        let buf = vec![0u8; reader.frame_size()];
+        let y4m = ImageHolder::Y4m(reader, buf);
+        assert!(is_y4m(&y4m), "Y4m バリアントは true を返すこと");
+
+        // Raden バリアント
+        let img = Image::new(640, 480, PixelFormat::Prgb32);
+        let runtime = Box::new(PipelineRuntime::new());
+        let raden = ImageHolder::Raden(img, runtime);
+        assert!(!is_y4m(&raden), "Raden バリアントは false を返すこと");
+
+        // Sandstorm バリアント
+        let ss = ImageHolder::Sandstorm(vec![0u32; (640 * 480) as usize]);
+        assert!(!is_y4m(&ss), "Sandstorm バリアントは false を返すこと");
+    }
+
+    /// 奇数次元の解像度でも frame_size() と W*H*3/2 の結果が異なることを確認する
+    /// (バッファ不足の防止のため frame_size() を使用していることの検証)
+    #[test]
+    fn test_odd_dimension_buffer_size() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作成できること");
+        let path = dir.path().join("test_odd.y4m");
+        let w = 641;
+        let h = 481;
+        let chroma_w = (w + 1) / 2;
+        let chroma_h = (h + 1) / 2;
+        let frame_data_size = (w * h + 2 * chroma_w * chroma_h) as usize;
+        let header = format!("YUV4MPEG2 W{w} H{h} F30:1 Ip C420\nFRAME\n");
+        let mut data = header.into_bytes();
+        data.resize(data.len() + frame_data_size, 0);
+        std::fs::write(&path, &data).expect("テスト用 Y4M ファイルを書き込めること");
+
+        let reader = Y4mReader::open(&path).expect("Y4M ファイルを開けること");
+        let frame_size = reader.frame_size();
+        let legacy_size = w as usize * h as usize * 3 / 2;
+
+        // frame_size() は ceil(width/2) * ceil(height/2) * 2 + width * height
+        // legacy_size は width * height * 3 / 2 (整数除算)
+        // 奇数次元では frame_size() ≥ legacy_size + 2 となる
+        assert!(
+            frame_size > legacy_size,
+            "奇数次元では frame_size() が W*H*3/2 の整数除算より大きいこと (frame_size={frame_size}, legacy={legacy_size})"
+        );
+    }
 }

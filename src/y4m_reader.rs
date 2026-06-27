@@ -73,7 +73,7 @@ impl Y4mReader {
     }
 
     /// I420 フレーム 1 枚分のバイト数
-    fn frame_size(&self) -> usize {
+    pub(crate) fn frame_size(&self) -> usize {
         let y = self.width as usize * self.height as usize;
         let uv = self.chroma_width() as usize * self.chroma_height() as usize * 2;
         y + uv

@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-06-28
-- Completed: 2026-00-00
+- Completed: 2026-06-28
 - Model: DeepSeek V4 Pro
 - Branch: feature/fix-y4m-playback
 - Polished: 2026-06-28
@@ -59,37 +59,37 @@ let has_y4m = self
 
 ## 解決方法
 
-`src/fake_video_capturer.rs:107-110` の `has_y4m` 判定を、`take()` 後の `image` 変数に対して直接行うように修正する。
+以下の修正を実施した。
 
-修正前:
+### 1. `has_y4m` 判定バグの修正
 
-```rust
-let mut image = match self.image.take() {
-    Some(i) => i,
-    None => return Ok(()),
-};
-// ... width, height, fps 等の代入 ...
-let has_y4m = self          // ← self.image は既に None
-    .image
-    .as_ref()
-    .is_some_and(|i| matches!(i, ImageHolder::Y4m(..)));
-```
+`src/fake_video_capturer.rs` の `start()` 内で `self.image.take()` 後に `self.image.as_ref()` で Y4M 判定を行っていたバグを修正。`take()` 後のローカル変数 `image` に対して `is_y4m(&image)` を呼ぶ方式に変更した。
 
-修正後:
+### 2. バッファサイズのバグ修正
 
-```rust
-let mut image = match self.image.take() {
-    Some(i) => i,
-    None => return Ok(()),
-};
-let has_y4m = matches!(image, ImageHolder::Y4m(..));
-```
+`FakeVideoCapturer::new()` 内の I420 バッファ確保サイズを `W * H * 3 / 2`（整数除算で奇数次元では不足）から `Y4mReader::frame_size()` に変更した。`frame_size()` は `ceil(W/2) * ceil(H/2) * 2 + W * H` で正しいサイズを計算する。
 
-修正は 1 行の置き換えのみ。
+### 3. `is_y4m` 関数の抽出
+
+`ImageHolder` が Y4m バリアントかどうかを判定する `fn is_y4m(image: &ImageHolder) -> bool` を抽出し、単体テスト可能にした。
+
+### 4. `frame_size()` の可視性変更
+
+`Y4mReader::frame_size()` を `pub(crate)` に変更し、`FakeVideoCapturer` から呼べるようにした。
+
+### 5. テスト追加
+
+- `test_is_y4m_all_variants`: Y4m / Raden / Sandstorm 全バリアントの `is_y4m` 判定テスト
+- `test_odd_dimension_buffer_size`: 奇数次元 (641x481) で `frame_size()` が `W*H*3/2` より大きいことの検証テスト
+
+### 変更ファイル
+
+- `src/fake_video_capturer.rs`: `has_y4m` 判定修正、バッファサイズ修正、`is_y4m` 関数追加、テスト追加
+- `src/y4m_reader.rs`: `frame_size()` を `pub(crate)` に変更
 
 ### エッジケースと後方互換
 
 - **非 Y4M ケース**: `has_y4m = false` のままなので Sandstorm / Raden 分岐に影響なし
-- **`start()` 再呼び出し**: line 90-92 の `handle.is_some()` チェックにより二重起動は防止される。`image` が `None` になった後でも早期リターンするため影響なし
-- **Y4M ファイル末尾到達**: 現在の `Y4mReader::get_frame()` 実装はループ再生に対応しており、末尾到達後に先頭に戻って再生を継続する。修正後もこの挙動は変わらない
-- **破損 Y4M ファイル**: `FakeVideoCapturer::new()` 内で `Y4mReader::open()` がエラーを返すため、`start()` 到達前にエラー終了する。既存のエラーハンドリングに変更なし
+- **`start()` 再呼び出し**: `handle.is_some()` チェックにより二重起動は防止されるため影響なし
+- **Y4M ファイル末尾到達**: `Y4mReader::get_frame()` のループ再生に変更なし
+- **破損 Y4M ファイル**: `Y4mReader::open()` のエラーハンドリングに変更なし

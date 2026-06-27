@@ -10,3 +10,5 @@
   - @voluntas
 - [ADD] 複数 Zakuro インスタンス起動 (JSONC `instances` 配列と `--instance-hatch-rate`) に対応する
   - @voluntas
+- [FIX] `--input-y4m` で Y4M ファイルを指定しても映像が再生されないバグを修正する
+  - @voluntas
