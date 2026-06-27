@@ -17,8 +17,10 @@ path = "src/main.rs"
 [dependencies]
 # 暗号ライブラリ (乱数生成に利用)
 aws-lc-rs = "1.17"
-# DuckDB バインディング (将来の統計記録用)
-duckdb = "1.10504"
+# DuckDB バインディング (統計記録に利用)
+duckdb = { version = "1.10504", features = ["bundled"] }
+# UTC タイムスタンプ整形 (DuckDB ファイル名生成用)
+jiff = "0.2"
 # CLI 引数パース
 noargs = "0.4"
 # JSON パース / 生成
@@ -52,3 +54,7 @@ tokio = {
 tokio-util = { version = "0.7", features = ["time"] }
 # tokio Stream ラッパー (ReceiverStream, IntervalStream)
 tokio-stream = "0.1"
+
+[dev-dependencies]
+# テストで一時ディレクトリを使う
+tempfile = "3.10"
