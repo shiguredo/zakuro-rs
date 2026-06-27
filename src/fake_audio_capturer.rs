@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportRef};
+use shiguredo_webrtc::{
+    AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportRef, rtc_log_warning,
+};
 
 use crate::wav_reader::WavReader;
 
@@ -86,7 +88,10 @@ struct FakeAudioHandler {
 
 impl AudioDeviceModuleHandler for FakeAudioHandler {
     fn register_audio_callback(&self, transport: Option<AudioTransportRef>) -> i32 {
-        let mut stored = self.audio_transport.lock().unwrap();
+        let Ok(mut stored) = self.audio_transport.lock() else {
+            rtc_log_warning!("audio_transport mutex poisoned in register_audio_callback");
+            return -1;
+        };
         *stored = transport;
         0
     }
@@ -253,8 +258,11 @@ fn audio_thread(state: FakeAudioState, mut source: FakeAudioSource) {
         // WebRTC に送信
         if state.recording.load(Ordering::SeqCst) {
             let transport = {
-                let stored = state.audio_transport.lock().unwrap();
-                *stored
+                let Ok(guard) = state.audio_transport.lock() else {
+                    rtc_log_warning!("audio_transport mutex poisoned in audio_thread");
+                    continue;
+                };
+                *guard
             };
             if let Some(transport) = transport {
                 let mut new_mic_level = 0;
@@ -282,5 +290,50 @@ fn audio_thread(state: FakeAudioState, mut source: FakeAudioSource) {
         if next_time > now {
             thread::sleep(next_time - now);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    /// poison 済み Mutex に対して register_audio_callback が -1 を返すことを検証する
+    #[test]
+    fn test_register_audio_callback_poisoned_mutex() {
+        let audio_transport = Arc::new(std::sync::Mutex::new(None::<AudioTransportRef>));
+        // Mutex を poison させる
+        let poisoned = audio_transport.clone();
+        let handle = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("意図的に mutex を poison する");
+        });
+        let _ = handle.join();
+
+        let handler = FakeAudioHandler {
+            recording: Arc::new(AtomicBool::new(false)),
+            audio_transport,
+        };
+        let result = handler.register_audio_callback(None);
+        assert_eq!(
+            result, -1,
+            "poison 済み Mutex では register_audio_callback が -1 を返すこと"
+        );
+    }
+
+    /// 正常系: register_audio_callback が 0 を返し transport が設定されることを検証する
+    #[test]
+    fn test_register_audio_callback_normal() {
+        let audio_transport = Arc::new(std::sync::Mutex::new(None::<AudioTransportRef>));
+        let handler = FakeAudioHandler {
+            recording: Arc::new(AtomicBool::new(false)),
+            audio_transport,
+        };
+        let result = handler.register_audio_callback(None);
+        assert_eq!(
+            result, 0,
+            "正常系では register_audio_callback が 0 を返すこと"
+        );
     }
 }

@@ -12,3 +12,5 @@
   - @voluntas
 - [FIX] `--input-y4m` で Y4M ファイルを指定しても映像が再生されないバグを修正する
   - @voluntas
+- [FIX] FFI 境界越えの Mutex poison による未定義動作リスクを除去する
+  - @voluntas
