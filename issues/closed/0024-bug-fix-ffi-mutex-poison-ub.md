@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-06-28
-- Completed: 2026-00-00
+- Completed: 2026-06-28
 - Model: DeepSeek V4 Pro
 - Branch: feature/fix-ffi-mutex-poison-ub
 - Polished: 2026-06-28
@@ -78,90 +78,23 @@ FFI 境界越えのパニックは libwebrtc (C++) 側のスタックやリソ�
 
 ## 解決方法
 
+issue の設計方針どおり、全 4 箇所を `let Ok(...) else { rtc_log_warning!(...); ... }` パターンに置き換えた。
+
 ### fake_audio_capturer.rs
 
-`use` 宣言に `rtc_log_warning` を追加:
-
-```rust
-use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportRef, rtc_log_warning};
-```
-
-`register_audio_callback` (:89):
-
-```rust
-let Ok(mut stored) = self.audio_transport.lock() else {
-    rtc_log_warning!("audio_transport mutex poisoned in register_audio_callback");
-    return -1;
-};
-```
-
-`audio_thread` (:256) — 元コードのブロックスコープを維持し、ロック保持期間を延長させない:
-
-```rust
-let transport = {
-    let Ok(guard) = state.audio_transport.lock() else {
-        rtc_log_warning!("audio_transport mutex poisoned in audio_thread");
-        continue;
-    };
-    *guard
-}; // guard はここで drop → ロック解放済み → recorded_data_is_available は非ロック状態で呼ばれる
-```
-
-`continue` による `next_time` 更新スキップについては、当該 10ms フレーム 1 回分の欠落に留まるため許容範囲とする。
+- `register_audio_callback` (`:89`): `.unwrap()` を `let Ok(mut stored) else { rtc_log_warning!(...); return -1; }` に置き換え
+- `audio_thread` (`:256`): `.unwrap()` を `let Ok(guard) else { rtc_log_warning!(...); continue; }` に置き換え、ブロックスコープ維持
 
 ### virtual_client.rs
 
-`on_signaling_message` (:399-422) — `try_send` を lock 成功後に移動:
+- `on_signaling_message` (`:399-422`): `try_send` を lock 成功後に移動し `.expect()` を `let Ok(mut guard) else { rtc_log_warning!(...); return; }` に置き換え
+- `run_stats_collection` (`:324-326`): `.expect()` を `let Ok(guard) else { rtc_log_warning!(...); continue; }` に置き換え
 
-```rust
-builder = builder.on_signaling_message(move |_type_, direction, text| {
-    if direction != SignalingDirection::Received {
-        return;
-    }
-    let Some(parsed) = parse_offer_ids(text) else {
-        return;
-    };
-    let Ok(mut guard) = ids_for_sig.lock() else {
-        rtc_log_warning!(
-            "[i{}/vc-{}] connection_ids mutex poisoned in on_signaling_message",
-            instance_id,
-            vc_id,
-        );
-        return;
-    };
-    duckdb_for_sig.try_send(WriteCommand::InsertConnection(Box::new(
-        InsertConnectionRow {
-            instance_id,
-            vc_id,
-            timestamp: SystemTime::now(),
-            channel_id: channel_id_for_sig.clone(),
-            connection_id: parsed.connection_id.clone(),
-            session_id: parsed.session_id.clone(),
-            role: role_str.clone(),
-            audio: audio_value,
-            video: video_value,
-        },
-    )));
-    *guard = Some(parsed);
-});
-```
+### テスト追加
 
-`run_stats_collection` (:324-326) — ブロックスコープで guard を即 drop し、await 越しの保持を防止:
+- `test_register_audio_callback_poisoned_mutex`: poison 済み Mutex で `-1` が返ることを検証
+- `test_register_audio_callback_normal`: 正常系で `0` が返ることを検証
+- `test_on_signaling_message_poison_skips_try_send`: poison 時に try_send が呼ばれないことを検証
+- `test_on_signaling_message_normal_order`: try_send が lock 成功後に実行され ids が更新されることを検証
 
-```rust
-let Some(parsed) = {
-    let Ok(guard) = ids.lock() else {
-        rtc_log_warning!(
-            "[i{}/vc-{}][duckdb] connection_ids mutex poisoned in stats_collection",
-            instance_id,
-            vc_id,
-        );
-        continue;
-    };
-    guard.clone()
-} else {
-    skipped_iters += 1;
-    continue;
-};
-// guard はここで既に drop 済み → 後続の handle.get_stats().await は非ロック状態
-```
+テストはアクセス制御の都合上 `#[cfg(test)]` で各ソースファイルにインライン配置した（`FakeAudioHandler` が private であるため）。
