@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-06-28
-- Completed: 2026-00-00
+- Completed: 2026-06-28
 - Model: DeepSeek V4 Pro
 - Branch: feature/refactor-remove-build-rs-dead-code
 - Polished: 2026-06-28
@@ -51,4 +51,12 @@ build.rs を削除する。全内容が他プロジェクト由来の死にコ�
 
 ## 解決方法
 
-`build.rs` ファイルを `git rm build.rs` で削除する。
+`build.rs` を `git rm` で削除した。全内容が他プロジェクト (momo) 由来の死にコードであり、残す理由がないため。
+
+- `MOMO_COMMIT_SHORT` / `MOMO_BUILD_FLAGS` 環境変数はコードベース全体で一切参照なし
+- `AYAME` / `SORA` / `RASPBERRYPI` / `PREVIEW` feature flag 検出は Cargo.toml に `[features]` セクションがないため常に空
+- `cargo:rerun-if-changed=.git/HEAD` / `.git/refs` は git 操作のたびに不要な再ビルドを引き起こしていた
+
+### 変更ファイル
+
+- `build.rs` (削除)
