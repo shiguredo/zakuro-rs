@@ -21,6 +21,7 @@ CREATE SEQUENCE rtc_stats_data_channel_pk_seq;
 
 -- zakuro: 起動情報 (1 行のみ、instance_id 列なし)
 CREATE TABLE zakuro (
+    id INTEGER PRIMARY KEY DEFAULT 0 CHECK (id = 0),
     version VARCHAR,
     sora_sdk_version VARCHAR,
     webrtc_version VARCHAR,
@@ -319,12 +320,12 @@ CREATE TABLE rtc_stats_data_channel (
 -- インデックス
 CREATE INDEX idx_connection_id ON connection(connection_id);
 CREATE INDEX idx_connection_composite ON connection(channel_id, timestamp);
-CREATE INDEX idx_rtc_stats_codec_composite ON rtc_stats_codec(channel_id, connection_id, timestamp);
-CREATE INDEX idx_rtc_stats_inbound_rtp_composite ON rtc_stats_inbound_rtp(channel_id, connection_id, timestamp);
-CREATE INDEX idx_rtc_stats_outbound_rtp_composite ON rtc_stats_outbound_rtp(channel_id, connection_id, timestamp);
-CREATE INDEX idx_rtc_stats_media_source_composite ON rtc_stats_media_source(channel_id, connection_id, timestamp);
-CREATE INDEX idx_rtc_stats_remote_inbound_rtp_composite ON rtc_stats_remote_inbound_rtp(channel_id, connection_id, timestamp);
-CREATE INDEX idx_rtc_stats_remote_outbound_rtp_composite ON rtc_stats_remote_outbound_rtp(channel_id, connection_id, timestamp);
-CREATE INDEX idx_rtc_stats_data_channel_composite ON rtc_stats_data_channel(channel_id, connection_id, timestamp);
+CREATE INDEX idx_rtc_stats_codec_composite ON rtc_stats_codec(instance_id, channel_id, connection_id, timestamp);
+CREATE INDEX idx_rtc_stats_inbound_rtp_composite ON rtc_stats_inbound_rtp(instance_id, channel_id, connection_id, timestamp);
+CREATE INDEX idx_rtc_stats_outbound_rtp_composite ON rtc_stats_outbound_rtp(instance_id, channel_id, connection_id, timestamp);
+CREATE INDEX idx_rtc_stats_media_source_composite ON rtc_stats_media_source(instance_id, channel_id, connection_id, timestamp);
+CREATE INDEX idx_rtc_stats_remote_inbound_rtp_composite ON rtc_stats_remote_inbound_rtp(instance_id, channel_id, connection_id, timestamp);
+CREATE INDEX idx_rtc_stats_remote_outbound_rtp_composite ON rtc_stats_remote_outbound_rtp(instance_id, channel_id, connection_id, timestamp);
+CREATE INDEX idx_rtc_stats_data_channel_composite ON rtc_stats_data_channel(instance_id, channel_id, connection_id, timestamp);
 
 COMMIT;
