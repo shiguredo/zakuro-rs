@@ -67,10 +67,15 @@ fn build_reconnect_scenario() -> Scenario {
 
 /// min..=max の範囲でランダムな値を返す
 fn random_range(min: u64, max: u64) -> u64 {
-    let range = max - min + 1;
+    assert!(
+        max >= min,
+        "random_range: max ({max}) must be >= min ({min})"
+    );
+    // u128 で計算することで max=u64::MAX / min=0 の u64::MAX+1 も安全に扱える
+    let range = max as u128 - min as u128 + 1;
     let mut buf = [0u8; 8];
     aws_lc_rs::rand::fill(&mut buf).expect("random fill failed");
-    min + u64::from_ne_bytes(buf) % range
+    (min as u128 + (u64::from_ne_bytes(buf) as u128) % range) as u64
 }
 
 /// シナリオプレイヤー
@@ -123,6 +128,49 @@ impl ScenarioPlayer {
         self.op_index += 1;
         if self.op_index >= self.scenario.ops.len() {
             self.op_index = self.scenario.loop_index;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// max < min のケースで assert! が発動することを検証する
+    #[test]
+    #[should_panic(expected = "max (5) must be >= min (10)")]
+    fn test_random_range_max_less_than_min_panics() {
+        random_range(10, 5);
+    }
+
+    /// 既存の呼び出し元の範囲で戻り値が範囲内であることを検証する
+    #[test]
+    fn test_random_range_existing_range() {
+        for _ in 0..1000 {
+            let v = random_range(1000, 5000);
+            assert!(
+                v >= 1000 && v <= 5000,
+                "戻り値 {v} が [1000, 5000] の範囲内であること"
+            );
+        }
+    }
+
+    /// max=u64::MAX, min=0 のケースで range > 0 かつパニックしないことを検証する
+    #[test]
+    fn test_random_range_u64_max_boundary() {
+        for _ in 0..100 {
+            let v = random_range(0, u64::MAX);
+            // パニックせず値が範囲内であることだけを検証する
+            assert!(v <= u64::MAX, "戻り値が u64::MAX 以下であること");
+        }
+    }
+
+    /// min == max のケースで常にその値が返ることを検証する
+    #[test]
+    fn test_random_range_min_equals_max() {
+        for _ in 0..100 {
+            let v = random_range(42, 42);
+            assert_eq!(v, 42, "min == max のときは常にその値が返ること");
         }
     }
 }
