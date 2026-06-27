@@ -16,3 +16,5 @@
   - @voluntas
 - [FIX] random_range 関数の整数オーバーフローとゼロ除算の潜在バグを修正する
   - @voluntas
+- [FIX] Cargo.toml のプロジェクトメタデータと CI 設定の誤りを修正する
+  - @voluntas

@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-06-28
-- Completed: 2026-00-00
+- Completed: 2026-06-28
 - Model: DeepSeek V4 Pro
 - Branch: feature/fix-project-metadata-and-ci
 - Polished: 2026-06-28
@@ -53,32 +53,19 @@ runs-on: ubuntu-slim
 
 ## 解決方法
 
-Cargo.toml の 3 行を以下の値に修正する:
+### Cargo.toml
 
-```toml
-description = "Recording Composition Tool Zakuro"
-homepage = "https://github.com/shiguredo/zakuro"
-repository = "https://github.com/shiguredo/zakuro"
-```
+- `description` を `"Recording Composition Tool Zakuro"` に修正
+- `homepage` を `"https://github.com/shiguredo/zakuro-rs"` に修正
+- `repository` を `"https://github.com/shiguredo/zakuro-rs"` に修正
 
-`.github/workflows/ci.yml` の `slack_notify` ジョブ内:
+### .github/workflows/ci.yml
 
-```yaml
-# line 31: v6 → v4
-- uses: actions/checkout@v4
+- `ci` ジョブの `actions/checkout@v6` → `actions/checkout@v4` に修正 (v6 は存在しない)
+- `slack_notify` ジョブの `runs-on: ubuntu-slim` → `runs-on: ubuntu-latest` に修正 (ubuntu-slim は無効なランナー)
+- `cargo metadata` による description 検証ステップを追加し、メタデータの再発防止を組み込んだ
 
-# line 47: ubuntu-slim → ubuntu-latest
-runs-on: ubuntu-latest
-```
+### 変更ファイル
 
-CI のメイン `ci` ジョブに cargo metadata 検証を追加:
-
-```yaml
-- name: Verify Cargo metadata
-  run: |
-    DESCRIPTION=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.name == "zakuro") | .description')
-    if [ "$DESCRIPTION" != "Recording Composition Tool Zakuro" ]; then
-      echo "::error::Cargo.toml description mismatch: $DESCRIPTION"
-      exit 1
-    fi
-```
+- `Cargo.toml`
+- `.github/workflows/ci.yml`

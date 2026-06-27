@@ -28,7 +28,7 @@ jobs:
       # libduckdb-sys に prebuilt バイナリをダウンロードさせる (bundled ビルドは CI で 30 分以上かかるため)
       DUCKDB_DOWNLOAD_LIB: "1"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - run: rustup update stable
       - name: Install dependencies
         if: runner.os == 'Linux'
@@ -40,11 +40,18 @@ jobs:
         run: cargo clippy --workspace -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Verify Cargo metadata
+        run: |
+          DESCRIPTION=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.name == "zakuro") | .description')
+          if [ "$DESCRIPTION" != "Recording Composition Tool Zakuro" ]; then
+            echo "::error::Cargo.toml description mismatch: $DESCRIPTION"
+            exit 1
+          fi
 
   slack_notify:
     needs: [ci]
     timeout-minutes: 5
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     if: ${{ always() }}
     permissions:
       actions: read
