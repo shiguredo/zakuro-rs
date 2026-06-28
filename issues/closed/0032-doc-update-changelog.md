@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-06-28
-- Completed: 2026-00-00
+- Completed: 2026-06-28
 - Model: DeepSeek V4 Pro
 - Branch: feature/doc-update-changelog
 - Polished: 2026-06-28
@@ -43,30 +43,21 @@ Y4M 映像入力は既存の `[CHANGE]` エントリでカバー済みのため�
 
 ## 解決方法
 
-`docs/ZAKURO.md` の「実装状況」チェックリスト (`[x]`) を参照し、以下のカテゴリに従って追記する:
+`CHANGES.md` の `## develop` セクションに、`docs/ZAKURO.md` の実装状況 `[x]` 項目のうち CHANGES.md に未記載だった機能を追記した。
 
-### [ADD] として追加（ユーザー向け機能）
+### [ADD] 追加 (10 件)
+- HTTP API サーバー
+- JSONC 設定ファイル
+- フェイク映像生成 (Raden / 砂嵐)
+- Y4M / MP4 / 実デバイスキャプチャ
+- DataChannel メッセージング / シナリオ
+- OpenH264 / NopVideoDecoder
+- コーデック / 解像度 / フレームレート / ビットレート
+- mTLS / insecure
+- サイマルキャスト / スポットライト / リトライ / Duration / repeat-interval
 
-- HTTP API サーバー (`--http-host`, `--http-port` / ヘルスチェック・JSON-RPC 2.0)
-- JSONC 設定ファイル (`--config`)
-- フェイク映像生成 (Raden / 砂嵐 `--sandstorm`)
-- MP4 パススルー送信 (`--input-mp4`)
-- 実デバイスキャプチャ (`--video-input-device`)
-- DataChannel メッセージング (`--sora-data-channels`)
-- シナリオ機能 (`--scenario reconnect`)
-- OpenH264 エンコード (`--openh264`)
-- NopVideoDecoder (受信映像廃棄)
-- コーデック指定 (VP8/VP9/AV1/H264/H265)
-- 解像度指定 / フレームレート指定
-- 映像/音声ビットレート指定
-- mTLS (`--client-cert`, `--client-key`) / TLS 証明書検証スキップ (`--insecure`)
-- サイマルキャスト / スポットライト対応
-- リトライロジック (`--max-retry`, `--retry-interval`)
-- Duration / repeat-interval
+### misc [UPDATE] 追加
+- Ctrl+C グレースフルシャットダウン / 統計収集 / フェイク音声ビープ音
 
-### ### misc として追加（内部機能）
-
-- Ctrl+C グレースフルシャットダウン
-- シナリオ統計収集・定期レポート
-- フェイク音声ビープ音生成
-- vcs-hatch-rate (仮想クライアント段階的起動)
+### 変更ファイル
+- `CHANGES.md`
