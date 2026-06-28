@@ -29,11 +29,11 @@ impl WavReader {
     /// WAV ファイルを開いて 48kHz モノラル i16 に変換する
     pub(crate) fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let mut file =
-            File::open(path).map_err(|e| ErrorMessage::new(format!("WAV file open error: {e}")))?;
+        let mut file = File::open(path)
+            .map_err(|e| ErrorMessage::new(format!("WAV ファイルのオープンエラー: {e}")))?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)
-            .map_err(|e| ErrorMessage::new(format!("WAV file read error: {e}")))?;
+            .map_err(|e| ErrorMessage::new(format!("WAV ファイルの読み込みエラー: {e}")))?;
         Self::from_bytes(&buf)
     }
 
@@ -43,7 +43,7 @@ impl WavReader {
         let mono = downmix_to_mono(&parsed.samples, parsed.channels);
         let resampled = resample(&mono, parsed.sample_rate, TARGET_SAMPLE_RATE);
         if resampled.is_empty() {
-            return Err(ErrorMessage::new("WAV file contains no samples").into());
+            return Err(ErrorMessage::new("WAV ファイルにサンプルが含まれていません").into());
         }
         Ok(Self {
             samples: resampled,
@@ -79,13 +79,13 @@ struct ParsedWav {
 /// チャンクサイズが奇数の場合はパディング 1 バイトを読み飛ばす (RIFF 仕様)。
 fn parse_wav(buf: &[u8]) -> Result<ParsedWav> {
     if buf.len() < 12 {
-        return Err(ErrorMessage::new("WAV file too short").into());
+        return Err(ErrorMessage::new("WAV ファイルが短すぎます").into());
     }
     if &buf[0..4] != b"RIFF" {
-        return Err(ErrorMessage::new("WAV file missing RIFF header").into());
+        return Err(ErrorMessage::new("WAV ファイルに RIFF ヘッダがありません").into());
     }
     if &buf[8..12] != b"WAVE" {
-        return Err(ErrorMessage::new("WAV file missing WAVE marker").into());
+        return Err(ErrorMessage::new("WAV ファイルに WAVE マーカーがありません").into());
     }
 
     let mut pos = 12;
@@ -105,14 +105,16 @@ fn parse_wav(buf: &[u8]) -> Result<ParsedWav> {
         let body_start = pos + 8;
         let body_end = body_start
             .checked_add(size)
-            .ok_or_else(|| ErrorMessage::new("WAV chunk size overflow"))?;
+            .ok_or_else(|| ErrorMessage::new("WAV チャンクサイズがオーバーフローしています"))?;
         if body_end > buf.len() {
-            return Err(ErrorMessage::new("WAV chunk size exceeds file").into());
+            return Err(
+                ErrorMessage::new("WAV チャンクサイズがファイルサイズを超えています").into(),
+            );
         }
         match id {
             b"fmt " => {
                 if size < 16 {
-                    return Err(ErrorMessage::new("WAV fmt chunk too short").into());
+                    return Err(ErrorMessage::new("WAV fmt チャンクが短すぎます").into());
                 }
                 audio_format = u16::from_le_bytes(
                     buf[body_start..body_start + 2]
@@ -146,28 +148,28 @@ fn parse_wav(buf: &[u8]) -> Result<ParsedWav> {
 
     if audio_format != 1 {
         return Err(ErrorMessage::new(format!(
-            "WAV unsupported audio format: {audio_format} (PCM only)"
+            "WAV 未対応の音声フォーマット: {audio_format} (PCM のみ対応)"
         ))
         .into());
     }
     if bits_per_sample != 16 {
         return Err(ErrorMessage::new(format!(
-            "WAV unsupported bits per sample: {bits_per_sample} (16bit only)"
+            "WAV 未対応のビット深度: {bits_per_sample} (16bit のみ対応)"
         ))
         .into());
     }
     if channels != 1 && channels != 2 {
         return Err(ErrorMessage::new(format!(
-            "WAV unsupported channels: {channels} (mono or stereo only)"
+            "WAV 未対応のチャンネル数: {channels} (モノラルまたはステレオのみ対応)"
         ))
         .into());
     }
     if sample_rate == 0 {
-        return Err(ErrorMessage::new("WAV invalid sample rate").into());
+        return Err(ErrorMessage::new("WAV サンプルレートが不正です").into());
     }
 
     let (data_start, data_end) =
-        data_range.ok_or_else(|| ErrorMessage::new("WAV missing data chunk"))?;
+        data_range.ok_or_else(|| ErrorMessage::new("WAV data チャンクがありません"))?;
     let data = &buf[data_start..data_end];
 
     // データを i16 サンプルにデコード (リトルエンディアン)
@@ -329,7 +331,7 @@ mod tests {
             .err()
             .expect("非 PCM フォーマットはエラーになるはず");
         assert!(
-            format!("{err}").contains("audio format"),
+            format!("{err}").contains("音声フォーマット"),
             "エラーメッセージに audio format が含まれるはず: {err}"
         );
     }
@@ -346,7 +348,7 @@ mod tests {
             .err()
             .expect("24bit はエラーになるはず");
         assert!(
-            format!("{err}").contains("bits per sample"),
+            format!("{err}").contains("ビット深度"),
             "エラーメッセージに bits per sample が含まれるはず: {err}"
         );
     }

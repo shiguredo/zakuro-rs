@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-06-28
-- Completed: 2026-00-00
+- Completed: 2026-06-28
 - Model: DeepSeek V4 Pro
 - Branch: feature/doc-error-message-language-unification
 - Polished: 2026-06-28
@@ -50,12 +50,12 @@ wav_reader.rs 内の以下のテストが英語のエラーメッセージ文字
 
 ## 解決方法
 
-各 `ErrorMessage::new("English message")` を `ErrorMessage::new("日本語のメッセージ")` に置き換える。翻訳のベースとなる方針:
+`src/y4m_reader.rs` と `src/wav_reader.rs` の全 `ErrorMessage::new()` の文字列を英語から日本語に翻訳した。
 
-| 要素 | 対応 |
-|------|------|
-| 静的文字列 | 日本語に翻訳 |
-| `format!` 内の変数 | `{e}` や `{value}` のまま保持 |
-| 文体 | args.rs の「〜が不正です」パターンに統一 |
+- y4m_reader.rs: 28 箇所のエラーメッセージを日本語化
+- wav_reader.rs: 16 箇所のエラーメッセージを日本語化 + テストアサーション 2 箇所更新
 
-テストの更新: wav_reader.rs:332 の `contains("audio format")` → `contains("音声フォーマット")` 等。
+### 変更ファイル
+
+- `src/y4m_reader.rs`
+- `src/wav_reader.rs`
