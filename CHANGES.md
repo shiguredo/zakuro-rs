@@ -29,3 +29,5 @@
   - @voluntas
 - [UPDATE] duckdb_stats.rs を責務単位でファイル分割する (mod/writer/schema/rows/stats_json)
   - @voluntas
+- [UPDATE] y4m_reader / wav_reader のエラーメッセージを日本語に統一する
+  - @voluntas

@@ -34,11 +34,11 @@ impl Y4mReader {
     /// Y4M ファイルを開いてヘッダを解析する
     pub(crate) fn open(path: &Path) -> Result<Self> {
         let file_size = std::fs::metadata(path)
-            .map_err(|e| ErrorMessage::new(format!("Y4M file metadata error: {e}")))?
+            .map_err(|e| ErrorMessage::new(format!("Y4M ファイルのメタデータ取得エラー: {e}")))?
             .len();
 
-        let file =
-            File::open(path).map_err(|e| ErrorMessage::new(format!("Y4M file open error: {e}")))?;
+        let file = File::open(path)
+            .map_err(|e| ErrorMessage::new(format!("Y4M ファイルのオープンエラー: {e}")))?;
 
         let mut reader = Self {
             file,
@@ -93,7 +93,7 @@ impl Y4mReader {
 
         // 時間の巻き戻りは対応しない
         if frame < self.frame {
-            return Err(ErrorMessage::new("Y4M: time went backwards").into());
+            return Err(ErrorMessage::new("Y4M: 時刻が巻き戻っています").into());
         }
 
         // 要求フレームまでスキップ
@@ -107,15 +107,15 @@ impl Y4mReader {
         // フレームデータを読む
         let size = self.frame_size();
         if buf.len() < size {
-            return Err(ErrorMessage::new("Y4M: buffer too small").into());
+            return Err(ErrorMessage::new("Y4M: バッファが不足しています").into());
         }
         self.file
             .read_exact(&mut buf[..size])
-            .map_err(|e| ErrorMessage::new(format!("Y4M: frame read error: {e}")))?;
+            .map_err(|e| ErrorMessage::new(format!("Y4M: フレーム読み込みエラー: {e}")))?;
         self.pos += size as u64;
 
         if self.pos > self.file_size {
-            return Err(ErrorMessage::new("Y4M: read past end of file").into());
+            return Err(ErrorMessage::new("Y4M: ファイル終端を超えて読み込みました").into());
         }
 
         // ファイル終端に到達したらループ
@@ -135,23 +135,23 @@ impl Y4mReader {
         let n = self
             .file
             .read(&mut header_buf)
-            .map_err(|e| ErrorMessage::new(format!("Y4M: header read error: {e}")))?;
+            .map_err(|e| ErrorMessage::new(format!("Y4M: ヘッダ読み込みエラー: {e}")))?;
         if n == 0 {
-            return Err(ErrorMessage::new("Y4M: empty file").into());
+            return Err(ErrorMessage::new("Y4M: 空のファイルです").into());
         }
 
         let newline_pos = header_buf[..n]
             .iter()
             .position(|&b| b == b'\n')
-            .ok_or_else(|| ErrorMessage::new("Y4M: header line too long or missing newline"))?;
+            .ok_or_else(|| ErrorMessage::new("Y4M: ヘッダ行が長すぎるか改行がありません"))?;
 
         let header = std::str::from_utf8(&header_buf[..newline_pos])
-            .map_err(|_| ErrorMessage::new("Y4M: header is not valid UTF-8"))?;
+            .map_err(|_| ErrorMessage::new("Y4M: ヘッダが UTF-8 として不正です"))?;
 
         let mut tokens = header.split(' ');
         let signature = tokens.next().unwrap_or("");
         if signature != "YUV4MPEG2" {
-            return Err(ErrorMessage::new("Y4M: invalid signature").into());
+            return Err(ErrorMessage::new("Y4M: シグネチャが不正です").into());
         }
 
         for token in tokens {
@@ -163,29 +163,29 @@ impl Y4mReader {
                 "W" => {
                     self.width = value
                         .parse()
-                        .map_err(|_| ErrorMessage::new("Y4M: invalid width"))?;
+                        .map_err(|_| ErrorMessage::new("Y4M: 幅が不正です"))?;
                 }
                 "H" => {
                     self.height = value
                         .parse()
-                        .map_err(|_| ErrorMessage::new("Y4M: invalid height"))?;
+                        .map_err(|_| ErrorMessage::new("Y4M: 高さが不正です"))?;
                 }
                 "F" => {
                     let (num, den) = value
                         .split_once(':')
-                        .ok_or_else(|| ErrorMessage::new("Y4M: invalid framerate format"))?;
+                        .ok_or_else(|| ErrorMessage::new("Y4M: フレームレートの形式が不正です"))?;
                     self.fps_num = num
                         .parse()
-                        .map_err(|_| ErrorMessage::new("Y4M: invalid framerate numerator"))?;
+                        .map_err(|_| ErrorMessage::new("Y4M: フレームレート分子が不正です"))?;
                     self.fps_den = den
                         .parse()
-                        .map_err(|_| ErrorMessage::new("Y4M: invalid framerate denominator"))?;
+                        .map_err(|_| ErrorMessage::new("Y4M: フレームレート分母が不正です"))?;
                 }
                 "I" => {
                     // プログレッシブのみ対応
                     if value != "p" {
                         return Err(ErrorMessage::new(
-                            "Y4M: only progressive scan (Ip) is supported",
+                            "Y4M: プログレッシブスキャン (Ip) のみ対応しています",
                         )
                         .into());
                     }
@@ -199,7 +199,7 @@ impl Y4mReader {
                         "420" | "420jpeg" | "420paldv" | "420mpeg2" => {}
                         _ => {
                             return Err(ErrorMessage::new(format!(
-                                "Y4M: unsupported chroma format: C{value}"
+                                "Y4M: 未対応の色差フォーマット: C{value}"
                             ))
                             .into());
                         }
@@ -210,23 +210,27 @@ impl Y4mReader {
                 }
                 _ => {
                     return Err(
-                        ErrorMessage::new(format!("Y4M: unknown header token: {token}")).into(),
+                        ErrorMessage::new(format!("Y4M: 未知のヘッダトークン: {token}")).into(),
                     );
                 }
             }
         }
 
         if self.width <= 0 || self.height <= 0 || self.fps_num <= 0 {
-            return Err(ErrorMessage::new("Y4M: missing required header fields (W, H, F)").into());
+            return Err(
+                ErrorMessage::new("Y4M: 必須ヘッダフィールド (W, H, F) が不足しています").into(),
+            );
         }
         if self.fps_den <= 0 {
-            return Err(ErrorMessage::new("Y4M: framerate denominator must be positive").into());
+            return Err(
+                ErrorMessage::new("Y4M: フレームレート分母は正の値である必要があります").into(),
+            );
         }
 
         let data_start = (newline_pos + 1) as u64;
         self.file
             .seek(SeekFrom::Start(data_start))
-            .map_err(|e| ErrorMessage::new(format!("Y4M: seek error: {e}")))?;
+            .map_err(|e| ErrorMessage::new(format!("Y4M: シークエラー: {e}")))?;
         self.start_pos = data_start;
         self.pos = data_start;
         self.frame = 0;
@@ -240,25 +244,25 @@ impl Y4mReader {
         let mut tag = [0u8; 5];
         self.file
             .read_exact(&mut tag)
-            .map_err(|e| ErrorMessage::new(format!("Y4M: frame header read error: {e}")))?;
+            .map_err(|e| ErrorMessage::new(format!("Y4M: フレームヘッダ読み込みエラー: {e}")))?;
         if &tag != b"FRAME" {
-            return Err(ErrorMessage::new("Y4M: expected FRAME tag").into());
+            return Err(ErrorMessage::new("Y4M: FRAME タグが必要です").into());
         }
         self.pos += 5;
 
         // '\n' まで読み飛ばす (最大 1KB)
         for _ in 0..1024 {
             let mut byte = [0u8; 1];
-            self.file
-                .read_exact(&mut byte)
-                .map_err(|e| ErrorMessage::new(format!("Y4M: frame header read error: {e}")))?;
+            self.file.read_exact(&mut byte).map_err(|e| {
+                ErrorMessage::new(format!("Y4M: フレームヘッダ読み込みエラー: {e}"))
+            })?;
             self.pos += 1;
             if byte[0] == b'\n' {
                 return Ok(());
             }
         }
 
-        Err(ErrorMessage::new("Y4M: frame header too long").into())
+        Err(ErrorMessage::new("Y4M: フレームヘッダが長すぎます").into())
     }
 
     /// 1 フレーム分をスキップする
@@ -268,11 +272,11 @@ impl Y4mReader {
         let size = self.frame_size() as u64;
         self.file
             .seek(SeekFrom::Current(size as i64))
-            .map_err(|e| ErrorMessage::new(format!("Y4M: seek error: {e}")))?;
+            .map_err(|e| ErrorMessage::new(format!("Y4M: シークエラー: {e}")))?;
         self.pos += size;
 
         if self.pos > self.file_size {
-            return Err(ErrorMessage::new("Y4M: seek past end of file").into());
+            return Err(ErrorMessage::new("Y4M: ファイル終端を超えてシークしました").into());
         }
 
         // ファイル終端に到達したらループ
@@ -288,7 +292,7 @@ impl Y4mReader {
     fn seek_to_start(&mut self) -> Result<()> {
         self.file
             .seek(SeekFrom::Start(self.start_pos))
-            .map_err(|e| ErrorMessage::new(format!("Y4M: seek error: {e}")))?;
+            .map_err(|e| ErrorMessage::new(format!("Y4M: シークエラー: {e}")))?;
         self.pos = self.start_pos;
         Ok(())
     }
