@@ -27,3 +27,5 @@
 
 - [UPDATE] build.rs の他プロジェクト由来の死にコードを削除する
   - @voluntas
+- [UPDATE] duckdb_stats.rs を責務単位でファイル分割する (mod/writer/schema/rows/stats_json)
+  - @voluntas
