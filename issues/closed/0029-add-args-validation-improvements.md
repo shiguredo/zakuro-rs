@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-06-28
-- Completed: 2026-00-00
+- Completed: 2026-06-28
 - Model: DeepSeek V4 Pro
 - Branch: feature/add-args-validation-improvements
 - Polished: 2026-06-28
@@ -60,4 +60,29 @@
 
 ## 解決方法
 
-`src/args.rs` の該当箇所にバリデーションを追加する。`ErrorMessage::new()` によるエラー生成には日本語メッセージを使用する（既存コードの慣習に従う）。
+5 件の修正を実施した。
+
+### 1. signaling-url 空配列の拒否
+`flatten_sora_object` で signaling-url 配列が空の場合にエラーを返す。
+
+### 2. split_cli_argv の次トークン検証
+非フラグキーの直後のトークンが `--` で始まる場合にエラーを返す。戻り値を `Result` に変更した。
+
+### 3. no_video_device 排他チェック
+`no_video_device` と `video_input_device` / `input_y4m` / `sandstorm` / `input_mp4` の排他チェックを 4 件追加した。
+
+### 4. boolean false の警告ログ
+`push_kv` で boolean `false` の場合に警告ログを出力する。
+
+### 5. ${...} 環境変数置換のエラー化
+`parse_jsonc_config`、`expand_instances`、`push_kv`、`flatten_sora_object` で `${...}` をエラーとして起動を拒否する。
+
+### テスト追加
+- `empty_signaling_url_array_is_rejected`
+- `vcs_followed_by_flag_is_rejected`
+- `no_video_device_excludes_all_sources`
+- `sandstorm_false_warns_about_template_override`
+- `env_var_substitution_is_rejected`
+
+### 変更ファイル
+- `src/args.rs`

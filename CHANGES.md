@@ -12,6 +12,8 @@
   - @voluntas
 - [ADD] DuckDB 統計書き込み層の整合性を改善する (連続エラー停止 / CancellationToken / send エラー検知 / PRIMARY KEY 制約 / インデックス / 型安全化)
   - @voluntas
+- [ADD] 引数パースのバリデーションを改善する (空配列検出 / 次トークン検証 / 排他チェック / 環境変数置換エラー)
+  - @voluntas
 - [FIX] `--input-y4m` で Y4M ファイルを指定しても映像が再生されないバグを修正する
   - @voluntas
 - [FIX] FFI 境界越えの Mutex poison による未定義動作リスクを除去する
