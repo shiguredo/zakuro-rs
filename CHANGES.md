@@ -10,6 +10,24 @@
   - @voluntas
 - [ADD] 複数 Zakuro インスタンス起動 (JSONC `instances` 配列と `--instance-hatch-rate`) に対応する
   - @voluntas
+- [ADD] HTTP API サーバー (`--http-host` / `--http-port` / ヘルスチェック GET /.ok / JSON-RPC 2.0 POST /rpc / GetVersion) に対応する
+  - @voluntas
+- [ADD] JSONC 設定ファイル (`--config`) によるインスタンス・テンプレート設定に対応する
+  - @voluntas
+- [ADD] フェイク映像生成 (Raden デジタル時計 / 砂嵐 `--sandstorm`) に対応する
+  - @voluntas
+- [ADD] Y4M 動画ファイル入力 (`--input-y4m`) / MP4 パススルー送信 (`--input-mp4`) / 実デバイスキャプチャ (`--video-input-device`) に対応する
+  - @voluntas
+- [ADD] DataChannel メッセージング (`--sora-data-channels`) / シナリオ機能 (`--scenario reconnect`) に対応する
+  - @voluntas
+- [ADD] OpenH264 エンコード (`--openh264`) / NopVideoDecoder (受信映像廃棄) に対応する
+  - @voluntas
+- [ADD] 映像コーデック指定 (VP8/VP9/AV1/H264/H265) / 解像度 / フレームレート / ビットレート指定に対応する
+  - @voluntas
+- [ADD] mTLS (`--client-cert` / `--client-key`) / 証明書検証スキップ (`--insecure`) に対応する
+  - @voluntas
+- [ADD] サイマルキャスト / スポットライト / リトライロジック / Duration / repeat-interval に対応する
+  - @voluntas
 - [ADD] DuckDB 統計書き込み層の整合性を改善する (連続エラー停止 / CancellationToken / send エラー検知 / PRIMARY KEY 制約 / インデックス / 型安全化)
   - @voluntas
 - [ADD] 引数パースのバリデーションを改善する (空配列検出 / 次トークン検証 / 排他チェック / 環境変数置換エラー)
@@ -30,4 +48,6 @@
 - [UPDATE] duckdb_stats.rs を責務単位でファイル分割する (mod/writer/schema/rows/stats_json)
   - @voluntas
 - [UPDATE] y4m_reader / wav_reader のエラーメッセージを日本語に統一する
+  - @voluntas
+- [UPDATE] Ctrl+C グレースフルシャットダウン / 統計収集・定期レポート / フェイク音声ビープ音生成
   - @voluntas
