@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-06-28
-- Completed: 2026-00-00
+- Completed: 2026-06-28
 - Model: DeepSeek V4 Pro
 - Branch: feature/add-duckdb-integrity-improvements
 - Polished: 2026-06-28
@@ -71,7 +71,48 @@ DuckDB 統計書き込み層 (`src/duckdb_stats.rs`) に存在する複数のデ
 
 ## 解決方法
 
-`src/duckdb_stats.rs` および `src/duckdb_schema.sql` の該当箇所を上記設計方針に従って修正する。
+7 件の修正を実施した。
+
+### 1. INSERT 連続エラーによる writer 停止
+
+`writer_run_loop` に連続エラーカウンタを追加し、`MAX_CONSECUTIVE_ERRORS = 10` を超えたら writer を停止する。
+
+### 2. reporter_loop 停止可能化
+
+`reporter_loop` に `CancellationToken` を渡し、shutdown 時に停止できるようにした。`DuckDBStatsWriter` に `reporter_handle` と `reporter_token` を追加し、`join()` で reporter の完了を待つ。
+
+### 3. zakuro テーブル PRIMARY KEY 制約
+
+`id INTEGER PRIMARY KEY DEFAULT 0 CHECK (id = 0)` を追加し、1 行制約を表明した。
+
+### 4. 複合インデックスに instance_id 追加
+
+全 7 個の複合インデックスの先頭に `instance_id` を追加した。
+
+### 5. send() エラー検知
+
+`send()` の `let _ = tx.send(cmd).await` を `if let Err(e) = ... { rtc_log_warning!(...) }` に変更した。
+
+### 6. system_time_to_duck の expect 除去
+
+`.expect(...)` を `.unwrap_or(Duration::ZERO)` に変更した。
+
+### 7. as i32 キャストの安全化
+
+10 箇所の `as i32` キャストを `i32::try_from(...).unwrap_or(0)` に変更した。
+
+### テスト追加
+
+- `reporter_loop_stops_on_cancellation`: CancellationToken による停止
+- `send_logs_error_on_closed_channel`: channel closed 時のエラーログ
+- `writer_run_loop_stops_after_consecutive_errors`: 連続エラーによる writer 停止
+- `system_time_to_duck_handles_pre_epoch`: UNIX_EPOCH 以前の時刻で micros=0
+- `instance_id_as_i32_handles_overflow`: u32::MAX で try_from が Err を返す
+
+### 変更ファイル
+
+- `src/duckdb_stats.rs`
+- `src/duckdb_schema.sql`
 
 ### 0030 との依存関係
 

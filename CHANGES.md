@@ -10,6 +10,8 @@
   - @voluntas
 - [ADD] 複数 Zakuro インスタンス起動 (JSONC `instances` 配列と `--instance-hatch-rate`) に対応する
   - @voluntas
+- [ADD] DuckDB 統計書き込み層の整合性を改善する (連続エラー停止 / CancellationToken / send エラー検知 / PRIMARY KEY 制約 / インデックス / 型安全化)
+  - @voluntas
 - [FIX] `--input-y4m` で Y4M ファイルを指定しても映像が再生されないバグを修正する
   - @voluntas
 - [FIX] FFI 境界越えの Mutex poison による未定義動作リスクを除去する

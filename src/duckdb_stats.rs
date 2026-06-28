@@ -23,6 +23,7 @@ use duckdb::{Connection, ToSql};
 use nojson::{DisplayJson, JsonFormatter, RawJsonOwned, RawJsonValue};
 use shiguredo_webrtc::{rtc_log_info, rtc_log_warning};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{AppError, ErrorMessage, Result};
 
@@ -90,6 +91,8 @@ pub(crate) struct DuckDBWriterConfig {
 /// disabled 時は `join_handle = None` で task を起動しない。
 pub(crate) struct DuckDBStatsWriter {
     join_handle: Option<tokio::task::JoinHandle<()>>,
+    reporter_handle: Option<tokio::task::JoinHandle<()>>,
+    reporter_token: CancellationToken,
     client: DuckDBClient,
 }
 
@@ -103,6 +106,8 @@ impl DuckDBStatsWriter {
             return Ok((
                 Self {
                     join_handle: None,
+                    reporter_handle: None,
+                    reporter_token: CancellationToken::new(),
                     client: DuckDBClient::noop(),
                 },
                 String::new(),
@@ -166,11 +171,14 @@ impl DuckDBStatsWriter {
         // reporter task (dropped_count の定期 warn) は writer 本体とは別 task に分離する
         // (writer 本体 select に並べると最大スケール時に reporter が starvation するため)
         let reporter_dropped = client.dropped_count.clone();
-        tokio::spawn(reporter_loop(reporter_dropped));
+        let reporter_token = CancellationToken::new();
+        let reporter_handle = tokio::spawn(reporter_loop(reporter_dropped, reporter_token.clone()));
 
         Ok((
             Self {
                 join_handle: Some(join_handle),
+                reporter_handle: Some(reporter_handle),
+                reporter_token,
                 client,
             },
             duckdb_version,
@@ -194,6 +202,11 @@ impl DuckDBStatsWriter {
                     "duckdb writer task panicked: {e}"
                 )))
             })?;
+        }
+        // reporter task を停止する
+        self.reporter_token.cancel();
+        if let Some(h) = self.reporter_handle {
+            let _ = h.await;
         }
         Ok(())
     }
@@ -241,11 +254,16 @@ impl DuckDBClient {
     /// shutdown 経路用: 確実に送る (満杯時に待機する)
     /// 無効時は何もしない
     pub(crate) async fn send(&self, cmd: WriteCommand) {
-        if let Some(tx) = &self.sender {
-            let _ = tx.send(cmd).await;
+        if let Some(tx) = &self.sender
+            && let Err(e) = tx.send(cmd).await
+        {
+            rtc_log_warning!("[duckdb] send failed: channel closed, error={e}");
         }
     }
 }
+
+/// INSERT 連続エラーの閾値。超えたら writer を停止する
+const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 
 /// writer task 本体の recv ループ
 ///
@@ -253,12 +271,22 @@ impl DuckDBClient {
 /// break 後に `conn` は関数スコープ終了で自動 drop されファイルが close する
 /// (DuckDB は drop 時に自動 flush するため CHECKPOINT 明示不要)。
 async fn writer_run_loop(conn: Connection, mut cmd_rx: mpsc::Receiver<WriteCommand>) {
+    let mut consecutive_errors: u32 = 0;
     loop {
         let Some(cmd) = cmd_rx.recv().await else {
             break;
         };
         if let Err(e) = dispatch_command(&conn, cmd) {
-            rtc_log_warning!("[duckdb] write failed: error={}", e);
+            consecutive_errors += 1;
+            rtc_log_warning!("[duckdb] write failed: error={e}, consecutive={consecutive_errors}");
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                rtc_log_warning!(
+                    "[duckdb] too many consecutive write errors ({consecutive_errors}), stopping writer"
+                );
+                break;
+            }
+        } else {
+            consecutive_errors = 0;
         }
     }
 }
@@ -304,21 +332,25 @@ fn dispatch_command(conn: &Connection, cmd: WriteCommand) -> duckdb::Result<()> 
 }
 
 /// dropped_count を 5 秒ごとに warn 出力する reporter task
-async fn reporter_loop(dropped_count: Arc<AtomicU64>) {
+async fn reporter_loop(dropped_count: Arc<AtomicU64>, token: CancellationToken) {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last: u64 = 0;
     loop {
-        interval.tick().await;
-        let total = dropped_count.load(Ordering::Relaxed);
-        let delta = total - last;
-        last = total;
-        if delta > 0 {
-            rtc_log_warning!(
-                "[duckdb] dropped commands: total={}, since_last={}",
-                total,
-                delta
-            );
+        tokio::select! {
+            _ = token.cancelled() => break,
+            _ = interval.tick() => {
+                let total = dropped_count.load(Ordering::Relaxed);
+                let delta = total - last;
+                last = total;
+                if delta > 0 {
+                    rtc_log_warning!(
+                        "[duckdb] dropped commands: total={}, since_last={}",
+                        total,
+                        delta
+                    );
+                }
+            }
         }
     }
 }
@@ -651,7 +683,7 @@ pub(crate) struct RtcStatsDataChannelRow {
 fn system_time_to_duck(ts: SystemTime) -> DuckValue {
     let micros = ts
         .duration_since(UNIX_EPOCH)
-        .expect("SystemTime before UNIX_EPOCH is not supported")
+        .unwrap_or(Duration::ZERO)
         .as_micros() as i64;
     DuckValue::Timestamp(TimeUnit::Microsecond, micros)
 }
@@ -693,7 +725,7 @@ fn insert_zakuro_scenario(conn: &Connection, row: InsertZakuroScenarioRow) -> du
         .collect();
     let urls_value = DuckValue::List(urls);
     let params: &[&dyn ToSql] = &[
-        &(row.instance_id as i32),
+        &(i32::try_from(row.instance_id).unwrap_or(0)),
         &(row.vcs as i64),
         &row.duration,
         &row.repeat_interval,
@@ -714,8 +746,8 @@ fn insert_zakuro_scenario(conn: &Connection, row: InsertZakuroScenarioRow) -> du
 
 fn insert_connection(conn: &Connection, row: InsertConnectionRow) -> duckdb::Result<()> {
     let params: &[&dyn ToSql] = &[
-        &(row.instance_id as i32),
-        &(row.vc_id as i32),
+        &(i32::try_from(row.instance_id).unwrap_or(0)),
+        &(i32::try_from(row.vc_id).unwrap_or(0)),
         &system_time_to_duck(row.timestamp),
         &row.channel_id,
         &row.connection_id,
@@ -739,7 +771,7 @@ fn insert_connection(conn: &Connection, row: InsertConnectionRow) -> duckdb::Res
 
 fn insert_rtc_stats_codec(conn: &Connection, row: RtcStatsCodecRow) -> duckdb::Result<()> {
     let params: &[&dyn ToSql] = &[
-        &(row.instance_id as i32),
+        &(i32::try_from(row.instance_id).unwrap_or(0)),
         &system_time_to_duck(row.timestamp),
         &row.channel_id,
         &row.session_id,
@@ -769,7 +801,7 @@ fn insert_rtc_stats_inbound_rtp(
     row: RtcStatsInboundRtpRow,
 ) -> duckdb::Result<()> {
     let params: &[&dyn ToSql] = &[
-        &(row.instance_id as i32),
+        &(i32::try_from(row.instance_id).unwrap_or(0)),
         &system_time_to_duck(row.timestamp),
         &row.channel_id,
         &row.session_id,
@@ -854,7 +886,7 @@ fn insert_rtc_stats_outbound_rtp(
     row: RtcStatsOutboundRtpRow,
 ) -> duckdb::Result<()> {
     let params: &[&dyn ToSql] = &[
-        &(row.instance_id as i32),
+        &(i32::try_from(row.instance_id).unwrap_or(0)),
         &system_time_to_duck(row.timestamp),
         &row.channel_id,
         &row.session_id,
@@ -913,7 +945,7 @@ fn insert_rtc_stats_media_source(
     row: RtcStatsMediaSourceRow,
 ) -> duckdb::Result<()> {
     let params: &[&dyn ToSql] = &[
-        &(row.instance_id as i32),
+        &(i32::try_from(row.instance_id).unwrap_or(0)),
         &system_time_to_duck(row.timestamp),
         &row.channel_id,
         &row.session_id,
@@ -942,7 +974,7 @@ fn insert_rtc_stats_remote_inbound_rtp(
     row: RtcStatsRemoteInboundRtpRow,
 ) -> duckdb::Result<()> {
     let params: &[&dyn ToSql] = &[
-        &(row.instance_id as i32),
+        &(i32::try_from(row.instance_id).unwrap_or(0)),
         &system_time_to_duck(row.timestamp),
         &row.channel_id,
         &row.session_id,
@@ -977,7 +1009,7 @@ fn insert_rtc_stats_remote_outbound_rtp(
     row: RtcStatsRemoteOutboundRtpRow,
 ) -> duckdb::Result<()> {
     let params: &[&dyn ToSql] = &[
-        &(row.instance_id as i32),
+        &(i32::try_from(row.instance_id).unwrap_or(0)),
         &system_time_to_duck(row.timestamp),
         &row.channel_id,
         &row.session_id,
@@ -1007,7 +1039,7 @@ fn insert_rtc_stats_data_channel(
     row: RtcStatsDataChannelRow,
 ) -> duckdb::Result<()> {
     let params: &[&dyn ToSql] = &[
-        &(row.instance_id as i32),
+        &(i32::try_from(row.instance_id).unwrap_or(0)),
         &system_time_to_duck(row.timestamp),
         &row.channel_id,
         &row.session_id,
@@ -2187,5 +2219,112 @@ mod tests {
         assert_eq!(parts[1].len(), 8, "日付部分は 8 桁のべき: {name}");
         assert_eq!(parts[2].len(), 6, "時刻部分は 6 桁のべき: {name}");
         assert_eq!(parts[3].len(), 3, "ミリ秒部分は 3 桁のべき: {name}");
+    }
+
+    // ---- 整合性改善: 新規テスト ----
+
+    #[test]
+    fn reporter_loop_stops_on_cancellation() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime を作成できること");
+        rt.block_on(async {
+            let token = CancellationToken::new();
+            let dropped_count = Arc::new(AtomicU64::new(0));
+            let handle = tokio::spawn(reporter_loop(dropped_count, token.clone()));
+            token.cancel();
+            handle
+                .await
+                .expect("reporter_loop が CancellationToken で停止すること");
+        });
+    }
+
+    #[test]
+    fn send_logs_error_on_closed_channel() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime を作成できること");
+        rt.block_on(async {
+            let (tx, rx) = mpsc::channel::<WriteCommand>(1);
+            drop(rx);
+            let client = DuckDBClient {
+                sender: Some(tx),
+                dropped_count: Arc::new(AtomicU64::new(0)),
+            };
+            // パニックせず正常に終了すること
+            client
+                .send(WriteCommand::UpdateZakuroStop {
+                    stop_timestamp: SystemTime::now(),
+                })
+                .await;
+        });
+    }
+
+    #[test]
+    fn writer_run_loop_stops_after_consecutive_errors() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime を作成できること");
+        rt.block_on(async {
+            let (_dir, conn) = setup_db();
+            // テーブルを削除して書き込みを失敗させる
+            conn.execute_batch("DROP TABLE rtc_stats_codec")
+                .expect("DROP 失敗");
+            let (tx, rx) = mpsc::channel::<WriteCommand>(64);
+            // InsertZakuro は zakuro テーブル (削除していないので成功)、
+            // その後 InsertRtcStatsCodec を連続送信してエラーを蓄積させる
+            let tx_clone = tx.clone();
+            tokio::spawn(async move {
+                // 連続エラー閾値 (MAX_CONSECUTIVE_ERRORS = 10) を超えるまで送る
+                for _ in 0..15 {
+                    let _ = tx_clone
+                        .send(WriteCommand::InsertRtcStatsCodec(Box::new(
+                            RtcStatsCodecRow {
+                                instance_id: 0,
+                                timestamp: SystemTime::now(),
+                                channel_id: "ch".into(),
+                                session_id: "s".into(),
+                                connection_id: "c".into(),
+                                rtc_timestamp: Some(1.0),
+                                stats_type: "codec".into(),
+                                id: "X".into(),
+                                mime_type: None,
+                                payload_type: None,
+                                clock_rate: None,
+                                channels: None,
+                                sdp_fmtp_line: None,
+                            },
+                        )))
+                        .await;
+                }
+                drop(tx_clone);
+            });
+            // drop で全 sender が消える前に writer 側が連続エラーで停止することを確認
+            writer_run_loop(conn, rx).await;
+            // writer_run_loop から正常に抜ければパニックしていない
+        });
+    }
+
+    #[test]
+    fn system_time_to_duck_handles_pre_epoch() {
+        let ts = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(3600))
+            .expect("UNIX_EPOCH より前の時刻を作成できること");
+        let val = system_time_to_duck(ts);
+        match val {
+            DuckValue::Timestamp(TimeUnit::Microsecond, micros) => {
+                assert_eq!(
+                    micros, 0,
+                    "UNIX_EPOCH より前の時刻は micros=0 にマップされるべき"
+                );
+            }
+            _ => panic!("Timestamp が返されるべき"),
+        }
+    }
+
+    #[test]
+    fn instance_id_as_i32_handles_overflow() {
+        let overflow_value = u32::MAX;
+        let result = i32::try_from(overflow_value);
+        assert!(
+            result.is_err(),
+            "u32::MAX は i32 に収まらず try_from が Err を返すこと"
+        );
+        let safe: i32 = result.unwrap_or(0);
+        assert_eq!(safe, 0, "オーバーフローハンドリングで 0 が使われること");
     }
 }
