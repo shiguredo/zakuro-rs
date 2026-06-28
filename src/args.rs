@@ -169,12 +169,23 @@ fn push_kv(key: &str, value: RawJsonValue<'_, '_>, argv: &mut Vec<String>) -> Re
                 .map_err(|e: nojson::JsonParseError| ErrorMessage::new(format!("{e}")))?;
             if b {
                 argv.push(format!("--{key}"));
+            } else {
+                rtc_log_warning!(
+                    "boolean false for '{}' cannot override template true; last-wins deduplication keeps the first occurrence on CLI override",
+                    key,
+                );
             }
         }
         JsonValueKind::String => {
             let s: String = value
                 .try_into()
                 .map_err(|e: nojson::JsonParseError| ErrorMessage::new(format!("{e}")))?;
+            if s.contains("${") {
+                return Err(ErrorMessage::new(format!(
+                    "環境変数置換 '${{...}}' は未対応です (key: '{key}')"
+                ))
+                .into());
+            }
             argv.push(format!("--{key}"));
             argv.push(s);
         }
@@ -231,6 +242,12 @@ fn flatten_sora_object(
                         .into());
                     }
                 };
+                if url.contains("${") {
+                    return Err(ErrorMessage::new(format!(
+                        "環境変数置換 '${{...}}' は未対応です (sora.signaling-url: '{url}')"
+                    ))
+                    .into());
+                }
                 if !first {
                     joined.push(',');
                 }
@@ -238,6 +255,11 @@ fn flatten_sora_object(
                 first = false;
             }
             argv.push("--sora-signaling-url".to_string());
+            if joined.is_empty() {
+                return Err(
+                    ErrorMessage::new("sora.signaling-url に空の配列は指定できません").into(),
+                );
+            }
             argv.push(joined);
         } else {
             push_kv(&format!("sora-{key}"), value, argv)?;
@@ -290,13 +312,12 @@ fn parse_jsonc_config(content: &str) -> Result<JsoncConfig> {
             );
         }
 
-        // ${...} 形式の環境変数置換は現バージョンでは未対応 (検出して警告する)
+        // ${...} 形式の環境変数置換は現バージョンでは未対応 (エラーで起動を拒否する)
         if value.kind() == JsonValueKind::String && value.as_raw_str().contains("${") {
-            rtc_log_warning!(
-                "Unsupported top-level config key '{}', ignoring (env var substitution not supported)",
-                key,
-            );
-            continue;
+            return Err(ErrorMessage::new(format!(
+                "環境変数置換 '${{...}}' は未対応です (key: '{key}')"
+            ))
+            .into());
         }
 
         if key == "instances" {
@@ -379,14 +400,12 @@ fn expand_instances(value: RawJsonValue<'_, '_>, template: &[String]) -> Result<
                 ))
                 .into());
             }
-            // ${...} 形式の環境変数置換は現バージョンでは未対応 (検出して警告する)
+            // ${...} 形式の環境変数置換は現バージョンでは未対応 (エラーで起動を拒否する)
             if value.kind() == JsonValueKind::String && value.as_raw_str().contains("${") {
-                rtc_log_warning!(
-                    "Unsupported config key '{}' in instances[{}], ignoring (env var substitution not supported)",
-                    key,
-                    i,
-                );
-                continue;
+                return Err(ErrorMessage::new(format!(
+                    "環境変数置換 '${{...}}' は未対応です (instances[{i}] key: '{key}')"
+                ))
+                .into());
             }
             if is_unsupported_key(&key) {
                 rtc_log_warning!(
@@ -414,7 +433,7 @@ fn expand_instances(value: RawJsonValue<'_, '_>, template: &[String]) -> Result<
 /// `is_flag()` で判定する (振り分け先と独立)。
 ///
 /// `--config` / `--help` / `--version` は呼び出し元で除外済みである前提。
-fn split_cli_argv(cli_argv: Vec<String>) -> (Vec<String>, Vec<String>) {
+fn split_cli_argv(cli_argv: Vec<String>) -> Result<(Vec<String>, Vec<String>)> {
     let mut common: Vec<String> = Vec::new();
     let mut instance: Vec<String> = Vec::new();
     let mut i = 0;
@@ -443,7 +462,14 @@ fn split_cli_argv(cli_argv: Vec<String>) -> (Vec<String>, Vec<String>) {
                 i += 1;
                 continue;
             }
-            // 値付きオプションは次トークンも同じ側に push
+            // 値付きオプション: 次トークンが -- 始まりの場合はエラー
+            if i + 1 < cli_argv.len() && cli_argv[i + 1].starts_with("--") {
+                return Err(ErrorMessage::new(format!(
+                    "オプション {token} の値が -- で始まる別オプション ({}) になっています。key=value 形式で指定してください",
+                    cli_argv[i + 1]
+                ))
+                .into());
+            }
             if is_common_key(key) {
                 common.push(token.clone());
                 if i + 1 < cli_argv.len() {
@@ -462,7 +488,7 @@ fn split_cli_argv(cli_argv: Vec<String>) -> (Vec<String>, Vec<String>) {
         instance.push(token.clone());
         i += 1;
     }
-    (common, instance)
+    Ok((common, instance))
 }
 
 /// 同名オプション・フラグが複数登場する argv を「後勝ち重複除去」する
@@ -1045,6 +1071,27 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
     if input_mp4.is_some() && sandstorm {
         return Err(ErrorMessage::new("--input-mp4 と --sandstorm は同時に指定できません").into());
     }
+    if no_video_device && video_input_device.is_some() {
+        return Err(ErrorMessage::new(
+            "--no-video-device と --video-input-device は同時に指定できません",
+        )
+        .into());
+    }
+    if no_video_device && input_y4m.is_some() {
+        return Err(
+            ErrorMessage::new("--no-video-device と --input-y4m は同時に指定できません").into(),
+        );
+    }
+    if no_video_device && sandstorm {
+        return Err(
+            ErrorMessage::new("--no-video-device と --sandstorm は同時に指定できません").into(),
+        );
+    }
+    if no_video_device && input_mp4.is_some() {
+        return Err(
+            ErrorMessage::new("--no-video-device と --input-mp4 は同時に指定できません").into(),
+        );
+    }
     if input_wav.is_some() && no_audio_device {
         return Err(
             ErrorMessage::new("--input-wav と --no-audio-device は同時に指定できません").into(),
@@ -1213,7 +1260,7 @@ pub(crate) fn parse_args() -> Result<(CommonArgs, Vec<InstanceArgs>, Option<Stri
     }
 
     // CLI 引数を CommonArgs / InstanceArgs 用に分割
-    let (common_cli_argv, instance_cli_argv) = split_cli_argv(cli_after_config);
+    let (common_cli_argv, instance_cli_argv) = split_cli_argv(cli_after_config)?;
 
     let (common, instances) = parse_args_from_argv(
         &program_name,
@@ -1694,7 +1741,7 @@ mod tests {
             "--vcs".into(),
             "5".into(),
         ];
-        let (common, instance) = split_cli_argv(cli);
+        let (common, instance) = split_cli_argv(cli).expect("正常な CLI は分割できること");
         assert!(
             common
                 .windows(2)
@@ -1737,5 +1784,72 @@ mod tests {
             .collect();
         assert_eq!(dirs.len(), 1, "重複除去後に 1 件だけ残るべき");
         assert_eq!(dirs[0], &dir2_str, "後勝ちで dir2 が残るべき");
+    }
+
+    // ---- バリデーション改善: 新規テスト ----
+
+    #[test]
+    fn empty_signaling_url_array_is_rejected() {
+        let content = r#"{"sora":{"signaling-url":[]}}"#;
+        let result = parse_jsonc_config(content);
+        assert!(result.is_err(), "signaling-url 空配列はエラーになること");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("signaling-url に空の配列は指定できません"),
+            "signaling-url 空配列のエラーメッセージが含まれること"
+        );
+    }
+
+    #[test]
+    fn vcs_followed_by_flag_is_rejected() {
+        let cli: Vec<String> = vec!["--vcs".into(), "--sandstorm".into()];
+        let result = split_cli_argv(cli);
+        assert!(result.is_err(), "--vcs --sandstorm はエラーになること");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("-- で始まる別オプション"),
+            "値の誤消費のエラーメッセージが含まれること"
+        );
+    }
+
+    #[test]
+    fn no_video_device_excludes_all_sources() {
+        let content = r#"{"sora":{"signaling-url":"wss://example.com","channel-id":"ch","role":"sendonly"},"no-video-device":true,"video-input-device":"cam"}"#;
+        let result = parse_jsonc_config(content);
+        let config = result.expect("JSONC パース成功");
+        let argv = &config.instance_argvs[0];
+        // parse_instance_args で --no-video-device --video-input-device cam が衝突検出される
+        let res = parse_instance_args("zakuro", argv.clone());
+        assert!(
+            res.is_err(),
+            "no_video_device と video_input_device の排他エラーが発生すること"
+        );
+    }
+
+    #[test]
+    fn sandstorm_false_warns_about_template_override() {
+        // テスト用の JSONC: テンプレートは sandstorm=false を上書き不可能なのでログが出る
+        let content = r#"{"sandstorm":false,"sora":{"signaling-url":"wss://example.com","channel-id":"ch","role":"sendonly"}}"#;
+        // 警告ログが出るがエラーにはならない
+        let result = parse_jsonc_config(content);
+        assert!(
+            result.is_ok(),
+            "sandstorm=false はエラーにならず警告ログのみ"
+        );
+    }
+
+    #[test]
+    fn env_var_substitution_is_rejected() {
+        let content = r#"{"sora":{"signaling-url":"${SIGNALING_URL}"}}"#;
+        let result = parse_jsonc_config(content);
+        assert!(result.is_err(), "${{...}} 環境変数置換はエラーになること");
+        assert!(
+            result.unwrap_err().to_string().contains("環境変数置換"),
+            "環境変数置換のエラーメッセージが含まれること"
+        );
     }
 }
