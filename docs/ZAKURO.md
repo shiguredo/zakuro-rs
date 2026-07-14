@@ -11,38 +11,41 @@ zakuro-rs は zakuro の Rust 再実装であり、互換性を維持しつつ�
 
 ### ビルドシステム
 
-- CMake 4.2.1 以上
-- C++17
+- CMake 3.23 以上 (DEPS で取得する CMake は 4.3.2)
+- C++20
 - Python ビルドスクリプト (`buildbase.py`)
 
 ### 主要な依存ライブラリ
 
 | ライブラリ | バージョン | 用途 |
 |-----------|-----------|------|
-| libwebrtc | m144.7559.2.1 | WebRTC 通信 |
-| Sora C++ SDK | 2025.7.0-canary.3 | SFU 連携 |
-| Boost | 1.89.0 | JSON, filesystem |
-| CLI11 | 2.6.1 | コマンドライン引数 |
-| Blend2D | 0.20.0 | グラフィックス描画 |
-| OpenH264 | - | H.264 コーデック (オプション) |
+| libwebrtc | m150.7871.0.0 | WebRTC 通信 |
+| Sora C++ SDK | 2026.2.0-canary.14 | SFU 連携 |
+| Boost | 1.91.0 | JSON, filesystem |
+| CLI11 | 2.6.2 | コマンドライン引数 |
+| Blend2D | 0.21.2 | グラフィックス描画 |
+| OpenH264 | v2.6.0 | H.264 コーデック (オプション) |
 
 ### コンポーネント構成
 
 | コンポーネント | 役割 |
 |--------------|------|
 | Zakuro | メインコントローラー、設定管理、実行制御 |
-| VirtualClient | WebRTC/Sora 接続クライアント |
+| VirtualClient | WebRTC / Sora 接続クライアント |
 | FakeVideoCapturer | フェイク映像生成 (Safari UI、砂嵐、Y4M) |
 | ZakuroAudioDeviceModule | 音声デバイス抽象化層 |
 | ScenarioPlayer | シナリオベースの動作シミュレーション |
 | HttpServer | HTTP API サーバー (ヘルスチェック、JSON-RPC) |
+| HttpProxy | UI リバースプロキシ (`--ui` / `--ui-remote-url`) |
 | GameKeyCore | キーボード入力監視 |
 | GameAudioManager | ゲーム音声管理 |
 | Y4MReader | Y4M 動画ファイル読込 |
 | WavReader | WAV 音声ファイル読込 |
-| NopVideoDecoder | 受信映像廃棄用デコーダ (CPU 効率化) |
+| BinaryPool | DataChannel 送信用ランダムバイナリのプール |
+| NopVideoDecoder | 受信映像廃棄用デコーダー (CPU 効率化) |
 | EmbeddedBinary | リソースファイルのメモリ埋め込み |
 | JsonRpcHandler | JSON-RPC 2.0 API 処理 |
+| ZakuroStats | 接続統計の集計 (`--output-file-connection-id` 向け) |
 
 ### 処理フロー
 
@@ -51,7 +54,7 @@ main()
   → ファイルディスクリプタ制限チェック (最小 1024)
   → 設定解析 (CLI 引数 or JSONC 設定ファイル)
   → GameKeyCore 初期化 (キーボード監視スレッド)
-  → HttpServer 起動 (オプション)
+  → HttpServer 起動 (オプション、UI プロキシ併用可)
   → stats 集計スレッド起動 (オプション)
   → 各 Zakuro インスタンス用スレッド生成 (instance-hatch-rate に従い段階的起動)
   → スレッド群の終了待機
@@ -85,7 +88,7 @@ Zakuro::Run()
 
 - **NoAudio**: ダミー ADM で無音出力
 - **Device**: システムマイク使用
-- **AutoGenerateFakeAudio**: BIP/BOP/HUM/ノイズ自動生成 (48kHz, モノラル)
+- **AutoGenerateFakeAudio**: BIP / BOP / HUM / ノイズ自動生成 (48kHz, モノラル)
 - **SpecifiedFakeAudio**: WAV ファイル指定
 - **External**: GameAudioManager 経由のゲーム音声
 
@@ -109,6 +112,7 @@ Bytes 22-47: Connection ID (最大 26 文字)
 - OpDisconnect: 切断
 - OpReconnect: 再接続
 - OpExit: 終了
+- OpPlaySubScenario: サブシナリオ再生
 
 ### HTTP API
 
@@ -140,11 +144,16 @@ POST /rpc          → JSON-RPC 2.0
 --sandstorm                         砂嵐パターン
 --fake-video-capture <FILE>         Y4M 動画ファイル
 --video-device <NAME>               実デバイス指定
+--no-video-device                   映像無効化
 --fixed-resolution                  解像度固定
+--priority {BALANCE,FRAMERATE,RESOLUTION}
+--degradation-preference {disabled,maintain_framerate,maintain_resolution,balanced}
 
 # 音声
 --fake-audio-capture <FILE>         WAV 音声ファイル
 --no-audio-device                   音声無効化
+--initial-mute-video <BOOL>
+--initial-mute-audio <BOOL>
 
 # コーデック
 --sora-video-codec-type {VP8,VP9,AV1,H264,H265}
@@ -152,6 +161,8 @@ POST /rpc          → JSON-RPC 2.0
 --sora-video-bit-rate <kbps>
 --sora-audio-bit-rate <kbps>
 --openh264 <PATH>
+--vp8-encoder / --vp9-encoder / --av1-encoder / --h264-encoder / --h265-encoder
+--sora-video-vp9-params / --sora-video-av1-params / --sora-video-h264-params / --sora-video-h265-params
 
 # 制御
 --duration <SEC>                    実行時間
@@ -160,21 +171,29 @@ POST /rpc          → JSON-RPC 2.0
 --retry-interval <SEC>              リトライ間隔
 
 # 高度な設定
---degradation-preference {disabled,maintain_framerate,maintain_resolution,balanced}
---sora-simulcast                    シミュルキャスト
+--sora-simulcast                    サイマルキャスト
 --sora-spotlight                    スポットライト
+--sora-spotlight-number <N>
 --sora-data-channels <JSON>         DataChannel 設定
+--sora-data-channel-signaling <BOOL>
+--sora-data-channel-signaling-timeout <SEC>
+--sora-disable-signaling-url-randomization
 --scenario {reconnect}              シナリオ選択
 
-# HTTP API
+# HTTP API / UI
 --http-host <ADDR>
 --http-port <PORT>
+--ui
+--ui-remote-url <URL>
 
 # その他
 --config <FILE>                     JSONC 設定ファイル
 --log-level {verbose,info,warning,error,none}
 --client-cert <FILE>                mTLS 証明書
 --client-key <FILE>                 mTLS 秘密鍵
+--insecure                          TLS 証明書検証スキップ
+--output-file-connection-id <FILE>  connection ID 統計ファイル出力
+--show-video-codec-capability       利用可能な映像コーデック能力を表示
 ```
 
 ## zakuro-rs 実装状況
@@ -184,7 +203,7 @@ POST /rpc          → JSON-RPC 2.0
 | ライブラリ | バージョン | 用途 |
 |-----------|-----------|------|
 | shiguredo_webrtc | 0.150 | libwebrtc バインディング |
-| sora_sdk | 2026.1.0-canary.11 | Sora Rust SDK |
+| sora_sdk | 2026.1.0-canary.12 | Sora Rust SDK |
 | shiguredo_http11 | 2026.6 | HTTP/1.1 サーバー |
 | shiguredo_openh264 | 2026.1 | OpenH264 バインディング |
 | shiguredo_video_device | 2026.1 | クロスプラットフォーム ビデオデバイス |
@@ -194,7 +213,8 @@ POST /rpc          → JSON-RPC 2.0
 | aws-lc-rs | 1.17 | 暗号ライブラリ (乱数生成) |
 | jiff | 0.2 | UTC タイムスタンプ整形 (DuckDB ファイル名生成用) |
 | tokio | 1.52 | 非同期ランタイム |
-| tokio-util | 0.7 | CancellationToken |
+| tokio-stream | 0.1 | Stream ラッパー (ReceiverStream, IntervalStream) |
+| tokio-util | 0.7 | CancellationToken, DelayQueue |
 | duckdb | 1.10504 | DuckDB バインディング (統計記録に利用) |
 
 ### コア機能
@@ -223,7 +243,7 @@ POST /rpc          → JSON-RPC 2.0
 
 - [x] 音声無効化 (`--no-audio-device`)
 - [x] フェイク音声 (ビープ音のみ、映像のパイチャート一周に同期して 1000Hz/100ms を生成)
-- [ ] フェイク音声フル実装 (BIP/BOP/HUM/ノイズ自動生成)
+- [ ] フェイク音声フル実装 (BIP / BOP / HUM / ノイズ自動生成)
 - [x] WAV 音声ファイル読込 (`--input-wav`)
 
 ### コーデック
@@ -232,6 +252,9 @@ POST /rpc          → JSON-RPC 2.0
 - [x] オーディオコーデック指定 (Opus)
 - [x] ビットレート指定 (映像・音声)
 - [x] OpenH264 外部ライブラリ (`--openh264`)
+- [ ] コーデック個別エンコーダー指定 (`--vp8-encoder` 等)
+- [ ] コーデックパラメータ (`--sora-video-vp9-params` 等)
+- [ ] ビデオコーデック能力表示 (`--show-video-codec-capability`)
 
 ### 接続設定
 
@@ -249,14 +272,19 @@ POST /rpc          → JSON-RPC 2.0
 - [x] TLS 証明書検証スキップ (`--insecure`)
 - [x] サイマルキャスト (`--sora-simulcast`, `--sora-simulcast-request-rid`)
 - [x] スポットライト (`--sora-spotlight`, `--sora-spotlight-focus-rid`, `--sora-spotlight-unfocus-rid`)
-- [x] DataChannel メッセージング (`--sora-data-channels`)
+- [x] DataChannel メッセージング (`--sora-data-channels`, ZAKURO ヘッダ付き自動送信)
+- [ ] DataChannel カスタム `data` フィールド送信
 - [ ] degradation-preference
+- [ ] シグナリング URL ランダム化無効 (`--sora-disable-signaling-url-randomization`)
+- [ ] DataChannel シグナリングタイムアウト (`--sora-data-channel-signaling-timeout`)
 
 ### HTTP API
 
 - [x] ヘルスチェック (`GET /.ok`)
 - [x] JSON-RPC 2.0 (`POST /rpc`)
 - [x] GetVersion メソッド
+- [ ] Query メソッド (DuckDB へのクエリー実行)
+- [ ] UI リバースプロキシ (`--ui` / `--ui-remote-url`)
 
 ### シナリオ
 
@@ -276,21 +304,20 @@ POST /rpc          → JSON-RPC 2.0
 - [x] DuckDB ファイルへの統計情報出力 (`--duckdb-output-dir` / `--duckdb-interval` / `--no-duckdb-output`)
 - [x] ログレベル制御 (`--log-level`)
 - [ ] 埋め込みリソース (フォント・音声)
+- [ ] connection ID ファイル出力 (`--output-file-connection-id`, DuckDB で代替可能)
 
-### sora-rust-sdk 未対応のため未実装の機能
+### sora-rust-sdk / webrtc-rs 側の制約により未実装の機能
 
-- スポットライト数指定 (`--sora-spotlight-number`)
-- シグナリング URL ランダム化無効 (`--sora-disable-signaling-url-randomization`)
-- DataChannel シグナリングタイムアウト (`--sora-data-channel-signaling-timeout`)
-- コーデック個別エンコーダ指定 (`--vp8-encoder` 等)
-- コーデックパラメータ (`--sora-video-vp9-params` 等、Params 構造体のフィールドが private)
-- ビデオコーデック能力表示 (`--show-video-codec-capability`)
-- connection ID ファイル出力 (`--output-file-connection-id`)
+- シグナリング URL ランダム化無効: sora-rust-sdk 未実装 (デフォルトのランダム化のみ)
+- DataChannel シグナリングタイムアウト: sora-rust-sdk 未実装
+
+コーデックパラメータ (`VideoVP9Params` 等) と `DegradationPreference` は各 SDK / バインディングに API がある。zakuro-rs の CLI 未配線が残っている。
 
 ### 実装しない機能
 
 - GameKeyCore (キーボード入力制御)
 - GameAudioManager (ゲーム音声)
+- スポットライト数指定 (`--sora-spotlight-number`, Sora で非推奨のため sora-rust-sdk も対象外)
 
 ### 設計差分
 
@@ -304,5 +331,10 @@ POST /rpc          → JSON-RPC 2.0
 | 暗号 / 乱数 | OpenSSL / std | aws-lc-rs |
 | シグナル処理 | SIGINT/SIGTERM | tokio::signal (Ctrl+C) |
 | 統計通知 | コールバック | mpsc + watch チャネル |
+| 統計永続化 | connection ID ファイル (`--output-file-connection-id`) | DuckDB (`--duckdb-output-dir` 等) |
 | シャットダウン | io_context 停止 | CancellationToken |
 | インスタンス起動 | シングルプロセス・マルチスレッド (`std::thread`) で instance-hatch-rate を実装 | シングルプロセス内の tokio タスクで instance-hatch-rate を実装 (DelayQueue + JoinSet) |
+| 映像ファイル入力 | `--fake-video-capture` | `--input-y4m` |
+| 音声ファイル入力 | `--fake-audio-capture` | `--input-wav` |
+| カメラ指定 | `--video-device` | `--video-input-device` |
+| MP4 パススルー | なし | `--input-mp4` |
