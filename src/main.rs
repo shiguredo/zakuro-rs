@@ -406,19 +406,13 @@ async fn run_zakuro_instance(
     };
 
     // フェイク音声キャプチャの初期化
-    // 音声有効かつフェイク映像モード時にビープ音または WAV ファイル再生を行う
+    // 音声有効かつフェイク映像モード時に連続自動生成 PCM または WAV ファイル再生を行う
     let use_fake_audio = !instance.no_audio_device
         && instance.audio
         && instance.role.wants_send()
         && instance.input_mp4.is_none()
         && instance.video_input_device.is_none();
-    // WAV モードでは映像連動ビープが意味を持たないため、ビープトリガーは生成しない
     let use_wav_audio = use_fake_audio && instance.input_wav.is_some();
-    let beep_trigger = if use_fake_audio && !use_wav_audio {
-        Some(fake_audio_capturer::BeepTrigger::new())
-    } else {
-        None
-    };
     // WAV モードの場合は事前にファイルを開いて 48kHz モノラルにリサンプル済みのサンプル列を保持する
     let wav_source = if use_wav_audio {
         let wav_path = instance
@@ -444,13 +438,15 @@ async fn run_zakuro_instance(
             ..Default::default()
         };
 
-        // フェイク音声 ADM の登録 (WAV モードまたはビープモード)
+        // フェイク音声 ADM の登録 (WAV または Safari 相当の連続自動生成)
         let fake_source = if let Some(reader) = wav_source {
             Some(fake_audio_capturer::FakeAudioSource::Wav(reader))
+        } else if use_fake_audio {
+            Some(fake_audio_capturer::FakeAudioSource::Generated(
+                fake_audio_capturer::GeneratedAudio::new(),
+            ))
         } else {
-            beep_trigger
-                .as_ref()
-                .map(|t| fake_audio_capturer::FakeAudioSource::Beep(t.clone()))
+            None
         };
         let pending = if let Some(source) = fake_source {
             let mut capturer = fake_audio_capturer::FakeAudioCapturer::new(source);
@@ -531,7 +527,6 @@ async fn run_zakuro_instance(
                 fps: instance.framerate as i32,
                 sandstorm: instance.sandstorm,
                 y4m_path: instance.input_y4m.as_ref().map(std::path::PathBuf::from),
-                beep_trigger: beep_trigger.clone(),
             };
             let mut capturer = FakeVideoCapturer::new(config)?;
             capturer.start()?;

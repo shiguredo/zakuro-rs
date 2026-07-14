@@ -9,51 +9,114 @@ use shiguredo_webrtc::{
 
 use crate::wav_reader::WavReader;
 
-/// ビープ音の周波数 (Hz)
-const BEEP_FREQUENCY: f64 = 1000.0;
-/// ビープ音の長さ (ミリ秒)
-const BEEP_DURATION_MS: u32 = 100;
-/// ビープ音の振幅 (最大 32767 の約半分)
-const BEEP_AMPLITUDE: f64 = 16000.0;
-/// サンプルレート (Hz)
+/// サンプルレート (Hz)。C++ Safari 音源と同じく 48kHz。
 const SAMPLE_RATE: u32 = 48000;
-/// チャンネル数
+/// チャンネル数 (モノラル)
 const CHANNELS: usize = 1;
 
-/// フェイク音声のビープトリガー
+/// BIP / BOP パルス長 (秒)。C++ `BIPBOP_DURATION`。
+const BIPBOP_DURATION: f64 = 0.07;
+/// BIP / BOP の振幅係数。C++ `BIPBOP_VOLUME`。
+const BIPBOP_VOLUME: f32 = 0.5;
+/// BIP 周波数 (Hz)。先頭パルス。
+const BIP_FREQUENCY: f32 = 1500.0;
+/// BOP 周波数 (Hz)。1 秒地点のパルス。
+const BOP_FREQUENCY: f32 = 500.0;
+/// 全長に加算する HUM 周波数 (Hz)。
+const HUM_FREQUENCY: f32 = 150.0;
+/// HUM 振幅係数。
+const HUM_VOLUME: f32 = 0.1;
+/// 全長に加算するノイズ周波数 (Hz)。
+const NOISE_FREQUENCY: f32 = 3000.0;
+/// ノイズ振幅係数。
+const NOISE_VOLUME: f32 = 0.05;
+
+/// C++ Safari 相当の BIP / BOP パルス長 (サンプル数)
 ///
-/// 映像スレッドからパイチャート一周時に `trigger()` を呼び出す。
-/// 音声スレッドが `take()` でトリガーを消費してビープ音を生成する。
-#[derive(Clone)]
-pub(crate) struct BeepTrigger {
-    flag: Arc<AtomicBool>,
+/// C++ は `(int)std::ceil(BIPBOP_DURATION * SAMPLE_RATE)`。
+/// `0.07 * 48000` は double で正確な 3360 にならず、ceil 後は 3361 になる。
+fn bipbop_sample_count() -> usize {
+    (BIPBOP_DURATION * f64::from(SAMPLE_RATE)).ceil() as usize
 }
 
-impl BeepTrigger {
+/// 正弦波寄与を `dest` に加算する
+///
+/// C++ `add_hum` 相当。`volume` / `frequency` / `sample_rate` は `f32`、
+/// `sin` は `f64`。寄与ごとに `i16` へ切り捨ててから加算する
+/// (`saturating_add` は使わない。理論上界は i16 内に収まる)。
+///
+/// 位相インデックスはスライス先頭からの相対位置 (C++ の `start` は常に 0)。
+fn add_hum(volume: f32, frequency: f32, sample_rate: f32, dest: &mut [i16]) {
+    let hum_period = sample_rate / frequency;
+    for (i, sample) in dest.iter_mut().enumerate() {
+        let a = (f64::from(volume) * (i as f64 * 2.0 * PI / f64::from(hum_period)).sin() * 32767.0)
+            as i16;
+        *sample = (*sample as i32 + i32::from(a)) as i16;
+    }
+}
+
+/// C++ `Type::Safari` 相当の 2 秒 PCM を組み立てる
+///
+/// 順序: BIP → BOP (`data[SAMPLE_RATE..]`) → NOISE 全長 → HUM 全長。
+fn build_safari_audio() -> Vec<i16> {
+    let sample_rate = SAMPLE_RATE as usize;
+    let bipbop = bipbop_sample_count();
+    let mut data = vec![0i16; sample_rate * 2];
+    let sr = SAMPLE_RATE as f32;
+
+    add_hum(BIPBOP_VOLUME, BIP_FREQUENCY, sr, &mut data[..bipbop]);
+    add_hum(
+        BIPBOP_VOLUME,
+        BOP_FREQUENCY,
+        sr,
+        &mut data[sample_rate..sample_rate + bipbop],
+    );
+    add_hum(NOISE_VOLUME, NOISE_FREQUENCY, sr, &mut data);
+    add_hum(HUM_VOLUME, HUM_FREQUENCY, sr, &mut data);
+
+    data
+}
+
+/// 手続き生成した連続 PCM をループ再生する音源
+///
+/// instance (capturer) あたり 1。起動時に `build_safari_audio` で組み立て、
+/// 10ms 単位でカーソルを進めながら読み出す。
+pub(crate) struct GeneratedAudio {
+    samples: Vec<i16>,
+    cursor: usize,
+}
+
+impl GeneratedAudio {
+    /// Safari 相当の 2 秒 PCM で初期化する
     pub(crate) fn new() -> Self {
         Self {
-            flag: Arc::new(AtomicBool::new(false)),
+            samples: build_safari_audio(),
+            cursor: 0,
         }
     }
 
-    /// ビープ音をトリガーする (映像スレッドから呼ぶ)
-    pub(crate) fn trigger(&self) {
-        self.flag.store(true, Ordering::Release);
-    }
-
-    /// トリガーを消費する (音声スレッドから呼ぶ)
-    fn take(&self) -> bool {
-        self.flag.swap(false, Ordering::AcqRel)
+    /// `buf` をループ再生のサンプルで埋める
+    ///
+    /// 呼び出し側は通常 10ms 分 (480 サンプル) を渡す想定。`WavReader` と同型。
+    pub(crate) fn read_samples(&mut self, buf: &mut [i16]) {
+        let len = self.samples.len();
+        for slot in buf.iter_mut() {
+            *slot = self.samples[self.cursor];
+            self.cursor += 1;
+            if self.cursor >= len {
+                self.cursor = 0;
+            }
+        }
     }
 }
 
 /// フェイク音声の供給ソース
 ///
-/// `Beep` はビープトリガーに同期して短時間サイン波を生成する。
+/// `Generated` は C++ Safari 相当の BIP / BOP / HUM / ノイズ 2 秒ループ。
 /// `Wav` は WAV ファイルを 48kHz モノラルにリサンプリング済みのサンプル列として
 /// ループ再生する。
 pub(crate) enum FakeAudioSource {
-    Beep(BeepTrigger),
+    Generated(GeneratedAudio),
     Wav(WavReader),
 }
 
@@ -70,8 +133,7 @@ struct FakeAudioState {
 /// カスタム AudioDeviceModule を使って 10ms ごとに PCM データを WebRTC に送信する。
 /// 音声ソースは `FakeAudioSource` で指定する。
 ///
-/// - `FakeAudioSource::Beep`: 通常は無音を送信し、`BeepTrigger::trigger()` が呼ばれると
-///   1000Hz のビープ音を 100ms 間生成する。
+/// - `FakeAudioSource::Generated`: Safari 相当の 2 秒ループを常時送出する。
 /// - `FakeAudioSource::Wav`: WAV ファイルから読み込んだサンプル列をループ再生する。
 pub(crate) struct FakeAudioCapturer {
     adm: AudioDeviceModule,
@@ -183,8 +245,7 @@ impl FakeAudioCapturer {
         }
 
         let state = self.state.clone();
-        // source は所有権をスレッドに移す (Beep は Arc 経由でトリガーを共有するが、
-        // Wav は WavReader 内部の cursor を Vec に保持しているため Clone 不可)
+        // source は所有権をスレッドに移す (Generated / Wav とも内部 cursor を所有し Clone 不可)
         let source = self
             .source
             .take()
@@ -215,39 +276,13 @@ fn audio_thread(state: FakeAudioState, mut source: FakeAudioSource) {
     let samples_per_10ms = (SAMPLE_RATE / 100) as usize;
     let mut buffer = vec![0i16; samples_per_10ms * CHANNELS];
 
-    // ビープ生成用のローカルステート (source が Beep のときのみ更新される)
-    let mut beep_samples_remaining: i32 = 0;
-    let mut beep_phase: f64 = 0.0;
-    let phase_increment = 2.0 * PI * BEEP_FREQUENCY / SAMPLE_RATE as f64;
-
     let interval = std::time::Duration::from_millis(10);
     let mut next_time = std::time::Instant::now();
 
     while !state.stop.load(Ordering::Acquire) {
         match &mut source {
-            FakeAudioSource::Beep(trigger) => {
-                // ビープトリガーをチェック
-                if trigger.take() {
-                    beep_samples_remaining = (BEEP_DURATION_MS * SAMPLE_RATE / 1000) as i32;
-                    beep_phase = 0.0;
-                }
-
-                // ビープ音またはサイレンスを生成
-                if beep_samples_remaining > 0 {
-                    for sample in buffer.iter_mut() {
-                        *sample = (BEEP_AMPLITUDE * beep_phase.sin()) as i16;
-                        beep_phase += phase_increment;
-                        if beep_phase >= 2.0 * PI {
-                            beep_phase -= 2.0 * PI;
-                        }
-                    }
-                    beep_samples_remaining -= samples_per_10ms as i32;
-                    if beep_samples_remaining < 0 {
-                        beep_samples_remaining = 0;
-                    }
-                } else {
-                    buffer.fill(0);
-                }
+            FakeAudioSource::Generated(generated) => {
+                generated.read_samples(&mut buffer);
             }
             FakeAudioSource::Wav(reader) => {
                 // WAV からサンプルを取り出してループ再生する
@@ -335,5 +370,71 @@ mod tests {
             result, 0,
             "正常系では register_audio_callback が 0 を返すこと"
         );
+    }
+
+    /// Safari バッファ長と BIP/BOP パルス長が C++ と同じになることを検証する
+    #[test]
+    fn safari_buffer_length_and_bipbop_count() {
+        let samples = build_safari_audio();
+        assert_eq!(samples.len(), 48000 * 2, "バッファ長は 48kHz × 2 秒のはず");
+        // C++ `(int)std::ceil(0.07 * 48000)` は floating 誤差で 3361
+        assert_eq!(
+            bipbop_sample_count(),
+            3361,
+            "BIP/BOP パルス長は C++ ceil 結果と一致するはず"
+        );
+    }
+
+    /// 代表点の金値が BIP/BOP/NOISE/HUM の加算規則と一致することを検証する
+    ///
+    /// 期待値は C++ と同じ位相規則で算出した固定定数。
+    /// `samples[0]` / `samples[SAMPLE_RATE]` は sin(0)=0 のため使わない。
+    /// `samples[bipbop]` も NOISE/HUM が零点になりうるため使わない。
+    #[test]
+    fn safari_golden_samples_at_representative_indices() {
+        let samples = build_safari_audio();
+        let sample_rate = SAMPLE_RATE as usize;
+        let bipbop = bipbop_sample_count();
+
+        // samples[1] = BIP(i=1) + NOISE(i=1) + HUM(i=1)
+        assert_eq!(samples[1], 3886, "index 1 の金値が一致するはず");
+        // samples[SAMPLE_RATE+1] = BOP(k=1) + NOISE(i) + HUM(i)
+        assert_eq!(
+            samples[sample_rate + 1],
+            1761,
+            "index SAMPLE_RATE+1 の金値が一致するはず"
+        );
+        // BIP/BOP パルス外 = NOISE + HUM のみ
+        assert_eq!(
+            samples[bipbop + 1],
+            1030,
+            "index bipbop+1 の金値が一致するはず"
+        );
+    }
+
+    /// 末尾付近からの読み出しが先頭へ折り返し、要求長どおり埋まることを検証する
+    #[test]
+    fn generated_read_samples_loops_at_end() {
+        let mut generated = GeneratedAudio::new();
+        let len = generated.samples.len();
+        // カーソルを末尾 3 サンプル手前に置く
+        generated.cursor = len - 3;
+        let expected = [
+            generated.samples[len - 3],
+            generated.samples[len - 2],
+            generated.samples[len - 1],
+            generated.samples[0],
+            generated.samples[1],
+            generated.samples[2],
+            generated.samples[3],
+        ];
+
+        let mut out = [0i16; 7];
+        generated.read_samples(&mut out);
+        assert_eq!(
+            out, expected,
+            "末尾到達後は先頭から繰り返し、出力長が要求どおりのはず"
+        );
+        assert_eq!(generated.cursor, 4, "カーソルは折り返し後の位置のはず");
     }
 }

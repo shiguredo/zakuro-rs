@@ -10,7 +10,6 @@ use shiguredo_webrtc::{
 };
 
 use crate::error::Result;
-use crate::fake_audio_capturer::BeepTrigger;
 use crate::y4m_reader::Y4mReader;
 
 pub(crate) struct FakeVideoCapturerConfig {
@@ -19,7 +18,6 @@ pub(crate) struct FakeVideoCapturerConfig {
     pub(crate) fps: i32,
     pub(crate) sandstorm: bool,
     pub(crate) y4m_path: Option<PathBuf>,
-    pub(crate) beep_trigger: Option<BeepTrigger>,
 }
 
 pub(crate) struct FakeVideoCapturer {
@@ -32,7 +30,6 @@ pub(crate) struct FakeVideoCapturer {
     sandstorm: bool,
     start_time_ms: i64,
     video_source: VideoTrackSource,
-    beep_trigger: Option<BeepTrigger>,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -79,7 +76,6 @@ impl FakeVideoCapturer {
             sandstorm: config.sandstorm,
             start_time_ms: shiguredo_webrtc::time_millis(),
             video_source,
-            beep_trigger: config.beep_trigger,
             source,
             timestamp_aligner: Some(timestamp_aligner),
             stop: Arc::new(AtomicBool::new(false)),
@@ -110,7 +106,6 @@ impl FakeVideoCapturer {
         let start_time_ms = self.start_time_ms;
         let sandstorm = self.sandstorm;
         let has_y4m = is_y4m(&image);
-        let beep_trigger = self.beep_trigger.take();
         let stop = self.stop.clone();
         let handle = thread::Builder::new()
             .name("fake-video-capturer".to_string())
@@ -153,7 +148,6 @@ impl FakeVideoCapturer {
                             fps,
                             start_time_ms,
                             frame_counter,
-                            &beep_trigger,
                         );
                     }
                     let sleep_ms = (1000 / fps).saturating_sub(2).max(1);
@@ -341,7 +335,6 @@ fn tick_raden(
     fps: i32,
     start_time_ms: i64,
     frame_counter: u32,
-    beep_trigger: &Option<BeepTrigger>,
 ) {
     let elapsed_ms = shiguredo_webrtc::time_millis() - start_time_ms;
 
@@ -355,7 +348,7 @@ fn tick_raden(
     ctx.restore();
 
     ctx.save();
-    draw_animations(&mut ctx, width, height, fps, frame_counter, beep_trigger);
+    draw_animations(&mut ctx, width, height, fps, frame_counter);
     ctx.restore();
 
     ctx.save();
@@ -428,14 +421,7 @@ fn send_frame(
     source.on_frame(&frame);
 }
 
-fn draw_animations(
-    ctx: &mut Context<'_>,
-    width: i32,
-    height: i32,
-    fps: i32,
-    frame_counter: u32,
-    beep_trigger: &Option<BeepTrigger>,
-) {
+fn draw_animations(ctx: &mut Context<'_>, width: i32, height: i32, fps: i32, frame_counter: u32) {
     let w = width as f64;
     let h = height as f64;
 
@@ -448,13 +434,6 @@ fn draw_animations(
     ctx.set_fill_style(Rgba32::rgb(160, 160, 160));
     let sweep = (frame_counter % fps as u32) as f64 / fps as f64 * 2.0 * PI;
     ctx.fill_pie(&raden::Arc::new(0.0, 0.0, w * 0.3, w * 0.3, 0.0, sweep));
-
-    // パイチャートが一周したときにビープ音をトリガーする
-    if frame_counter.is_multiple_of(fps as u32)
-        && let Some(trigger) = beep_trigger
-    {
-        trigger.trigger();
-    }
 }
 
 fn draw_boxes(ctx: &mut Context<'_>, width: i32, height: i32, frame_counter: u32) {

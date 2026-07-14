@@ -242,8 +242,7 @@ POST /rpc          → JSON-RPC 2.0
 ### 音声
 
 - [x] 音声無効化 (`--no-audio-device`)
-- [x] フェイク音声 (ビープ音のみ、映像のパイチャート一周に同期して 1000Hz/100ms を生成)
-- [ ] フェイク音声フル実装 (BIP / BOP / HUM / ノイズ自動生成)
+- [x] フェイク音声フル実装 (BIP / BOP / HUM / ノイズ自動生成、48kHz モノラル・2 秒ループ)
 - [x] WAV 音声ファイル読込 (`--input-wav`)
 
 ### コーデック
@@ -336,5 +335,6 @@ POST /rpc          → JSON-RPC 2.0
 | インスタンス起動 | シングルプロセス・マルチスレッド (`std::thread`) で instance-hatch-rate を実装 | シングルプロセス内の tokio タスクで instance-hatch-rate を実装 (DelayQueue + JoinSet) |
 | 映像ファイル入力 | `--fake-video-capture` | `--input-y4m` |
 | 音声ファイル入力 | `--fake-audio-capture` | `--input-wav` |
+| WAV 未指定時のデフォルト音源 | External / GameAudio | Safari ループ (GameAudioManager 非実装のため) |
 | カメラ指定 | `--video-device` | `--video-input-device` |
 | MP4 パススルー | なし | `--input-mp4` |

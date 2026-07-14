@@ -2,6 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-03-27
+- Completed: 2026-07-15
 - Model: Opus 4.6
 - Branch: feature/add-fake-audio-generate
 - Polished: 2026-07-14
@@ -137,32 +138,23 @@ Rust の `add_hum` も C++ に合わせ **寄与ごとに `i16` へ切り捨て�
 
 ## 解決方法
 
-### 1. `src/fake_audio_capturer.rs`
+### 実装
 
-- `build_safari_audio` / `add_hum` / `GeneratedAudio::{new, read_samples}` を追加
-- `FakeAudioSource::Beep` → `Generated`。`audio_thread` の match と Beep ローカル状態を削除
-- `BeepTrigger` と `BEEP_*` 定数を削除
+- `src/fake_audio_capturer.rs`: C++ Safari 相当の `build_safari_audio` / `add_hum` / `GeneratedAudio` を追加し、`FakeAudioSource::Beep` を `Generated` に置き換えた。`BeepTrigger` と `BEEP_*` 定数、`audio_thread` のビープローカル状態を削除した
+- `bipbop_sample_count` は C++ と同じ `(BIPBOP_DURATION * SAMPLE_RATE).ceil()`。`0.07 * 48000` の floating 誤差により値は 3361（issue 草案の 3360 表記は不正確）
+- `src/fake_video_capturer.rs`: `beep_trigger` フィールドと `tick_raden` / `draw_animations` のトリガ配線を削除した
+- `src/main.rs`: `use_wav_audio` → `Wav`、それ以外の `use_fake_audio` → `Generated` に配線した
 
-### 2. `src/fake_video_capturer.rs` / `src/main.rs`
+### テスト
 
-- `BeepTrigger` import・config フィールド・`tick_raden` 引数・`draw_animations` の `trigger()` を削除
-- `main.rs` で `Generated` を構築（「ビープ音または WAV」等のコメントも更新）
+同ファイル `#[cfg(test)]` に以下を追加した（モックなし）:
 
-### 3. テスト
+- バッファ長 `48000 * 2` と `bipbop_sample_count == 3361`
+- 金値: `samples[1]=3886` / `samples[SAMPLE_RATE+1]=1761` / `samples[bipbop+1]=1030`
+- `GeneratedAudio::read_samples` の末尾折り返し
 
-モック / スタブ禁止。PBT / `proptest` は導入しない（本リポジトリに `pbt/` 無し。closed `0005` / `0021` と同方針。shiguredo-rust の「パニックしないだけの PBT」禁止にも抵触するため）。生成純関数は `#[cfg(test)]` で同ファイル検証。
+### ドキュメント
 
-単体（`sin(0)=0` のため `samples[0]` / `samples[SAMPLE_RATE]` の非ゼロを期待しない。`bipbop/2=1680` も BIP/NOISE/HUM が同時に零点になりうるため使わない）:
-
-- `data.len() == 48000 * 2`、`bipbop_sample_count == 3360`
-- 金値（絶対 index / 期待値。BOP の位相は相対 `k`）:
-  - `samples[1]` = BIP(i=1) + NOISE(i=1) + HUM(i=1)
-  - `samples[SAMPLE_RATE + 1]` = BOP(k=1) + NOISE(i=SAMPLE_RATE+1) + HUM(i=SAMPLE_RATE+1)
-  - `samples[bipbop_sample_count + 1]`（BIP/BOP パルス外）= NOISE(i) + HUM(i) のみ
-  - 注: `samples[bipbop_sample_count]` (=3360) は NOISE/HUM も零点になりうるため使わない
-- 期待値はテスト内に定数として固定するか、上記位相規則の式で 1 回計算して断言する（別実装の二重メンテを避けるなら固定定数が望ましい）
-- `read_samples`: 末尾数サンプル要求 → 先頭へ折り返し、出力長が要求どおり（`WavReader` のループテストと同型）
-
-### 4. ドキュメント
-
-完了条件どおり `docs/ZAKURO.md` / `README.md` を更新する。
+- `docs/ZAKURO.md`: Beep 行を削除しフル実装のみ `[x]`。設計差分表に「WAV 未指定時のデフォルト音源」を追加
+- `README.md`: 連続自動生成への置換と旧 Beep 廃止・WAV 代替を記載
+- `CHANGES.md` は `CODEBASE.md`（2026.0.0）どおり未更新

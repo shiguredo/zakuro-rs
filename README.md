@@ -12,7 +12,7 @@ Sora WebRTC SFU の負荷試験ツール `zakuro` の Rust 実装です。
 - 複数の仮想クライアントを段階的に起動 (`--vcs` / `--vcs-hatch-rate`)
 - Sora への `sendonly` / `recvonly` / `sendrecv` 接続
 - フェイク映像 (Raden デジタル時計)、砂嵐、Y4M 入力、実カメラ入力、MP4 パススルー送信
-- フェイク音声 (映像同期ビープ)、WAV ファイル入力 (`--input-wav`)
+- フェイク音声 (BIP / BOP / HUM / ノイズの連続自動生成。旧映像同期ビープは廃止)、WAV ファイル入力 (`--input-wav`)
 - 映像 / 音声コーデック指定、OpenH264 エンコード (`--openh264`)
 - 受信映像をデコードせず廃棄する NopVideoDecoder
 - DataChannel メッセージング (`--sora-data-channels`、ZAKURO ヘッダ付き自動送信)
@@ -79,6 +79,8 @@ cargo run -- \
 ```
 
 ### WAV ファイルから音声を流す
+
+WAV 未指定時は Safari 相当の BIP / BOP / HUM / ノイズ連続 PCM (48kHz モノラル・2 秒ループ) が自動生成されます。旧来の映像同期ビープはありません。`--input-wav` を指定すると自動生成の代わりに WAV をループ再生します。
 
 `--input-wav` は PCM 16bit のモノラル / ステレオに対応します。サンプルレートは自動で 48kHz にリサンプリングされ、ファイル終端に達するとループ再生します。
 
