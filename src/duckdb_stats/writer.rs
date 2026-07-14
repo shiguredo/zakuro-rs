@@ -143,8 +143,15 @@ impl DuckDBStatsWriter {
     ///
     /// 呼び出し側は事前に `client.send(UpdateZakuroStop).await` で
     /// `stop_timestamp` UPDATE を送り、その後 `drop(client)` で
-    /// 全 Sender を drop して writer の recv が None を返すようにしてから呼ぶ。
+    /// main 側の Sender を drop してから呼ぶ。
+    ///
+    /// 本メソッド自身も `DuckDBStatsWriter` が保持する `client` (Sender) を
+    /// 先に drop する。これをしないとチャネルが閉じず writer の
+    /// `recv().await` が永久に戻り、`join` がハングする。
     pub(crate) async fn join(self) -> Result<()> {
+        // writer 終了条件は「全 Sender drop」。Self 内の client も Sender を持つ。
+        drop(self.client);
+
         if let Some(h) = self.join_handle {
             h.await.map_err(|e| {
                 AppError::Message(ErrorMessage::new(format!(
@@ -358,6 +365,33 @@ mod tests {
                     stop_timestamp: SystemTime::now(),
                 })
                 .await;
+        });
+    }
+
+    /// `DuckDBStatsWriter` が保持する Sender を join 時に drop しないと
+    /// writer の recv が閉じずハングする。その回帰を防ぐ。
+    #[test]
+    fn join_completes_after_external_client_dropped() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime を作成できること");
+        rt.block_on(async {
+            let dir = tempfile::TempDir::new().expect("一時ディレクトリの作成に失敗");
+            let db_path = dir.path().join("join_test.db");
+            let (writer, _version) = DuckDBStatsWriter::start(DuckDBWriterConfig {
+                db_path,
+                interval: Duration::from_secs(1),
+                enabled: true,
+            })
+            .await
+            .expect("DuckDBStatsWriter の起動に成功すること");
+
+            // main 側と同じく外部 client を drop してから join する。
+            // writer 内部の client も join 内で drop されないとここでハングする。
+            let client = writer.client();
+            drop(client);
+            tokio::time::timeout(Duration::from_secs(5), writer.join())
+                .await
+                .expect("join がタイムアウトしないこと")
+                .expect("join が成功すること");
         });
     }
 

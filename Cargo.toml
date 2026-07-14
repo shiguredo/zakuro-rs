@@ -2,7 +2,7 @@
 name = "zakuro"
 version = "2026.0.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.97"
 description = "Recording Composition Tool Zakuro"
 readme = "README.md"
 homepage = "https://github.com/shiguredo/zakuro-rs"
@@ -19,7 +19,8 @@ path = "src/main.rs"
 aws-lc-rs = "1.17"
 # DuckDB バインディング (統計記録に利用)
 # bundled は CI でビルド時間 30 分以上かかるため使用しない
-# 代わりに DUCKDB_DOWNLOAD_LIB=1 で prebuilt バイナリをダウンロードする
+# prebuilt ダウンロードは .cargo/config.toml の DUCKDB_DOWNLOAD_LIB で有効化する
+# (duckdb-rs に対応 feature が無いため Cargo.toml の features では指定できない)
 duckdb = { version = "1.10504", default-features = false }
 # UTC タイムスタンプ整形 (DuckDB ファイル名生成用)
 jiff = "0.2"
@@ -38,24 +39,28 @@ shiguredo_video_device = "2026.1"
 # libwebrtc バインディング
 shiguredo_webrtc = "0.150"
 # Sora Rust SDK
-sora_sdk = "2026.1.0-canary.11"
-# 非同期ランタイム
-tokio = {
-  version = "1.52",
-  features = [
-    "io-util",
-    "macros",
-    "net",
-    "rt-multi-thread",
-    "signal",
-    "sync",
-    "time",
-  ]
-}
-# tokio ユーティリティ (CancellationToken, DelayQueue)
-tokio-util = { version = "0.7", features = ["time"] }
+sora_sdk = "2026.1.0-canary.12"
 # tokio Stream ラッパー (ReceiverStream, IntervalStream)
 tokio-stream = "0.1"
+# tokio ユーティリティ (CancellationToken, DelayQueue)
+tokio-util = { version = "0.7", features = ["time"] }
+
+# 複数キーを持つ依存はインラインテーブルではなくテーブルセクションで記述する。
+# tombi は行長超過のインラインテーブルを複数行に展開するが、複数行インラインテーブルは
+# TOML 1.1 の機能であり cargo がマニフェストを解析できない場合がある。
+
+# 非同期ランタイム
+[dependencies.tokio]
+version = "1.52"
+features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+]
 
 [dev-dependencies]
 # テストで一時ディレクトリを使う

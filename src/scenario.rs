@@ -149,7 +149,7 @@ mod tests {
         for _ in 0..1000 {
             let v = random_range(1000, 5000);
             assert!(
-                v >= 1000 && v <= 5000,
+                (1000..=5000).contains(&v),
                 "戻り値 {v} が [1000, 5000] の範囲内であること"
             );
         }
@@ -159,9 +159,8 @@ mod tests {
     #[test]
     fn test_random_range_u64_max_boundary() {
         for _ in 0..100 {
-            let v = random_range(0, u64::MAX);
-            // パニックせず値が範囲内であることだけを検証する
-            assert!(v <= u64::MAX, "戻り値が u64::MAX 以下であること");
+            // パニックしないことだけを検証する (戻り値は常に u64 の範囲内)
+            let _v = random_range(0, u64::MAX);
         }
     }
 

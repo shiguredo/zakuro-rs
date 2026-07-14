@@ -233,11 +233,16 @@ async fn async_main() -> Result<()> {
     let stats_tx = stats.event_tx();
 
     // Ctrl+C ハンドラを先に起動 (DelayQueue poll 中のキャンセル経路を確保)
+    // 1 回目: 通常の graceful shutdown。2 回目: 何かにブロックしていても強制終了する。
     let shutdown_token = token.clone();
     tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
         rtc_log_info!("Ctrl+C received, shutting down...");
         shutdown_token.cancel();
+
+        let _ = tokio::signal::ctrl_c().await;
+        rtc_log_warning!("Ctrl+C received again, forcing process exit");
+        std::process::exit(130);
     });
 
     // HTTP サーバーの起動 (両方ある場合のみ、Ctrl+C ハンドラ起動と DelayQueue 構築の間)

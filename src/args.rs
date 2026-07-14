@@ -1634,7 +1634,7 @@ mod tests {
                 vec![minimal_sora_argv()],
                 Vec::new(),
             )
-            .expect(&format!("duckdb-interval={val} は受け入れられるべき"));
+            .unwrap_or_else(|_| panic!("duckdb-interval={val} は受け入れられるべき"));
             assert_eq!(
                 common.duckdb_interval.to_string(),
                 val,

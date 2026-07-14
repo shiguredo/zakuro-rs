@@ -1,0 +1,4 @@
+# DuckDB は bundled せず、libduckdb-sys の build.rs に prebuilt ダウンロードを指示する。
+# duckdb-rs に対応 feature が無いため、環境変数で渡す。
+[env]
+DUCKDB_DOWNLOAD_LIB = "1"

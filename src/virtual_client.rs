@@ -3,7 +3,8 @@ use std::time::{Duration, SystemTime};
 
 use shiguredo_webrtc::{VideoTrackSource, rtc_log_info, rtc_log_warning};
 use sora_sdk::{
-    ConnectDataChannel, JsonString, Role, SignalingDirection, SoraConnection, SoraConnectionContext,
+    ConnectDataChannel, JsonString, Role, SignalingDirection, SoraConnection,
+    SoraConnectionContext, SoraConnectionEventHandler,
 };
 use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::IntervalStream};
@@ -189,6 +190,8 @@ pub(crate) async fn run(
                     _ = handle.disconnect() => {}
                     _ = &mut run_future => {}
                 }
+                // DataChannel messaging / DuckDB stats 収集タスクを止める
+                connection_token.cancel();
                 break;
             }
             DisconnectReason::DurationExpired => {
@@ -373,6 +376,61 @@ async fn run_stats_collection(
     }
 }
 
+/// 仮想クライアント用の接続イベントハンドラ。
+///
+/// offer 受信時に connection_id / session_id を抽出し DuckDB へ記録する。
+/// (on_notify の connection.created は同一チャネル内の他 client 接続でも届きうるため不採用)
+struct VirtualClientEventHandler {
+    ids: Arc<std::sync::Mutex<Option<ConnectionIds>>>,
+    duckdb_client: DuckDBClient,
+    channel_id: String,
+    role: String,
+    audio: bool,
+    video: bool,
+    instance_id: u32,
+    vc_id: u32,
+}
+
+impl SoraConnectionEventHandler for VirtualClientEventHandler {
+    fn on_signaling_message(
+        &mut self,
+        _signaling_type: sora_sdk::SignalingType,
+        direction: SignalingDirection,
+        text: &str,
+    ) {
+        if direction != SignalingDirection::Received {
+            return;
+        }
+        let Some(parsed) = parse_offer_ids(text) else {
+            return;
+        };
+        // poison 時に try_send と ids 更新の両方をスキップするため、先に lock を取る
+        let Ok(mut guard) = self.ids.lock() else {
+            rtc_log_warning!(
+                "[i{}/vc-{}] connection_ids mutex poisoned in on_signaling_message",
+                self.instance_id,
+                self.vc_id,
+            );
+            return;
+        };
+        self.duckdb_client
+            .try_send(WriteCommand::InsertConnection(Box::new(
+                InsertConnectionRow {
+                    instance_id: self.instance_id,
+                    vc_id: self.vc_id,
+                    timestamp: SystemTime::now(),
+                    channel_id: self.channel_id.clone(),
+                    connection_id: parsed.connection_id.clone(),
+                    session_id: parsed.session_id.clone(),
+                    role: self.role.clone(),
+                    audio: self.audio,
+                    video: self.video,
+                },
+            )));
+        *guard = Some(parsed);
+    }
+}
+
 fn build_client(
     context: &Arc<SoraConnectionContext>,
     video_source: &Option<VideoTrackSource>,
@@ -381,58 +439,28 @@ fn build_client(
     instance_id: u32,
     vc_id: u32,
 ) -> sora_sdk::Result<(sora_sdk::SoraConnection, sora_sdk::SoraConnectionHandle)> {
+    // Audio::Bool(false) は音声無効、それ以外 (None / Audio{...}) は音声有効
+    let audio_value = !matches!(&config.audio, Some(sora_sdk::Audio::Bool(false)));
+    // Video::Bool(false) は映像無効、それ以外 (None / Video{...}) は映像有効
+    let video_value = !matches!(&config.video, Some(sora_sdk::Video::Bool(false)));
+    let event_handler = VirtualClientEventHandler {
+        ids: ids.clone(),
+        duckdb_client: config.duckdb_client.clone(),
+        channel_id: config.channel_id.clone(),
+        role: config.role.as_sora_role().to_string(),
+        audio: audio_value,
+        video: video_value,
+        instance_id,
+        vc_id,
+    };
+
     let mut builder = SoraConnection::builder(
         context.clone(),
         config.signaling_urls.clone(),
         config.channel_id.clone(),
         config.role,
-    )
-    .on_notify(|_text| {})
-    .on_push(|_text| {})
-    .on_track(|_transceiver| {})
-    .on_remove_track(|_receiver| {});
-
-    // offer 受信時に connection_id / session_id を抽出し DuckDB へ記録する
-    // (on_notify の connection.created は同一チャネル内の他 client 接続でも届きうるため不採用)
-    let ids_for_sig = ids.clone();
-    let duckdb_for_sig = config.duckdb_client.clone();
-    let channel_id_for_sig = config.channel_id.clone();
-    let role_str = config.role.as_sora_role().to_string();
-    // Audio::Bool(false) は音声無効、それ以外 (None / Audio{...}) は音声有効
-    let audio_value = !matches!(&config.audio, Some(sora_sdk::Audio::Bool(false)));
-    // Video::Bool(false) は映像無効、それ以外 (None / Video{...}) は映像有効
-    let video_value = !matches!(&config.video, Some(sora_sdk::Video::Bool(false)));
-    builder = builder.on_signaling_message(move |_type_, direction, text| {
-        if direction != SignalingDirection::Received {
-            return;
-        }
-        let Some(parsed) = parse_offer_ids(text) else {
-            return;
-        };
-        // poison 時に try_send と ids 更新の両方をスキップするため、先に lock を取る
-        let Ok(mut guard) = ids_for_sig.lock() else {
-            rtc_log_warning!(
-                "[i{}/vc-{}] connection_ids mutex poisoned in on_signaling_message",
-                instance_id,
-                vc_id,
-            );
-            return;
-        };
-        duckdb_for_sig.try_send(WriteCommand::InsertConnection(Box::new(
-            InsertConnectionRow {
-                instance_id,
-                vc_id,
-                timestamp: SystemTime::now(),
-                channel_id: channel_id_for_sig.clone(),
-                connection_id: parsed.connection_id.clone(),
-                session_id: parsed.session_id.clone(),
-                role: role_str.clone(),
-                audio: audio_value,
-                video: video_value,
-            },
-        )));
-        *guard = Some(parsed);
-    });
+        event_handler,
+    );
 
     if let Some(ref id) = config.client_id {
         builder = builder.client_id(id.clone());

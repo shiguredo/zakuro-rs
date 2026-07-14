@@ -106,17 +106,18 @@ UBUNTU_2204_ARM64_ENV = $(call sysroot_env,$(UBUNTU_2204_ARM64_SYSROOT),aarch64-
 # Raspberry Pi 用 sysroot を生成する
 sysroot-raspberry-pi:
 	cargo shiguredo-sysroot --config sysroot/raspberry-pi-os-trixie_arm64.json
-	rm -f .cargo/config.toml
+	# shiguredo-sysroot が書き換えるため、リポジトリ管理の設定を戻す
+	git checkout -- .cargo/config.toml
 
 # Ubuntu 24.04 arm64 用 sysroot を生成する
 sysroot-ubuntu-24.04_arm64:
 	cargo shiguredo-sysroot --config sysroot/ubuntu-24.04_arm64.json
-	rm -f .cargo/config.toml
+	git checkout -- .cargo/config.toml
 
 # Ubuntu 22.04 arm64 用 sysroot を生成する
 sysroot-ubuntu-22.04_arm64:
 	cargo shiguredo-sysroot --config sysroot/ubuntu-22.04_arm64.json
-	rm -f .cargo/config.toml
+	git checkout -- .cargo/config.toml
 
 # --- sysroot clippy ---
 

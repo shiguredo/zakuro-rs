@@ -30,6 +30,8 @@ Sora WebRTC SFU の負荷試験ツール `zakuro` の Rust 実装です。
 cargo build
 ```
 
+DuckDB は `bundled` せず、`.cargo/config.toml` の `DUCKDB_DOWNLOAD_LIB=1` により prebuilt バイナリをダウンロードしてリンクする。取得物は `target/duckdb-download/` にキャッシュされる。
+
 確認用コマンド:
 
 ```bash
@@ -238,7 +240,3 @@ curl -s http://127.0.0.1:8080/rpc \
 - `--sandstorm` は `--input-y4m` / `--video-input-device` / `--input-mp4` と同時指定できません
 - `--input-mp4` は `--video-input-device` / `--input-y4m` / `--sandstorm` と同時指定できません
 - `--input-wav` は `--no-audio-device` / `--sora-audio=false` と同時指定できません
-
-## 関連資料
-
-- `docs/ZAKURO.md`
