@@ -1,6 +1,7 @@
 # mTLS 対応 (`--client-cert`, `--client-key`) を追加する
 
 Created: 2026-03-27
+Completed: 2026-07-14
 Model: Opus 4.6
 
 ## 概要
@@ -22,3 +23,11 @@ zakuro (C++) では `--client-cert` と `--client-key` で mTLS が利用でき�
 
 - rustls でクライアント証明書を設定する
 - Sora SDK の接続設定に反映する
+
+## 解決方法
+
+`src/args.rs` の `CommonArgs` に `--client-cert` / `--client-key` を追加し、ファイル存在チェックと両方指定必須のバリデーションを入れた。JSONC 最上位の同キーも `is_common_key` 経由で CommonArgs に載る。
+
+`src/main.rs` で PEM を 1 度読み込み、各インスタンスの `VirtualClientConfig` に渡す。`src/virtual_client.rs` では `SoraConnectionBuilder::client_cert` に設定し、sora-rust-sdk 内の rustls `with_client_auth_cert` でシグナリング WebSocket の TLS に反映する。
+
+プロセス共通の証明書のみ対応する (per-instance 証明書は持たない)。`--insecure` との併用も可能。
