@@ -6,7 +6,7 @@ use std::fmt;
 use std::time::SystemTime;
 
 use nojson::{DisplayJson, JsonFormatter, RawJsonOwned, RawJsonValue};
-use shiguredo_webrtc::rtc_log_warning;
+use shiguredo_webrtc::{log, rtc_log_warning};
 
 use super::module::unknown_types;
 use super::rows::{
@@ -544,9 +544,24 @@ fn common_json(c: &crate::args::CommonArgs) -> impl DisplayJson + '_ {
             f.member("duckdb_output_dir", c.duckdb_output_dir.as_str())?;
             f.member("duckdb_interval", c.duckdb_interval)?;
             f.member("no_duckdb_output", c.no_duckdb_output)?;
+            // CLI / JSONC と同形の小文字文字列で出力する (Debug の PascalCase は使わない)
+            f.member("log_level", severity_as_str(c.log_level))?;
             Ok(())
         })
     })
+}
+
+/// `log::Severity` を CLI / JSONC と同形の小文字文字列に変換する
+fn severity_as_str(s: log::Severity) -> &'static str {
+    match s {
+        log::Severity::Verbose => "verbose",
+        log::Severity::Info => "info",
+        log::Severity::Warning => "warning",
+        log::Severity::Error => "error",
+        log::Severity::None => "none",
+        // CLI / JSONC からは Raw を設定しない
+        log::Severity::Raw(_) => unreachable!("log_level must not be Severity::Raw"),
+    }
 }
 
 fn instance_json(i: &crate::args::InstanceArgs) -> impl DisplayJson + '_ {
@@ -793,6 +808,7 @@ mod tests {
             duckdb_output_dir: ".".into(),
             duckdb_interval: 1.0,
             no_duckdb_output: false,
+            log_level: log::Severity::Info,
         };
         let inst = InstanceArgs {
             signaling_urls: vec!["wss://example.com/".into()],
@@ -868,6 +884,7 @@ mod tests {
             duckdb_output_dir: ".".into(),
             duckdb_interval: 1.0,
             no_duckdb_output: false,
+            log_level: log::Severity::Info,
         };
         let inst = InstanceArgs {
             signaling_urls: vec!["wss://example.com/".into()],
@@ -921,6 +938,83 @@ mod tests {
         assert!(
             !json.contains("duration"),
             "None の duration は省かれるべき"
+        );
+        // デフォルトの log_level は小文字 "info" で出力される
+        assert!(
+            json.contains(r#""log_level":"info""#),
+            "デフォルト log_level は \"info\" で含まれるべき: {json}"
+        );
+        assert!(
+            !json.contains(r#""log_level":"Info""#),
+            "log_level に Debug 形式 (PascalCase) を使ってはならない"
+        );
+    }
+
+    #[test]
+    fn build_config_json_emits_warning_log_level_in_lowercase() {
+        // Severity::Warning は "warning" (小文字) で出力し、"Warning" にはしない
+        use crate::args::{CommonArgs, InstanceArgs};
+        use sora_sdk::Role;
+        let common = CommonArgs {
+            instance_hatch_rate: 1.0,
+            http_host: None,
+            http_port: None,
+            openh264: None,
+            insecure: false,
+            client_cert: None,
+            client_key: None,
+            duckdb_output_dir: ".".into(),
+            duckdb_interval: 1.0,
+            no_duckdb_output: false,
+            log_level: log::Severity::Warning,
+        };
+        let inst = InstanceArgs {
+            signaling_urls: vec!["wss://example.com/".into()],
+            channel_id: "ch".into(),
+            role: Role::SendOnly,
+            client_id: None,
+            bundle_id: None,
+            metadata: None,
+            signaling_notify_metadata: None,
+            vcs: 1,
+            vcs_hatch_rate: 1.0,
+            duration: None,
+            repeat_interval: None,
+            max_retry: 0,
+            retry_interval: 60.0,
+            no_video_device: false,
+            no_audio_device: false,
+            video_input_device: None,
+            resolution: (640, 480),
+            framerate: 30,
+            sandstorm: false,
+            input_y4m: None,
+            input_mp4: None,
+            input_wav: None,
+            video_codec_type: None,
+            video_bit_rate: None,
+            audio: true,
+            audio_codec_type: None,
+            audio_bit_rate: None,
+            data_channels: None,
+            data_channel_signaling: None,
+            ignore_disconnect_websocket: None,
+            disconnect_wait_timeout: None,
+            simulcast: None,
+            simulcast_request_rid: None,
+            spotlight: None,
+            spotlight_focus_rid: None,
+            spotlight_unfocus_rid: None,
+            scenario: None,
+        };
+        let json = build_config_json(&common, &[inst]);
+        assert!(
+            json.contains(r#""log_level":"warning""#),
+            "log_level=Warning は \"warning\" で出力されるべき: {json}"
+        );
+        assert!(
+            !json.contains(r#""log_level":"Warning""#),
+            "log_level に Debug 形式 (PascalCase) を使ってはならない"
         );
     }
 

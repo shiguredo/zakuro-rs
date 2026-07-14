@@ -274,7 +274,7 @@ POST /rpc          → JSON-RPC 2.0
 - [x] JSONC 設定ファイル (`--config`)
 - [x] NopVideoDecoder (受信映像廃棄)
 - [x] DuckDB ファイルへの統計情報出力 (`--duckdb-output-dir` / `--duckdb-interval` / `--no-duckdb-output`)
-- [ ] ログレベル制御 (`--log-level`)
+- [x] ログレベル制御 (`--log-level`)
 - [ ] 埋め込みリソース (フォント・音声)
 
 ### sora-rust-sdk 未対応のため未実装の機能

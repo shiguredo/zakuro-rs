@@ -1,5 +1,5 @@
 use nojson::{JsonValueKind, RawJson, RawJsonValue};
-use shiguredo_webrtc::{VideoCodecType, rtc_log_info, rtc_log_warning};
+use shiguredo_webrtc::{VideoCodecType, log, rtc_log_info, rtc_log_warning};
 use sora_sdk::Role;
 
 use crate::error::{ErrorMessage, Result};
@@ -21,6 +21,8 @@ pub(crate) struct CommonArgs {
     pub(crate) duckdb_interval: f64,
     /// DuckDB 出力を無効化する (`--no-duckdb-output`)
     pub(crate) no_duckdb_output: bool,
+    /// libwebrtc のデバッグログ閾値 (`--log-level`, デフォルト: Info)
+    pub(crate) log_level: log::Severity,
 }
 
 /// インスタンスごとの設定 (vc 群・Sora 接続 / 映像音声キャプチャ / シナリオ等)
@@ -93,6 +95,7 @@ fn is_common_key(key: &str) -> bool {
             | "duckdb-output-dir"
             | "duckdb-interval"
             | "no-duckdb-output"
+            | "log-level"
     )
 }
 
@@ -664,6 +667,20 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
         })?
         .unwrap_or(1.0);
 
+    // --log-level は小文字の列挙値のみ受理する (大文字・数値は拒否)
+    let log_level: log::Severity = noargs::opt("log-level")
+        .doc("ログレベル (verbose/info/warning/error/none, デフォルト: info)")
+        .take(&mut args)
+        .present_and_then(|o| match o.value() {
+            "verbose" => Ok(log::Severity::Verbose),
+            "info" => Ok(log::Severity::Info),
+            "warning" => Ok(log::Severity::Warning),
+            "error" => Ok(log::Severity::Error),
+            "none" => Ok(log::Severity::None),
+            _ => Err("log-level は verbose/info/warning/error/none で指定してください"),
+        })?
+        .unwrap_or(log::Severity::Info);
+
     // --no-duckdb-output と他の --duckdb-* 引数の併用検知
     // (引数の登場順を問わず --no-duckdb-output が指定されていれば警告 1 回)
     if no_duckdb_output && (dir_presented || interval_presented) {
@@ -687,6 +704,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
                 duckdb_output_dir,
                 duckdb_interval,
                 no_duckdb_output,
+                log_level,
             },
             help,
         ));
@@ -719,6 +737,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
             duckdb_output_dir,
             duckdb_interval,
             no_duckdb_output,
+            log_level,
         },
         help,
     ))
@@ -1850,6 +1869,183 @@ mod tests {
         assert!(
             result.unwrap_err().to_string().contains("環境変数置換"),
             "環境変数置換のエラーメッセージが含まれること"
+        );
+    }
+
+    // ---- log-level ----
+
+    #[test]
+    fn log_level_defaults_to_info_when_unspecified() {
+        // --log-level 未指定時は Severity::Info (現行ハードコード互換)
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            Vec::new(),
+            Vec::new(),
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect("最小 argv のパースに失敗してはならない");
+        assert_eq!(
+            common.log_level,
+            log::Severity::Info,
+            "未指定時の log_level は Info であるべき"
+        );
+    }
+
+    #[test]
+    fn log_level_accepts_each_valid_value() {
+        // CLI の各許容値を Severity に対応付ける
+        let cases = [
+            ("verbose", log::Severity::Verbose),
+            ("info", log::Severity::Info),
+            ("warning", log::Severity::Warning),
+            ("error", log::Severity::Error),
+            ("none", log::Severity::None),
+        ];
+        for (value, expected) in cases {
+            let (common, _instances) = parse_args_from_argv(
+                "zakuro",
+                vec!["--log-level".into(), value.into()],
+                Vec::new(),
+                vec![minimal_sora_argv()],
+                Vec::new(),
+            )
+            .unwrap_or_else(|e| panic!("--log-level {value} のパースに失敗: {e}"));
+            assert_eq!(
+                common.log_level, expected,
+                "--log-level {value} の Severity が一致しない"
+            );
+        }
+    }
+
+    #[test]
+    fn log_level_rejects_invalid_values() {
+        // 大文字・未知語・数値文字列は拒否し、エラーメッセージを固定文言にする
+        for value in ["debug", "", "INFO", "0"] {
+            let err = parse_args_from_argv(
+                "zakuro",
+                vec!["--log-level".into(), value.into()],
+                Vec::new(),
+                vec![minimal_sora_argv()],
+                Vec::new(),
+            )
+            .expect_err(&format!("不正値 '{value}' を許容してはならない"));
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("log-level は verbose/info/warning/error/none で指定してください"),
+                "不正値 '{value}' のエラーメッセージが一致しない: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_common_key_includes_log_level() {
+        // is_common_key に log-level が含まれること
+        assert!(is_common_key("log-level"));
+    }
+
+    #[test]
+    fn split_cli_argv_routes_log_level_to_common() {
+        // --log-level は値付きオプションとして common 側へ振り分ける
+        let cli: Vec<String> = vec![
+            "--log-level".into(),
+            "warning".into(),
+            "--vcs".into(),
+            "5".into(),
+        ];
+        let (common, instance) = split_cli_argv(cli).expect("正常な CLI は分割できること");
+        assert!(
+            common
+                .windows(2)
+                .any(|w| w[0] == "--log-level" && w[1] == "warning"),
+            "common 側に --log-level が振り分けられていない"
+        );
+        assert!(
+            instance.windows(2).any(|w| w[0] == "--vcs" && w[1] == "5"),
+            "instance 側に --vcs が振り分けられていない"
+        );
+    }
+
+    #[test]
+    fn jsonc_top_level_log_level_is_accepted() {
+        // JSONC 最上位の "log-level" は CommonArgs に載る
+        let content = r#"{
+            "log-level": "warning",
+            "sora": {
+                "signaling-url": "wss://example.com/",
+                "channel-id": "ch",
+                "role": "sendonly"
+            }
+        }"#;
+        let cfg = parse_jsonc_config(content).expect("有効な JSONC のパースに失敗してはならない");
+        assert_eq!(
+            cfg.common_argv,
+            vec!["--log-level".to_string(), "warning".to_string()],
+            "common_argv に log-level が反映されていない"
+        );
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            cfg.common_argv,
+            Vec::new(),
+            cfg.instance_argvs,
+            Vec::new(),
+        )
+        .expect("JSONC 由来の log-level のパースに失敗してはならない");
+        assert_eq!(
+            common.log_level,
+            log::Severity::Warning,
+            "JSONC の log-level=warning が Severity::Warning になるべき"
+        );
+    }
+
+    #[test]
+    fn jsonc_numeric_log_level_is_rejected() {
+        // JSONC に数値を書いた場合は push_kv 経由で "2" になり、列挙値チェックで拒否される
+        let content = r#"{
+            "log-level": 2,
+            "sora": {
+                "signaling-url": "wss://example.com/",
+                "channel-id": "ch",
+                "role": "sendonly"
+            }
+        }"#;
+        let cfg = parse_jsonc_config(content).expect("数値 log-level の JSONC 展開自体は成功する");
+        let err = parse_args_from_argv(
+            "zakuro",
+            cfg.common_argv,
+            Vec::new(),
+            cfg.instance_argvs,
+            Vec::new(),
+        )
+        .expect_err("数値の log-level を許容してはならない");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("log-level は verbose/info/warning/error/none で指定してください"),
+            "数値 log-level のエラーメッセージが一致しない: {msg}"
+        );
+    }
+
+    #[test]
+    fn jsonc_rejects_log_level_inside_instance() {
+        // instances[i] 内の "log-level" は common キー禁止エラーになる
+        let content = r#"{
+            "instances": [
+                {
+                    "log-level": "warning",
+                    "sora": {
+                        "signaling-url": "wss://a/",
+                        "channel-id": "c",
+                        "role": "sendonly"
+                    }
+                }
+            ]
+        }"#;
+        let err = parse_jsonc_config(content)
+            .expect_err("CommonArgs キーが instances 内にあるのを許容してはならない");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("log-level"),
+            "エラーメッセージに 'log-level' が含まれていない: {msg}"
         );
     }
 }

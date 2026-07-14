@@ -2,6 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-03-27
+- Completed: 2026-07-14
 - Model: Opus 4.6
 - Branch: feature/add-log-level
 - Polished: 2026-07-14
@@ -223,14 +224,21 @@ fn severity_as_str(s: log::Severity) -> &'static str {
 
 ## 解決方法
 
-設計方針に従い、変更予定ファイルを更新する。実装完了後、本節を実際の変更内容で書き換えること。
+設計方針どおり `--log-level` / JSONC `"log-level"` を追加し、パース結果を `log::log_to_debug` に反映した。
 
-### 変更予定ファイル
+### 変更内容
 
-- `src/args.rs`
-- `src/main.rs`
-- `src/duckdb_stats/stats_json.rs`
-- `docs/ZAKURO.md`
+- `src/args.rs`: `CommonArgs` に `log_level: log::Severity` を追加。`is_common_key` に `"log-level"` を登録し、`parse_common_args` で小文字 5 値のみ受理 (デフォルト `Info`)
+- `src/main.rs`: `parse_args()` 成功直後・起動ログより前に `log::log_to_debug(common.log_level)` を呼ぶ
+- `src/duckdb_stats/stats_json.rs`: `severity_as_str` で CLI と同形の小文字文字列を `common_json` の `"log_level"` に出力
+- `docs/ZAKURO.md`: 実装状況チェックを `[x]` に更新
+
+### 追加したテスト
+
+- `src/args.rs`: 未指定デフォルト、各許容値、不正値拒否、`is_common_key`、`split_cli_argv`、JSONC 最上位受理、数値拒否、`instances` 内拒否
+- `src/duckdb_stats/stats_json.rs`: `common_json` の `"log_level":"info"` / `"warning"` (PascalCase 禁止)
+
+`CODEBASE.md` に従い、作業は `develop` 直、`CHANGES.md` は更新していない。
 
 ## 関連
 

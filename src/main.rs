@@ -120,6 +120,9 @@ async fn async_main() -> Result<()> {
 
     let (common, instance_args_vec, config_path) = args::parse_args()?;
 
+    // パース結果のログレベルで閾値を上書きする (起動ログより前に適用する)
+    log::log_to_debug(common.log_level);
+
     let total_vcs: u32 = instance_args_vec.iter().map(|i| i.vcs).sum();
     let instances_count = instance_args_vec.len() as u32;
 
