@@ -2,20 +2,27 @@
 
 Sora WebRTC SFU の負荷試験ツール `zakuro` の Rust 実装です。
 
-仮想クライアントを複数起動し、フェイク映像・実デバイス映像・ Y4M・ MP4 パススルーを使って Sora へ接続できます。HTTP ヘルスチェックと JSON-RPC も提供します。
+仮想クライアントを複数起動し、フェイク映像・実デバイス映像・ Y4M・ MP4 パススルー・ WAV 音声を使って Sora へ接続できます。HTTP ヘルスチェック・ JSON-RPC・ DuckDB 統計出力も提供します。
+
+より詳細な C++ 版との対応表・実装状況は `docs/ZAKURO.md`、DuckDB のスキーマは `docs/DUCKDB.md` を参照してください。
 
 ## 主な機能
 
 - 1 プロセスで複数の Zakuro インスタンスを段階的に起動 (JSONC `instances` 配列、`--instance-hatch-rate`)
-- 複数の仮想クライアントを段階的に起動
+- 複数の仮想クライアントを段階的に起動 (`--vcs` / `--vcs-hatch-rate`)
 - Sora への `sendonly` / `recvonly` / `sendrecv` 接続
-- フェイク映像、砂嵐映像、Y4M 入力、実カメラ入力、MP4 パススルー送信
-- 音声の有効 / 無効切り替え
-- DataChannel 設定
-- DuckDB ファイルへの統計情報出力 (`--duckdb-output-dir` / `--duckdb-interval` / `--no-duckdb-output`)
-- JSONC 設定ファイルの読み込み
-- HTTP API (`GET /.ok`, `POST /rpc`)
+- フェイク映像 (Raden デジタル時計)、砂嵐、Y4M 入力、実カメラ入力、MP4 パススルー送信
+- フェイク音声 (映像同期ビープ)、WAV ファイル入力 (`--input-wav`)
+- 映像 / 音声コーデック指定、OpenH264 エンコード (`--openh264`)
+- 受信映像をデコードせず廃棄する NopVideoDecoder
+- DataChannel メッセージング (`--sora-data-channels`、ZAKURO ヘッダ付き自動送信)
+- サイマルキャスト / スポットライト
 - 再接続シナリオ (`--scenario reconnect`)
+- mTLS (`--client-cert` / `--client-key`) と TLS 検証スキップ (`--insecure`)
+- DuckDB ファイルへの統計情報出力
+- JSONC 設定ファイル (`--config`)
+- HTTP API (`GET /.ok`, `POST /rpc` / `GetVersion`)
+- ログレベル制御 (`--log-level`)
 
 ## 必要環境
 
@@ -108,6 +115,17 @@ cargo run -- \
   --http-port 8080
 ```
 
+### 再接続シナリオとログレベル
+
+```bash
+cargo run -- \
+  --sora-signaling-url wss://sora.example.com/signaling \
+  --sora-channel-id zakuro-reconnect \
+  --sora-role sendonly \
+  --scenario reconnect \
+  --log-level warning
+```
+
 ## JSONC 設定ファイル
 
 `--config` で JSONC 設定ファイルを読み込めます。CLI 引数は設定ファイルより優先されます。
@@ -142,7 +160,7 @@ cargo run -- --config ./config.jsonc
 
 ### 複数の Zakuro インスタンスを起動する
 
-1 プロセスで複数の Zakuro インスタンスを起動するには JSONC `instances` 配列を使います。各要素が独立した `SoraConnectionContext` と仮想クライアント群を持ち、i 番目のインスタンスは `i / instance-hatch-rate` 秒の遅延後に起動します。最上位のキーはインスタンス共通設定 (HTTP サーバー、`--instance-hatch-rate`、mTLS、`--openh264`) と全インスタンス向けテンプレート (`instances[i]` で上書き可) を兼ねます。
+1 プロセスで複数の Zakuro インスタンスを起動するには JSONC `instances` 配列を使います。各要素が独立した `SoraConnectionContext` と仮想クライアント群を持ち、i 番目のインスタンスは `i / instance-hatch-rate` 秒の遅延後に起動します。最上位のキーはインスタンス共通設定 (HTTP サーバー、`--instance-hatch-rate`、mTLS、`--openh264`、`--log-level`、DuckDB) と全インスタンス向けテンプレート (`instances[i]` で上書き可) を兼ねます。
 
 ```jsonc
 {
@@ -179,14 +197,20 @@ cargo run -- --config ./config.jsonc
 
 | オプション | 説明 |
 | --- | --- |
+| `--config` | JSONC 設定ファイル |
 | `--sora-signaling-url` | Sora の WebSocket シグナリング URL。カンマ区切りで複数指定可能 |
 | `--sora-channel-id` | Sora のチャネル ID |
 | `--sora-role` | `sendonly` / `recvonly` / `sendrecv` |
+| `--sora-client-id` | Sora のクライアント ID |
+| `--sora-bundle-id` | Sora のバンドル ID |
+| `--sora-metadata` | connect メッセージのメタデータ (JSON) |
 | `--vcs` | 仮想クライアント数 (`1` - `1000`) |
 | `--vcs-hatch-rate` | 仮想クライアントの起動レート |
 | `--instance-hatch-rate` | Zakuro インスタンスの起動レート (JSONC `instances` 配列と組み合わせて使用) |
 | `--duration` | 接続維持秒数 |
-| `--repeat-interval` | 再接続間隔 |
+| `--repeat-interval` | duration 経過後の再接続間隔 |
+| `--max-retry` | 接続失敗時の最大リトライ回数 |
+| `--retry-interval` | リトライ間隔 (秒) |
 | `--video-input-device` | 映像入力デバイス名または ID |
 | `--input-y4m` | Y4M ファイル入力 |
 | `--input-mp4` | MP4 パススルー入力 |
@@ -200,14 +224,25 @@ cargo run -- --config ./config.jsonc
 | `--sora-video-bit-rate` | 映像ビットレート (kbps) |
 | `--sora-audio` | 音声の有効 / 無効 (`true` / `false`) |
 | `--sora-audio-codec-type` | 現状は `opus` |
+| `--sora-audio-bit-rate` | 音声ビットレート (kbps) |
+| `--openh264` | OpenH264 共有ライブラリのパス |
 | `--sora-data-channels` | DataChannel 設定 JSON |
+| `--sora-data-channel-signaling` | DataChannel 経由シグナリング (`true` / `false`) |
+| `--sora-simulcast` | サイマルキャスト (`true` / `false`) |
+| `--sora-simulcast-request-rid` | サイマルキャストで受信する rid (`r0` / `r1` / `r2`) |
+| `--sora-spotlight` | スポットライト (`true` / `false`) |
+| `--sora-spotlight-focus-rid` | スポットライトでフォーカス時の rid |
+| `--sora-spotlight-unfocus-rid` | スポットライトでアンフォーカス時の rid |
 | `--scenario` | 現状は `reconnect` |
 | `--http-host`, `--http-port` | HTTP API を有効化 |
-| `--client-cert`, `--client-key` | mTLS 設定 |
+| `--client-cert`, `--client-key` | mTLS 設定 (PEM、両方必須) |
 | `--insecure` | TLS 証明書検証をスキップ |
+| `--log-level` | `verbose` / `info` / `warning` / `error` / `none` (デフォルト: `info`) |
 | `--duckdb-output-dir` | DuckDB ファイルの出力ディレクトリ (デフォルト: カレントディレクトリ) |
 | `--duckdb-interval` | DuckDB への統計書き込み間隔 (秒、デフォルト: 1.0) |
 | `--no-duckdb-output` | DuckDB への統計情報出力を無効化 |
+
+すべてのオプションは `--help` でも確認できます。
 
 ## HTTP API
 
@@ -240,3 +275,4 @@ curl -s http://127.0.0.1:8080/rpc \
 - `--sandstorm` は `--input-y4m` / `--video-input-device` / `--input-mp4` と同時指定できません
 - `--input-mp4` は `--video-input-device` / `--input-y4m` / `--sandstorm` と同時指定できません
 - `--input-wav` は `--no-audio-device` / `--sora-audio=false` と同時指定できません
+- `--openh264` を使う場合は共有ライブラリのパスを指定します (H.264 エンコード用)
