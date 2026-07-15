@@ -94,7 +94,7 @@ cargo run -- \
 
 ### MP4 パススルーで送信する
 
-`--input-mp4` 使用時は `--sora-video-codec-type` と `--sora-video-bit-rate` が必須です。
+`--input-mp4` はエンコード済み映像を再エンコードせずにパススルー送信します。ファイル終端に達するとループ再生します。使用時は `--sora-video-codec-type` と `--sora-video-bit-rate` が必須です。
 
 ```bash
 cargo run -- \
@@ -215,7 +215,7 @@ cargo run -- --config ./config.jsonc
 | `--retry-interval` | リトライ間隔 (秒) |
 | `--video-input-device` | 映像入力デバイス名または ID |
 | `--input-y4m` | Y4M ファイル入力 |
-| `--input-mp4` | MP4 パススルー入力 |
+| `--input-mp4` | MP4 パススルー入力 (ループ再生) |
 | `--input-wav` | WAV ファイル音声入力 (PCM 16bit、ループ再生) |
 | `--sandstorm` | 砂嵐映像を生成 |
 | `--resolution` | `QVGA` / `VGA` / `HD` / `FHD` / `4K` / `WxH` |
