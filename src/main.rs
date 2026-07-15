@@ -43,7 +43,7 @@ use crate::virtual_client::VirtualClientConfig;
 fn resolve_device_id(name_or_id: &str) -> Result<String> {
     let device_list = shiguredo_video_device::VideoDeviceList::enumerate()?;
     // 名前で検索する
-    for device in device_list.devices() {
+    for device in &device_list {
         if let Ok(name) = device.name()
             && name == name_or_id
         {
@@ -53,7 +53,7 @@ fn resolve_device_id(name_or_id: &str) -> Result<String> {
         }
     }
     // ID として扱う
-    for device in device_list.devices() {
+    for device in &device_list {
         if let Ok(uid) = device.unique_id()
             && uid == name_or_id
         {

@@ -35,7 +35,7 @@ shiguredo_http11 = "2026.6"
 # OpenH264 バインディング (H.264 エンコード)
 shiguredo_openh264 = "2026.1"
 # クロスプラットフォーム ビデオデバイス
-shiguredo_video_device = "2026.1"
+shiguredo_video_device = "2026.2.0-canary.2"
 # libwebrtc バインディング
 shiguredo_webrtc = "0.150"
 # Sora Rust SDK
@@ -64,4 +64,4 @@ features = [
 
 [dev-dependencies]
 # テストで一時ディレクトリを使う
-tempfile = "3.10"
+tempfile = "3.27"

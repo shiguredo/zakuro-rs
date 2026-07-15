@@ -145,7 +145,8 @@ impl VideoDeviceCapturer {
                     }
                     Some(buf)
                 }
-                PixelFormat::Unknown(_) => return,
+                // MJPEG は圧縮 JPEG のためデコードが必要で、ここでは扱わない
+                PixelFormat::Mjpeg | PixelFormat::Unknown(_) => return,
             };
 
             let Some(i420) = i420 else {
