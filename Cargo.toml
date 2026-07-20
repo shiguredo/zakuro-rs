@@ -39,7 +39,7 @@ shiguredo_video_device = "2026.2.0-canary.2"
 # libwebrtc バインディング
 shiguredo_webrtc = "0.150"
 # Sora Rust SDK
-sora_sdk = "2026.1.0-canary.12"
+sora_sdk = "2026.1.0-canary.13"
 # tokio Stream ラッパー (ReceiverStream, IntervalStream)
 tokio-stream = "0.1"
 # tokio ユーティリティ (CancellationToken, DelayQueue)
