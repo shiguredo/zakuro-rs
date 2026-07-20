@@ -51,7 +51,7 @@ tokio-util = { version = "0.7", features = ["time"] }
 
 # 非同期ランタイム
 [dependencies.tokio]
-version = "1.52"
+version = "1.53"
 features = [
   "io-util",
   "macros",
