@@ -43,6 +43,8 @@
 
 ### misc
 
+- [UPDATE] 依存クレートをアップデートする (duckdb 1.10505 / shiguredo_video_device 2026.2 / jiff / tokio / tokio-stream / tokio-util)
+  - @voluntas
 - [UPDATE] build.rs の他プロジェクト由来の死にコードを削除する
   - @voluntas
 - [UPDATE] duckdb_stats.rs を責務単位でファイル分割する (mod/writer/schema/rows/stats_json)

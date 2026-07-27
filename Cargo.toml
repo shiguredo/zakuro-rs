@@ -21,7 +21,7 @@ aws-lc-rs = "1.17"
 # bundled は CI でビルド時間 30 分以上かかるため使用しない
 # prebuilt ダウンロードは .cargo/config.toml の DUCKDB_DOWNLOAD_LIB で有効化する
 # (duckdb-rs に対応 feature が無いため Cargo.toml の features では指定できない)
-duckdb = { version = "1.10504", default-features = false }
+duckdb = { version = "1.10505", default-features = false }
 # UTC タイムスタンプ整形 (DuckDB ファイル名生成用)
 jiff = "0.2"
 # CLI 引数パース
@@ -35,7 +35,7 @@ shiguredo_http11 = "2026.6"
 # OpenH264 バインディング (H.264 エンコード)
 shiguredo_openh264 = "2026.1"
 # クロスプラットフォーム ビデオデバイス
-shiguredo_video_device = "2026.2.0-canary.2"
+shiguredo_video_device = "2026.2"
 # libwebrtc バインディング
 shiguredo_webrtc = "0.150"
 # Sora Rust SDK
