@@ -1,7 +1,7 @@
 # シナリオ操作 PlaySubScenario を追加する
 
 - Created: 2026-08-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-03
 - Branch: feature/add-scenario-play-sub-scenario
 - Polished: {YYYY-MM-DD}
 
@@ -28,3 +28,15 @@ zakuro (C++) の ScenarioPlayer は `OpPlaySubScenario` を持ち、名前付き
 - サブシナリオの実行中もメインシナリオの実行が継続する
 - サブシナリオはループ開始位置 (loop_op_index) を指定できる
 - 切断・再接続時にサブシナリオの停止・再開が正しく行われる
+
+## 解決方法
+
+磨き上げ時の必要性判断で「不要」(確信度: 中) と判定され、反対尋問でも維持されたため、ユーザー承認のうえ closed にした。
+
+判定根拠 (陳腐化):
+
+- zakuro-rs ではサブシナリオ機構の実用例が存在しない。DataChannel 連続送信は `src/data_channel.rs` の `run_messaging()` が実現済み (本 issue 自身がスコープ外と宣言)、数字音声はシナリオ操作 PlayVoiceNumberClient の対応で `src/fake_audio_capturer.rs` の `FakeAudioSource` へ直接組み込む予定
+- CLI のシナリオは `--scenario reconnect` のみで、PlaySubScenario を含むシナリオ種別が選択できないため、機構を追加してもデッドコードになる
+- C++ 版との機能互換性は、0016 (closed) の判断と同じく「観測可能な機能を別実装で実現」で満たされる (並行実行は tokio タスクで実現済み)
+
+サブシナリオ機構の実用例 (dcs サブシナリオ化やシナリオ定義の外部化) が生まれた時点で再起票する。
