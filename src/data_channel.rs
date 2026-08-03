@@ -8,8 +8,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{ErrorMessage, Result};
 
-const MESSAGE_SIZE_MIN: usize = 48;
-const MESSAGE_SIZE_MAX: usize = 256_000;
+/// DataChannel メッセージの最小サイズ (ZAKURO ヘッダ 48 バイトのみの合計)
+pub(crate) const MESSAGE_SIZE_MIN: usize = 48;
+/// DataChannel メッセージの最大サイズ (ZAKURO ヘッダを含む合計)
+pub(crate) const MESSAGE_SIZE_MAX: usize = 256_000;
 
 /// DataChannel メッセージング用のチャネル設定
 #[derive(Debug, Clone)]
@@ -130,6 +132,9 @@ pub(crate) fn parse_data_channels(
 
 /// ZAKURO ヘッダ付きメッセージを構築する
 ///
+/// ペイロードサイズは合計サイズからヘッダ分 (48 バイト) を除いた大きさで指定する。
+/// C++ 版と同じヘッダ構造で、DataChannel 連続送信とシナリオ操作の両方から使う。
+///
 /// ```text
 /// Bytes 0-5:   "ZAKURO" (シグネチャ)
 /// Bytes 6-13:  現在時刻 (マイクロ秒 UNIX Time, big-endian)
@@ -137,7 +142,7 @@ pub(crate) fn parse_data_channels(
 /// Bytes 22-47: Connection ID (最大 26 バイト、余りは 0 埋め)
 /// + ペイロード: ランダムバイナリ
 /// ```
-fn build_message(
+pub(crate) fn build_message(
     counter: u64,
     connection_id: &str,
     payload_size: usize,
@@ -175,13 +180,42 @@ fn build_message(
     buf
 }
 
-fn xorshift32(state: &mut u32) -> u32 {
+/// xorshift32 のステップ更新
+///
+/// ペイロードのランダムバイナリとペイロードサイズの決定に使う。
+pub(crate) fn xorshift32(state: &mut u32) -> u32 {
     let mut x = *state;
     x ^= x << 13;
     x ^= x >> 17;
     x ^= x << 5;
     *state = x;
     x
+}
+
+/// 合計サイズ (ZAKURO ヘッダ込み) の範囲からペイロードサイズを決定する
+///
+/// min_size / max_size は ZAKURO ヘッダ (48 バイト) を含む合計サイズで、
+/// 呼び出し元で 48..=256000 の範囲検証と max_size >= min_size の正規化が
+/// 済んでいること。ペイロードは min_size - 48 〜 max_size - 48 バイトの
+/// ランダムな大きさになる。契約違反は実装バグとして panic する。
+pub(crate) fn payload_size_from(min_size: usize, max_size: usize, random: u32) -> usize {
+    assert!(
+        min_size >= MESSAGE_SIZE_MIN,
+        "payload_size_from: min_size ({min_size}) must be >= {MESSAGE_SIZE_MIN}"
+    );
+    assert!(
+        max_size >= min_size,
+        "payload_size_from: max_size ({max_size}) must be >= min_size ({min_size})"
+    );
+    let min_payload = min_size - MESSAGE_SIZE_MIN;
+    let max_payload = max_size - MESSAGE_SIZE_MIN;
+    let payload_range = max_payload - min_payload;
+    let payload_extra = if payload_range > 0 {
+        random as usize % (payload_range + 1)
+    } else {
+        0
+    };
+    min_payload + payload_extra
 }
 
 /// xorshift32 の初期 seed を `instance_id` と `vc_id` から計算する
@@ -238,13 +272,12 @@ pub(crate) async fn run_messaging(
         let counter = counters.entry(ch.label.clone()).or_insert(0);
 
         // ペイロードサイズをランダムに決定
-        let payload_range = ch.size_max - ch.size_min;
-        let payload_extra = if payload_range > 0 {
-            (xorshift32(&mut xorshift_state) as usize) % (payload_range + 1)
+        // (min == max の固定サイズ時は乱数を消費しない。旧実装との乱数列の互換を保つ)
+        let payload_size = if ch.size_max > ch.size_min {
+            payload_size_from(ch.size_min, ch.size_max, xorshift32(&mut xorshift_state))
         } else {
-            0
+            ch.size_min - MESSAGE_SIZE_MIN
         };
-        let payload_size = (ch.size_min + payload_extra).saturating_sub(MESSAGE_SIZE_MIN);
 
         // Connection ID は空文字列（Sora SDK から取得する方法がないため）
         let msg = build_message(*counter, "", payload_size, &mut xorshift_state);
@@ -336,6 +369,225 @@ mod tests {
         assert_ne!(
             seed_i0, seed_i2,
             "instance_id=0,2 の seed が同じになっている"
+        );
+    }
+
+    /// ヘッダの各フィールドが仕様どおりの位置・バイト列で埋まることを検証する
+    #[test]
+    fn test_build_message_header_layout() {
+        let mut state = 0x12345678u32;
+        let msg = build_message(42, "conn-abc", 100, &mut state);
+
+        assert_eq!(
+            msg.len(),
+            MESSAGE_SIZE_MIN + 100,
+            "合計サイズはヘッダ 48 バイト + ペイロード 100 バイトになること"
+        );
+        assert_eq!(&msg[..6], b"ZAKURO", "シグネチャが先頭 6 バイトに並ぶこと");
+        // 時刻フィールドは現在時刻なので、0 でないことだけを検証する
+        assert_ne!(
+            &msg[6..14],
+            &[0u8; 8],
+            "時刻フィールド (8 バイト) が 0 でないこと"
+        );
+        assert_eq!(
+            &msg[14..22],
+            &42u64.to_be_bytes(),
+            "カウンタが big-endian で 14 バイト目から 8 バイトに並ぶこと"
+        );
+        assert_eq!(
+            &msg[22..30],
+            b"conn-abc",
+            "connection_id が 22 バイト目から並ぶこと"
+        );
+        assert_eq!(
+            &msg[30..48],
+            &[0u8; 18],
+            "connection_id の余り領域は 0 埋めされること"
+        );
+    }
+
+    /// 26 バイトちょうどの connection_id は切り詰められず全バイトが並ぶことを検証する
+    #[test]
+    fn test_build_message_connection_id_exact_26_bytes() {
+        let mut state = 0x1234_5678u32;
+        let id = "b".repeat(26);
+        let msg = build_message(0, &id, 0, &mut state);
+
+        assert_eq!(
+            &msg[22..48],
+            &[b'b'; 26],
+            "26 バイトちょうどは切り詰められず全バイトが並ぶこと"
+        );
+    }
+
+    /// 空文字列の connection_id は領域全体が 0 埋めされることを検証する
+    ///
+    /// connection_id 未確定時は空文字列として送信するため、このケースは実運用の経路。
+    #[test]
+    fn test_build_message_empty_connection_id_zero_fills() {
+        let mut state = 0xABCD_EF01u32;
+        let msg = build_message(0, "", 0, &mut state);
+
+        assert_eq!(
+            &msg[22..48],
+            &[0u8; 26],
+            "空文字列の connection_id は領域全体が 0 埋めされること"
+        );
+    }
+
+    /// 26 バイトを超える connection_id は先頭 26 バイトに切り詰められることを検証する
+    #[test]
+    fn test_build_message_truncates_long_connection_id() {
+        let mut state = 0xDEADBEEFu32;
+        let long_id = "a".repeat(40);
+        let msg = build_message(0, &long_id, 0, &mut state);
+
+        assert_eq!(
+            &msg[22..48],
+            &[b'a'; 26],
+            "connection_id は先頭 26 バイトで切り詰められること"
+        );
+    }
+
+    /// ペイロード領域は xorshift32 の出力で埋まり、同じ初期状態なら同じ列になることを検証する
+    #[test]
+    fn test_build_message_payload_is_deterministic() {
+        let mut state1 = 0xCAFEBABEu32;
+        let msg1 = build_message(0, "c", 16, &mut state1);
+        let mut state2 = 0xCAFEBABEu32;
+        let msg2 = build_message(0, "c", 16, &mut state2);
+
+        assert_eq!(
+            &msg1[48..],
+            &msg2[48..],
+            "同じ初期状態・同じパラメータならペイロードは同じ列になること"
+        );
+        // ペイロードが全て 0 にならないこと (xorshift32 が退化していないこと)
+        assert_ne!(&msg1[48..], &[0u8; 16], "ペイロードが全て 0 でないこと");
+    }
+
+    /// 4 の倍数でないペイロードでも端数チャンクが正しく埋まることを検証する
+    #[test]
+    fn test_build_message_partial_last_chunk() {
+        let mut state = 0x2222_3333u32;
+        // 26 バイト = 4 バイト × 6 チャンク + 2 バイトの端数
+        let msg = build_message(1, "c", 26, &mut state);
+
+        assert_eq!(
+            msg.len(),
+            MESSAGE_SIZE_MIN + 26,
+            "合計サイズがヘッダ 48 バイト + ペイロード 26 バイトになること"
+        );
+        // ペイロード先頭 4 バイトは 1 回目の xorshift32 出力の little-endian
+        let mut expected_state = 0x2222_3333u32;
+        let first = xorshift32(&mut expected_state);
+        assert_eq!(
+            &msg[48..52],
+            &first.to_le_bytes(),
+            "ペイロードの先頭チャンクが xorshift32 出力で埋まること"
+        );
+        // ペイロード末尾 2 バイト (端数チャンク) は 7 回目 (6 フルチャンク + 端数) の
+        // xorshift32 出力の先頭 2 バイト
+        let mut last = first;
+        for _ in 0..6 {
+            last = xorshift32(&mut expected_state);
+        }
+        assert_eq!(
+            &msg[72..74],
+            &last.to_le_bytes()[..2],
+            "端数チャンクが xorshift32 出力の先頭バイトで埋まること"
+        );
+    }
+
+    /// ペイロードサイズが min_size - 48 〜 max_size - 48 の範囲に収まることを検証する
+    #[test]
+    fn test_payload_size_from_within_range() {
+        for random in [0u32, 1, 12345, u32::MAX / 2, u32::MAX] {
+            let payload = payload_size_from(100, 200, random);
+            assert!(
+                (52..=152).contains(&payload),
+                "random={random} のとき payload={payload} が [52, 152] の範囲内であること"
+            );
+        }
+    }
+
+    /// 乱数を使ったループでもペイロードサイズが範囲内に収まることを検証する
+    #[test]
+    fn test_payload_size_from_random_loop() {
+        let mut state = 0x89AB_CDEFu32;
+        for _ in 0..1000 {
+            let random = xorshift32(&mut state);
+            let payload = payload_size_from(48, 256_000, random);
+            assert!(
+                (0..=255_952).contains(&payload),
+                "random={random} のとき payload={payload} が [0, 255952] の範囲内であること"
+            );
+        }
+    }
+
+    /// min_size == max_size のときは常に固定のペイロードサイズになることを検証する
+    #[test]
+    fn test_payload_size_from_min_equals_max() {
+        for random in [0u32, 1, 12345, u32::MAX] {
+            let payload = payload_size_from(48, 48, random);
+            assert_eq!(
+                payload, 0,
+                "random={random} でもペイロードが 0 バイトになること"
+            );
+        }
+        // 上限側の min == max でも固定サイズになること (ヘッダ込み 256000 バイトちょうど)
+        for random in [0u32, 1, 12345, u32::MAX] {
+            let payload = payload_size_from(256_000, 256_000, random);
+            assert_eq!(
+                payload, 255_952,
+                "random={random} でもペイロードが 255952 バイトになること"
+            );
+        }
+    }
+
+    /// ペイロードサイズが最小値のときは 0 バイトになることを検証する
+    #[test]
+    fn test_payload_size_from_lower_bound() {
+        let payload = payload_size_from(48, 256_000, 0);
+        assert_eq!(payload, 0, "random=0 のときペイロードが 0 バイトになること");
+    }
+
+    /// 契約違反 (min_size < 48) は実装バグとして panic することを検証する
+    #[test]
+    #[should_panic(expected = "payload_size_from: min_size (47) must be >= 48")]
+    fn test_payload_size_from_min_below_48_panics() {
+        payload_size_from(47, 100, 0);
+    }
+
+    /// 契約違反 (max_size < min_size) は実装バグとして panic することを検証する
+    #[test]
+    #[should_panic(expected = "payload_size_from: max_size (50) must be >= min_size (100)")]
+    fn test_payload_size_from_max_below_min_panics() {
+        payload_size_from(100, 50, 0);
+    }
+
+    /// 手計算した決定的な期待値と一致することを検証する
+    ///
+    /// 旧 run_messaging 実装との等価変換の退行検出用 (剰余の基数や -48 の適用位置が
+    /// 変わると値がずれる)
+    #[test]
+    fn test_payload_size_from_golden_values() {
+        assert_eq!(
+            payload_size_from(100, 200, 42),
+            94,
+            "min=100, max=200, random=42 のとき 52 + 42 % 101 = 94 になること"
+        );
+        assert_eq!(
+            payload_size_from(100, 100, u32::MAX),
+            52,
+            "min == max のとき range=0 で固定のペイロードになること"
+        );
+        // random % (255952 + 1) == 255952 となる値で最大ペイロードになること
+        assert_eq!(
+            payload_size_from(48, 256_000, 255_952),
+            255_952,
+            "random=255952 のとき最大ペイロードになること"
         );
     }
 }
