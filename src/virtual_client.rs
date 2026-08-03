@@ -69,7 +69,10 @@ pub(crate) async fn run(
     stats_tx: mpsc::Sender<StatsEvent>,
 ) {
     let mut retry_count: u32 = 0;
-    let mut scenario_player = config.scenario.clone().map(ScenarioPlayer::new);
+    let mut scenario_player = config
+        .scenario
+        .clone()
+        .map(|scenario| ScenarioPlayer::new(scenario, instance_id, vc_id));
 
     loop {
         let connection_token = token.child_token();
@@ -170,7 +173,7 @@ pub(crate) async fn run(
             tokio::select! {
                 biased;
                 _ = token.cancelled() => DisconnectReason::Shutdown,
-                _ = player.run_until_disconnect(&token) => DisconnectReason::ScenarioDisconnect,
+                _ = player.run_until_disconnect(&token, &handle, &ids) => DisconnectReason::ScenarioDisconnect,
                 result = &mut run_future => DisconnectReason::Unexpected(result),
             }
         } else {
