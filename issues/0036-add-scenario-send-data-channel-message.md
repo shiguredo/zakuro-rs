@@ -1,7 +1,7 @@
 # シナリオ操作 SendDataChannelMessage を追加する
 
 - Created: 2026-08-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-03
 - Branch: feature/add-scenario-send-data-channel-message
 - Polished: 2026-08-03
 
@@ -32,3 +32,17 @@ zakuro (C++) の ScenarioPlayer は `OpSendDataChannelMessage { label, min_size,
 - シナリオ定義に SendDataChannelMessage 操作を含められる
 - 操作到達時に指定ラベル・指定サイズ範囲の ZAKURO ヘッダ付きメッセージが送信される (実サーバー接続での手動確認)
 - ラベルごとのカウンタが送信のたびに増加し、再接続後も継続する
+
+## 解決方法
+
+`src/scenario.rs` の `ScenarioOp` に `SendDataChannelMessage { label, min_size, max_size }` を追加し、`ScenarioPlayer::run_until_disconnect()` で `SoraConnectionHandle` と `ids` (`Arc<Mutex<Option<ConnectionIds>>>`) を実行時引数として受け取って送信する実装を追加した。`ScenarioPlayer::new()` に instance_id / vc_id を渡し、ラベル別カウンタ (`dc_counter`) と xorshift 状態をプレイヤーに保持して再接続をまたいで永続させる。
+
+- `src/data_channel.rs`: `build_message()` / `xorshift32()` / `MESSAGE_SIZE_MIN` / `MESSAGE_SIZE_MAX` を `pub(crate)` 化し、ペイロードサイズ決定を共通関数 `payload_size_from()` として切り出して `run_messaging()` と共有する (固定サイズ時は旧実装と同じく乱数を消費しない分岐付き)
+- `src/scenario.rs`: `normalize_message_sizes()` (範囲検証とクランプ) / `read_connection_id()` (未確定・poison 時は空文字列 + warning ログ) を追加。送信失敗時も操作は完了として扱い、カウンタは送信要求の直後 (await 前) に増加させる (C++ 版互換)
+- `src/virtual_client.rs`: `ScenarioPlayer::new()` への instance_id / vc_id の引き渡しと、`run_until_disconnect()` への handle / ids の受け渡しを追加
+- 既存 reconnect シナリオへの組み込みは設計方針どおりスコープ外とし、バリアントには `#[expect(dead_code)]` を付けて組み込み時に外す旨をコメントで明記した
+
+追加したテスト (単体テストのみ。実送信は実サーバー接続での手動確認が必要):
+
+- `src/data_channel.rs`: `build_message()` のヘッダレイアウト / connection_id の 26 バイト切り詰め・ちょうど・空文字列 / ペイロードの決定性・端数チャンク / `payload_size_from()` の範囲・境界・golden 値・契約違反
+- `src/scenario.rs`: `normalize_message_sizes()` のクランプ・範囲境界・panic / 送信パス全体の合成テスト (合計サイズがクランプ後の範囲内) / `read_connection_id()` の確定・未確定・poison の 3 分岐
