@@ -1,7 +1,7 @@
 # シナリオ操作 Exit を追加する
 
 - Created: 2026-08-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-03
 - Branch: feature/add-scenario-exit
 - Polished: 2026-08-03
 
@@ -29,3 +29,18 @@ zakuro (C++) の ScenarioPlayer は `OpExit` を持ち、シナリオ実行中�
 - シナリオ定義に Exit 操作を含められる
 - Exit に到達したクライアントは切断され、再接続しない
 - Exit を含むシナリオの全クライアントが Exit した後、プロセスが正常終了コード 0 で終了する (実サーバー接続での手動確認。プロセス終了は既存の JoinSet 完了チェーンによる)
+
+## 解決方法
+
+`src/scenario.rs` の `ScenarioOp` に `Exit` を追加し、`ScenarioPlayer::run_until_disconnect()` の戻り値を `ScenarioEnd::{Reconnect, Exit}` に変更した。`ScenarioEnd` は後続の Reconnect 操作対応と整合する形 (Reconnect 操作も `ScenarioEnd::Reconnect` を返す予定) で設計した。
+
+- `src/scenario.rs`: `Exit` 操作は実行ループを完了として `ScenarioEnd::Exit` を返し、op_index は進めない (vc タスク終了でプレイヤーが破棄されるため)。キャンセル時も vc タスクの終了を意図する `ScenarioEnd::Exit` を返す (呼び出し元の biased select が token.cancelled() を優先するため通常は Shutdown 経路が選択される。競合で Exit 経路が選ばれても安全な動作になる fail-safe 設計)
+- `src/virtual_client.rs`: `DisconnectReason` に `ScenarioExit` を追加し、`ScenarioEnd::Exit` を `ScenarioExit` にマップ。`ScenarioExit` 分岐は ScenarioDisconnect と同じく切断処理 (handle.disconnect() 待機 → connection_token.cancel() → StatsEvent::Disconnected 送信) を行い、再接続せずループ break で vc タスクを終了する。プロセス全体の token は cancel しない (他 vc が Exit 未到達のまま Shutdown で終了し、「全クライアントが Exit した後」の完了条件を満たせなくなるため)。プロセス終了は既存の JoinSet 完了チェーンに任せる
+- 既存 reconnect シナリオへの組み込みは設計方針どおりスコープ外とし、`Exit` バリアントには `#[cfg_attr(not(test), expect(dead_code))]` を付けた (組み込み時に expect を外す旨は enum doc に集約)
+
+追加したテスト (`src/scenario.rs`。実サーバー接続での手動確認は Exit 後のプロセス終了を含む完了条件の確認に使用):
+
+- `test_run_until_disconnect_exit_op`: Exit 操作で `ScenarioEnd::Exit` が返り、op_index が進まないこと (SoraConnectionHandle は実サーバー接続なしで build() できるため、モックなしで実行分岐を検証可能)
+- `test_run_until_disconnect_disconnect_op`: Disconnect 操作で `ScenarioEnd::Reconnect` が返り、op_index が進むこと (再接続時に続きの操作から再開される仕組みの検証)
+- `test_run_until_disconnect_cancelled_returns_exit`: キャンセル済みトークンで `ScenarioEnd::Exit` が返ること (fail-safe 設計の検証)
+- `test_advance_wraps_to_loop_index`: op_index の進行と loop_index への折返し (loop_index=0/1 の両ケース)
