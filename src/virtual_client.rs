@@ -14,7 +14,7 @@ use crate::data_channel::MessageChannel;
 use crate::duckdb_stats::{
     ConnectionIds, DuckDBClient, InsertConnectionRow, WriteCommand, dispatch_stats, parse_offer_ids,
 };
-use crate::scenario::{Scenario, ScenarioPlayer};
+use crate::scenario::{Scenario, ScenarioEnd, ScenarioPlayer};
 use crate::stats::StatsEvent;
 
 #[derive(Clone)]
@@ -56,6 +56,7 @@ enum DisconnectReason {
     Shutdown,
     DurationExpired,
     ScenarioDisconnect,
+    ScenarioExit,
     Unexpected(sora_sdk::Result<()>),
 }
 
@@ -169,11 +170,14 @@ pub(crate) async fn run(
         let mut run_future = Box::pin(client.run());
 
         let reason = if let Some(ref mut player) = scenario_player {
-            // シナリオモード: シナリオの Disconnect 操作まで実行する
+            // シナリオモード: シナリオの Disconnect / Exit 操作まで実行する
             tokio::select! {
                 biased;
                 _ = token.cancelled() => DisconnectReason::Shutdown,
-                _ = player.run_until_disconnect(&token, &handle, &ids) => DisconnectReason::ScenarioDisconnect,
+                end = player.run_until_disconnect(&token, &handle, &ids) => match end {
+                    ScenarioEnd::Reconnect => DisconnectReason::ScenarioDisconnect,
+                    ScenarioEnd::Exit => DisconnectReason::ScenarioExit,
+                },
                 result = &mut run_future => DisconnectReason::Unexpected(result),
             }
         } else {
@@ -239,6 +243,23 @@ pub(crate) async fn run(
                 retry_count = 0;
                 // シナリオは無限ループなので即座に再接続する
                 continue;
+            }
+            DisconnectReason::ScenarioExit => {
+                rtc_log_info!("[i{}/vc-{}] exiting per scenario", instance_id, vc_id,);
+                tokio::select! {
+                    _ = handle.disconnect() => {}
+                    _ = &mut run_future => {}
+                }
+                connection_token.cancel();
+                let _ = stats_tx
+                    .send(StatsEvent::Disconnected { instance_id, vc_id })
+                    .await;
+                // Exit に到達したら再接続せず vc タスクを終了する。
+                // プロセス全体の token は cancel しない: 呼ぶと他 vc が Exit 未到達の
+                // まま Shutdown で終了し、「全クライアントが Exit した後」の完了条件を
+                // 満たせなくなる。プロセス終了は全 vc タスク終了後の JoinSet チェーン
+                // に任せる。
+                break;
             }
             DisconnectReason::Unexpected(result) => {
                 connection_token.cancel();

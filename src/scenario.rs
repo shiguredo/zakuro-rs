@@ -11,19 +11,29 @@ use crate::data_channel::{
 use crate::duckdb_stats::ConnectionIds;
 
 /// シナリオ操作
+///
+/// Exit / SendDataChannelMessage は組み込んだシナリオ種別がまだ存在しないため
+/// #[expect(dead_code)] を付けている。既存 reconnect シナリオへの組み込みは
+/// 後続対応のスコープであり、組み込み時に各 expect を外すこと。
 #[derive(Debug, Clone)]
 pub(crate) enum ScenarioOp {
     /// ランダムな時間スリープする
     Sleep { min_ms: u64, max_ms: u64 },
     /// 切断する
     Disconnect,
+    /// 切断して vc タスクを終了する
+    ///
+    /// 実行ループを完了として呼び出し元に制御を返し、呼び出し元は再接続せず
+    /// vc タスクを終了する (C++ 版は Exit 後もシナリオが継続するが、zakuro-rs
+    /// では以降の操作を実行しない)。
+    ///
+    /// 本バリアントはテストで構築するため、テストビルドでは expect を外す。
+    #[cfg_attr(not(test), expect(dead_code))]
+    Exit,
     /// 指定ラベルで DataChannel メッセージを 1 回送信する
     ///
     /// min_size / max_size は ZAKURO ヘッダを含む合計サイズ (C++ 版と同じ)。
     /// max_size < min_size の場合は max_size を min_size にクランプする。
-    ///
-    /// この操作を組み込んだシナリオ種別はまだ存在しない。既存 reconnect シナリオ
-    /// への組み込みは後続対応のスコープであり、組み込み時に本 expect を外すこと。
     #[expect(dead_code)]
     SendDataChannelMessage {
         label: String,
@@ -32,10 +42,23 @@ pub(crate) enum ScenarioOp {
     },
 }
 
+/// シナリオ実行の終了理由
+///
+/// 呼び出し元は Reconnect で返ったら切断して再接続し、Exit で返ったら切断して
+/// vc タスクを終了する。Reconnect は現状 Disconnect 操作で返り、将来追加される
+/// Reconnect 操作も同じ値を返す予定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScenarioEnd {
+    /// 再接続が必要 (Disconnect 操作)
+    Reconnect,
+    /// 切断して vc タスクを終了する (Exit 操作)
+    Exit,
+}
+
 /// シナリオ定義
 ///
 /// ops を先頭から順に実行し、末尾に到達したら loop_index に戻ってループする。
-/// Disconnect 操作に到達すると呼び出し元に制御を返す。
+/// Disconnect / Exit 操作に到達すると呼び出し元に制御を返す。
 #[derive(Debug, Clone)]
 pub(crate) struct Scenario {
     ops: Vec<ScenarioOp>,
@@ -102,7 +125,8 @@ fn random_range(min: u64, max: u64) -> u64 {
 /// シナリオプレイヤー
 ///
 /// 接続中のクライアントに対してシナリオ操作を順次実行する。
-/// Disconnect 操作に到達すると完了し、呼び出し元が切断と再接続を行う。
+/// Disconnect 操作に到達すると呼び出し元が切断と再接続を行い、
+/// Exit 操作に到達すると呼び出し元が切断して vc タスクを終了する。
 /// 接続ループの外で 1 回生成され、ラベル別カウンタと xorshift 状態は
 /// 再接続をまたいで保持する。
 pub(crate) struct ScenarioPlayer {
@@ -128,8 +152,11 @@ impl ScenarioPlayer {
         }
     }
 
-    /// シナリオを実行し、Disconnect に到達するまで待機する。
-    /// キャンセルされた場合は即座に返る。
+    /// シナリオを実行し、Disconnect / Exit 操作に到達するまで待機する。
+    /// キャンセルされた場合は即座に返る。キャンセル時は vc タスクの終了を意図する
+    /// Exit を返すが、呼び出し元の biased select は token.cancelled() を優先する
+    /// ため、キャンセル済みの場合は通常 Shutdown 経路が選択される。競合で Exit
+    /// 経路が選択されても vc タスク終了という安全な動作になる。
     ///
     /// handle と ids は接続ごとに変わるため実行時引数として受け取る。
     /// ids は offer 受信後に connection_id が確定するため、実行時に読み取って使う。
@@ -138,10 +165,10 @@ impl ScenarioPlayer {
         token: &CancellationToken,
         handle: &SoraConnectionHandle,
         ids: &std::sync::Mutex<Option<ConnectionIds>>,
-    ) {
+    ) -> ScenarioEnd {
         loop {
             if token.is_cancelled() {
-                return;
+                return ScenarioEnd::Exit;
             }
 
             // ミュータブル借用と共存させるため clone してからマッチする
@@ -152,13 +179,13 @@ impl ScenarioPlayer {
                     let ms = random_range(min_ms, max_ms);
                     tokio::select! {
                         biased;
-                        _ = token.cancelled() => return,
+                        _ = token.cancelled() => return ScenarioEnd::Exit,
                         _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
                     }
                 }
                 ScenarioOp::Disconnect => {
                     self.advance();
-                    return;
+                    return ScenarioEnd::Reconnect;
                 }
                 ScenarioOp::SendDataChannelMessage {
                     label,
@@ -167,6 +194,10 @@ impl ScenarioPlayer {
                 } => {
                     self.send_data_channel_message(handle, ids, &label, min_size, max_size)
                         .await;
+                }
+                ScenarioOp::Exit => {
+                    // Exit で vc タスクが終了しプレイヤーが破棄されるため op_index は進めない
+                    return ScenarioEnd::Exit;
                 }
             }
 
@@ -427,4 +458,153 @@ mod tests {
         let id = read_connection_id(&ids, 0, 0);
         assert_eq!(id, "", "poison 時は空文字列が返り、パニックしないこと");
     }
+
+    /// op_index がシナリオ末尾に達すると loop_index に戻ることを検証する
+    ///
+    /// Disconnect 操作で制御が返った後も op_index は保持され、再接続時の
+    /// run_until_disconnect は続きの操作から再開される (op_index が接続をまたいで
+    /// 継続する)。本テストはその土台となる advance() の進行と折返しを検証する。
+    #[test]
+    fn test_advance_wraps_to_loop_index() {
+        let scenario = Scenario {
+            ops: vec![
+                ScenarioOp::Sleep {
+                    min_ms: 1000,
+                    max_ms: 5000,
+                },
+                ScenarioOp::Disconnect,
+            ],
+            loop_index: 1,
+        };
+        let mut player = ScenarioPlayer::new(scenario, 0, 0);
+        assert_eq!(player.op_index, 0, "初期 op_index が 0 であること");
+        player.advance();
+        assert_eq!(player.op_index, 1, "1 回の advance で 1 になること");
+        // 末尾 (2) に達すると loop_index (1) に戻る
+        player.advance();
+        assert_eq!(player.op_index, 1, "末尾に達すると loop_index に戻ること");
+
+        // 実運用の構成 (loop_index: 0) への折返し
+        let scenario0 = Scenario {
+            ops: vec![
+                ScenarioOp::Sleep {
+                    min_ms: 1000,
+                    max_ms: 5000,
+                },
+                ScenarioOp::Disconnect,
+            ],
+            loop_index: 0,
+        };
+        let mut player0 = ScenarioPlayer::new(scenario0, 0, 0);
+        player0.advance();
+        player0.advance();
+        assert_eq!(player0.op_index, 0, "実運用の loop_index=0 に戻ること");
+    }
+
+    /// Exit 操作に到達すると ScenarioEnd::Exit が返り、op_index が進まないことを検証する
+    ///
+    /// SoraConnectionHandle は実サーバー接続なしで build() できる (run() を呼ばない
+    /// ため接続は開始されない)。Exit 操作は handle を使わないため、この構築で
+    /// 実行分岐を検証できる。
+    #[tokio::test]
+    async fn test_run_until_disconnect_exit_op() {
+        let (_connection, handle) = build_test_connection();
+
+        let scenario = Scenario {
+            ops: vec![ScenarioOp::Exit],
+            loop_index: 0,
+        };
+        let mut player = ScenarioPlayer::new(scenario, 0, 0);
+        let token = CancellationToken::new();
+        let ids = std::sync::Mutex::new(None::<ConnectionIds>);
+
+        let end = player.run_until_disconnect(&token, &handle, &ids).await;
+        assert_eq!(
+            end,
+            ScenarioEnd::Exit,
+            "Exit 操作で ScenarioEnd::Exit が返ること"
+        );
+        assert_eq!(player.op_index, 0, "Exit 操作では op_index が進まないこと");
+    }
+
+    /// Disconnect 操作に到達すると ScenarioEnd::Reconnect が返り、op_index が進むことを検証する
+    ///
+    /// Disconnect 後の再接続時に続きの操作 (Exit 等) から再開される仕組みの検証。
+    #[tokio::test]
+    async fn test_run_until_disconnect_disconnect_op() {
+        let (_connection, handle) = build_test_connection();
+
+        let scenario = Scenario {
+            ops: vec![
+                ScenarioOp::Disconnect,
+                ScenarioOp::Sleep {
+                    min_ms: 1,
+                    max_ms: 1,
+                },
+            ],
+            loop_index: 0,
+        };
+        let mut player = ScenarioPlayer::new(scenario, 0, 0);
+        let token = CancellationToken::new();
+        let ids = std::sync::Mutex::new(None::<ConnectionIds>);
+
+        let end = player.run_until_disconnect(&token, &handle, &ids).await;
+        assert_eq!(
+            end,
+            ScenarioEnd::Reconnect,
+            "Disconnect 操作で ScenarioEnd::Reconnect が返ること"
+        );
+        assert_eq!(
+            player.op_index, 1,
+            "Disconnect 操作では op_index が進み、再接続時に続きの操作から再開されること"
+        );
+    }
+
+    /// キャンセル済みの場合は vc タスクの終了を意図する ScenarioEnd::Exit が返ることを検証する
+    ///
+    /// 呼び出し元の biased select が token.cancelled() を優先するため通常は消費されない
+    /// が、万一 Exit 経路が選択されても vc タスク終了という安全な動作になる (fail-safe)。
+    #[tokio::test]
+    async fn test_run_until_disconnect_cancelled_returns_exit() {
+        let (_connection, handle) = build_test_connection();
+
+        let scenario = Scenario {
+            ops: vec![ScenarioOp::Sleep {
+                min_ms: 1000,
+                max_ms: 5000,
+            }],
+            loop_index: 0,
+        };
+        let mut player = ScenarioPlayer::new(scenario, 0, 0);
+        let token = CancellationToken::new();
+        token.cancel();
+        let ids = std::sync::Mutex::new(None::<ConnectionIds>);
+
+        let end = player.run_until_disconnect(&token, &handle, &ids).await;
+        assert_eq!(
+            end,
+            ScenarioEnd::Exit,
+            "キャンセル済みなら ScenarioEnd::Exit が返ること"
+        );
+    }
+
+    /// テスト用の実サーバー接続を伴わない SoraConnection とハンドルを構築する
+    fn build_test_connection() -> (sora_sdk::SoraConnection, sora_sdk::SoraConnectionHandle) {
+        let context =
+            sora_sdk::SoraConnectionContext::new().expect("SoraConnectionContext の生成に失敗");
+        sora_sdk::SoraConnection::builder(
+            context,
+            Vec::new(),
+            "channel".to_string(),
+            sora_sdk::Role::SendRecv,
+            NoOpEventHandler,
+        )
+        .build()
+        .expect("SoraConnection の構築に失敗")
+    }
+
+    /// テスト用の何もしないイベントハンドラ
+    struct NoOpEventHandler;
+
+    impl sora_sdk::SoraConnectionEventHandler for NoOpEventHandler {}
 }
