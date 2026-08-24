@@ -12,3 +12,6 @@ target/
 
 # macOS
 .DS_Store
+
+# media (手動テスト用の MP4 をリポジトリ直下でのみ無視する)
+/*.mp4
