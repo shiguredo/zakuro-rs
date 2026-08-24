@@ -75,10 +75,22 @@ fn build_video(args: &InstanceArgs) -> Option<sora_sdk::Video> {
     }
     match args.video_codec_type.as_deref() {
         Some("vp8") => Some(sora_sdk::Video::new_vp8(args.video_bit_rate)),
-        Some("vp9") => Some(sora_sdk::Video::new_vp9(args.video_bit_rate, None)),
-        Some("av1") => Some(sora_sdk::Video::new_av1(args.video_bit_rate, None)),
-        Some("h264") => Some(sora_sdk::Video::new_h264(args.video_bit_rate, None)),
-        Some("h265") => Some(sora_sdk::Video::new_h265(args.video_bit_rate, None)),
+        Some("vp9") => Some(sora_sdk::Video::new_vp9(
+            args.video_bit_rate,
+            args.sora_video_vp9_params.clone(),
+        )),
+        Some("av1") => Some(sora_sdk::Video::new_av1(
+            args.video_bit_rate,
+            args.sora_video_av1_params.clone(),
+        )),
+        Some("h264") => Some(sora_sdk::Video::new_h264(
+            args.video_bit_rate,
+            args.sora_video_h264_params.clone(),
+        )),
+        Some("h265") => Some(sora_sdk::Video::new_h265(
+            args.video_bit_rate,
+            args.sora_video_h265_params.clone(),
+        )),
         _ => {
             if args.video_bit_rate.is_some() {
                 Some(sora_sdk::Video::new_vp8(args.video_bit_rate))
@@ -866,7 +878,139 @@ async fn run_zakuro_instance(
 mod tests {
     use super::*;
     use crate::nop_video_decoder::NopVideoDecoderCapability;
-    use sora_sdk::InternalVideoCodecCapability;
+    use sora_sdk::{InternalVideoCodecCapability, Role};
+
+    /// テスト用の最小限の InstanceArgs を構築する
+    fn minimal_instance_args() -> InstanceArgs {
+        InstanceArgs {
+            signaling_urls: vec!["wss://example.com/".into()],
+            channel_id: "ch".into(),
+            role: Role::SendOnly,
+            client_id: None,
+            bundle_id: None,
+            metadata: None,
+            signaling_notify_metadata: None,
+            vcs: 1,
+            vcs_hatch_rate: 1.0,
+            duration: None,
+            repeat_interval: None,
+            max_retry: 0,
+            retry_interval: 60.0,
+            no_video_device: false,
+            no_audio_device: false,
+            video_input_device: None,
+            resolution: (640, 480),
+            framerate: 30,
+            sandstorm: false,
+            input_y4m: None,
+            input_mp4: None,
+            input_wav: None,
+            video_codec_type: None,
+            video_bit_rate: None,
+            sora_video_vp9_params: None,
+            sora_video_av1_params: None,
+            sora_video_h264_params: None,
+            sora_video_h265_params: None,
+            vp8_encoder: None,
+            vp9_encoder: None,
+            av1_encoder: None,
+            h264_encoder: None,
+            h265_encoder: None,
+            audio: true,
+            audio_codec_type: None,
+            audio_bit_rate: None,
+            data_channels: None,
+            data_channel_signaling: None,
+            ignore_disconnect_websocket: None,
+            disconnect_wait_timeout: None,
+            simulcast: None,
+            simulcast_request_rid: None,
+            spotlight: None,
+            spotlight_focus_rid: None,
+            spotlight_unfocus_rid: None,
+            scenario: None,
+        }
+    }
+
+    #[test]
+    fn build_video_omits_params_when_unspecified() {
+        // params 未指定時は Video に params が含まれない (現行と同じ)
+        let mut args = minimal_instance_args();
+        args.video_codec_type = Some("vp9".into());
+        let video = build_video(&args).expect("no_video_device=false では Video が返るべき");
+        let json = nojson::Json(&video).to_string();
+        assert!(
+            !json.contains("vp9_params"),
+            "params 未指定では vp9_params が含まれないべき: {json}"
+        );
+    }
+
+    #[test]
+    fn build_video_includes_parsed_params() {
+        // params 指定時は Video の connect メッセージ用 JSON に各コーデックの params が含まれる
+        let mut args = minimal_instance_args();
+        args.video_codec_type = Some("vp9".into());
+        args.sora_video_vp9_params = Some(sora_sdk::VideoVP9Params {
+            profile_id: Some(2),
+        });
+        let video = build_video(&args).expect("no_video_device=false では Video が返るべき");
+        let json = nojson::Json(&video).to_string();
+        assert!(
+            json.contains("\"vp9_params\""),
+            "params 指定時は vp9_params が含まれるべき: {json}"
+        );
+        assert!(
+            json.contains("\"profile_id\":2"),
+            "profile_id が含まれるべき: {json}"
+        );
+
+        let mut args = minimal_instance_args();
+        args.video_codec_type = Some("av1".into());
+        args.sora_video_av1_params = Some(sora_sdk::VideoAV1Params {
+            profile: Some(1),
+            level_idx: Some(5),
+            tier: Some(0),
+        });
+        let video = build_video(&args).expect("no_video_device=false では Video が返るべき");
+        let json = nojson::Json(&video).to_string();
+        assert!(
+            json.contains("\"av1_params\"") && json.contains("\"profile\":1"),
+            "params 指定時は av1_params (profile=1) が含まれるべき: {json}"
+        );
+
+        let mut args = minimal_instance_args();
+        args.video_codec_type = Some("h264".into());
+        args.sora_video_h264_params = Some(sora_sdk::VideoH264Params {
+            profile_level_id: Some("42e01f".into()),
+            b_frame: Some(true),
+        });
+        let video = build_video(&args).expect("no_video_device=false では Video が返るべき");
+        let json = nojson::Json(&video).to_string();
+        assert!(
+            json.contains("\"h264_params\"") && json.contains("\"profile_level_id\":\"42e01f\""),
+            "params 指定時は h264_params (profile_level_id) が含まれるべき: {json}"
+        );
+
+        let mut args = minimal_instance_args();
+        args.video_codec_type = Some("h265".into());
+        args.sora_video_h265_params = Some(sora_sdk::VideoH265Params {
+            level_id: None,
+            profile_id: Some(1),
+            tier_flag: Some(0),
+            tx_mode: Some("SRST".into()),
+            b_frame: None,
+        });
+        let video = build_video(&args).expect("no_video_device=false では Video が返るべき");
+        let json = nojson::Json(&video).to_string();
+        assert!(
+            json.contains("\"h265_params\"") && json.contains("\"tx_mode\":\"SRST\""),
+            "params 指定時は h265_params (tx_mode=SRST) が含まれるべき: {json}"
+        );
+        assert!(
+            !json.contains("level_id"),
+            "level_id は出力されないべき: {json}"
+        );
+    }
 
     #[test]
     fn resolve_video_codec_implementation_maps_cpp_values() {

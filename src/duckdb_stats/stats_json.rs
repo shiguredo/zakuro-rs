@@ -635,6 +635,18 @@ fn instance_json(i: &crate::args::InstanceArgs) -> impl DisplayJson + '_ {
             if let Some(v) = i.video_bit_rate {
                 f.member("sora_video_bit_rate", v)?;
             }
+            if let Some(ref v) = i.sora_video_vp9_params {
+                f.member("sora_video_vp9_params", v)?;
+            }
+            if let Some(ref v) = i.sora_video_av1_params {
+                f.member("sora_video_av1_params", v)?;
+            }
+            if let Some(ref v) = i.sora_video_h264_params {
+                f.member("sora_video_h264_params", v)?;
+            }
+            if let Some(ref v) = i.sora_video_h265_params {
+                f.member("sora_video_h265_params", v)?;
+            }
             if let Some(ref v) = i.vp8_encoder {
                 f.member("vp8_encoder", v)?;
             }
@@ -864,6 +876,10 @@ mod tests {
             input_wav: None,
             video_codec_type: None,
             video_bit_rate: None,
+            sora_video_vp9_params: None,
+            sora_video_av1_params: None,
+            sora_video_h264_params: None,
+            sora_video_h265_params: None,
             vp8_encoder: None,
             vp9_encoder: None,
             av1_encoder: None,
@@ -945,6 +961,10 @@ mod tests {
             input_wav: None,
             video_codec_type: None,
             video_bit_rate: None,
+            sora_video_vp9_params: None,
+            sora_video_av1_params: None,
+            sora_video_h264_params: None,
+            sora_video_h265_params: None,
             vp8_encoder: None,
             vp9_encoder: None,
             av1_encoder: None,
@@ -1032,6 +1052,10 @@ mod tests {
             input_wav: None,
             video_codec_type: None,
             video_bit_rate: None,
+            sora_video_vp9_params: None,
+            sora_video_av1_params: None,
+            sora_video_h264_params: None,
+            sora_video_h265_params: None,
             vp8_encoder: Some("internal".into()),
             vp9_encoder: None,
             av1_encoder: None,
@@ -1109,6 +1133,10 @@ mod tests {
             input_wav: None,
             video_codec_type: None,
             video_bit_rate: None,
+            sora_video_vp9_params: None,
+            sora_video_av1_params: None,
+            sora_video_h264_params: None,
+            sora_video_h265_params: None,
             vp8_encoder: None,
             vp9_encoder: None,
             av1_encoder: None,

@@ -156,13 +156,22 @@ POST /rpc          → JSON-RPC 2.0
 --initial-mute-audio <BOOL>
 
 # コーデック
---sora-video-codec-type {VP8,VP9,AV1,H264,H265}
---sora-audio-codec-type {OPUS}
+--sora-video-codec-type {vp8,vp9,av1,h264,h265}
+--sora-audio-codec-type {opus}
 --sora-video-bit-rate <kbps>
 --sora-audio-bit-rate <kbps>
 --openh264 <PATH>
 --vp8-encoder / --vp9-encoder / --av1-encoder / --h264-encoder / --h265-encoder
 --sora-video-vp9-params / --sora-video-av1-params / --sora-video-h264-params / --sora-video-h265-params
+
+コーデックパラメータは JSON 文字列で指定する (例: `--sora-video-vp9-params '{"profile_id": 0}'`)。JSONC 設定ファイルのオブジェクト値 (`"video-vp9-params": {...}`) にコメントや末尾カンマを書くとパースエラーになる。サポートするキーと範囲:
+
+- `--sora-video-vp9-params`: `profile_id` (0-3)
+- `--sora-video-av1-params`: `profile` (0-2) / `level_idx` (0-31) / `tier` (0-1)
+- `--sora-video-h264-params`: `profile_level_id` (文字列) / `b_frame` (true/false)
+- `--sora-video-h265-params`: `profile_id` (0-31) / `tier_flag` (0-1) / `tx_mode` (SRST/MRST/MRMT) / `b_frame` (true/false)。`level_id` は Sora サーバーの検証と一致しないため未対応
+
+コーデックパラメータの送信は Sora サーバー側の sora.conf 設定 (`signaling_vp9_params` / `signaling_av1_params` / `signaling_h264_params` / `signaling_h265_params`) が有効である必要がある。`b_frame` はさらに `h264_b_frame` / `h265_b_frame` 設定が必要。無効な状態で指定すると Sora サーバーが検証エラーを返す。
 
 # 制御
 --duration <SEC>                    実行時間
@@ -251,8 +260,8 @@ POST /rpc          → JSON-RPC 2.0
 - [x] オーディオコーデック指定 (Opus)
 - [x] ビットレート指定 (映像・音声)
 - [x] OpenH264 外部ライブラリ (`--openh264`)
-- [ ] コーデック個別エンコーダー指定 (`--vp8-encoder` 等)
-- [ ] コーデックパラメータ (`--sora-video-vp9-params` 等)
+- [x] コーデック個別エンコーダー指定 (`--vp8-encoder` 等)
+- [x] コーデックパラメータ (`--sora-video-vp9-params` 等)
 - [ ] ビデオコーデック能力表示 (`--show-video-codec-capability`)
 
 ### 接続設定
@@ -311,7 +320,7 @@ POST /rpc          → JSON-RPC 2.0
 - シグナリング URL ランダム化無効: sora-rust-sdk 未実装 (デフォルトのランダム化のみ)
 - DataChannel シグナリングタイムアウト: sora-rust-sdk 未実装
 
-コーデックパラメータ (`VideoVP9Params` 等) と `DegradationPreference` は各 SDK / バインディングに API がある。zakuro-rs の CLI 未配線が残っている。
+コーデックパラメータ (`VideoVP9Params` 等) は CLI 配線済み (`--sora-video-*-params`)。`DegradationPreference` は各 SDK / バインディングに API がある。zakuro-rs の CLI 未配線が残っている。
 
 ### 実装しない機能
 

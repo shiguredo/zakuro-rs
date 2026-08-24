@@ -1,6 +1,6 @@
-use nojson::{JsonValueKind, RawJson, RawJsonValue};
+use nojson::{JsonValueKind, RawJson, RawJsonOwned, RawJsonValue};
 use shiguredo_webrtc::{VideoCodecType, log, rtc_log_info, rtc_log_warning};
-use sora_sdk::Role;
+use sora_sdk::{Role, VideoAV1Params, VideoH264Params, VideoH265Params, VideoVP9Params};
 
 use crate::error::{ErrorMessage, Result};
 use crate::scenario::ScenarioType;
@@ -52,6 +52,10 @@ pub(crate) struct InstanceArgs {
     pub(crate) input_wav: Option<String>,
     pub(crate) video_codec_type: Option<String>,
     pub(crate) video_bit_rate: Option<u32>,
+    pub(crate) sora_video_vp9_params: Option<VideoVP9Params>,
+    pub(crate) sora_video_av1_params: Option<VideoAV1Params>,
+    pub(crate) sora_video_h264_params: Option<VideoH264Params>,
+    pub(crate) sora_video_h265_params: Option<VideoH265Params>,
     pub(crate) vp8_encoder: Option<String>,
     pub(crate) vp9_encoder: Option<String>,
     pub(crate) av1_encoder: Option<String>,
@@ -183,6 +187,260 @@ fn parse_video_codec_implementation(
             "--{option_name} は internal/cisco_openh264/intel_vpl/nvidia_video_codec/amd_amf のいずれかで指定してください"
         )),
     }
+}
+
+/// `--sora-video-*-params` の JSON 文字列をオブジェクトとして検証し、メンバーごとに処理する
+///
+/// キー名と値の型は sora_sdk の各 Video*Params の DisplayJson に準拠する。
+/// 未知のキーはエラーにする (Sora サーバーは未知キーで params 全体を拒否するため)。
+/// 重複キーもエラーにする (Sora サーバーの JSON パーサーでの扱いが不定なため)。
+fn for_each_params_member<F>(json: &str, option_name: &str, mut f: F) -> Result<()>
+where
+    F: FnMut(String, RawJsonValue<'_, '_>) -> Result<()>,
+{
+    let parsed = RawJsonOwned::parse(json)
+        .map_err(|e| ErrorMessage::new(format!("--{option_name} の JSON が不正です: {e}")))?;
+    let value = parsed.value();
+    // オブジェクト以外は to_object がエラーを返す (メッセージはオブジェクト指定の促しに統一)
+    let members = value.to_object().map_err(|e| {
+        ErrorMessage::new(format!(
+            "--{option_name} は JSON オブジェクトで指定してください: {e}"
+        ))
+    })?;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (key_value, member) in members {
+        let key: String = key_value.try_into().map_err(|_: nojson::JsonParseError| {
+            ErrorMessage::new(format!(
+                "--{option_name} のキーを文字列として解析できません"
+            ))
+        })?;
+        if !seen.insert(key.clone()) {
+            return Err(ErrorMessage::new(format!(
+                "--{option_name} のキー '{key}' が重複しています"
+            ))
+            .into());
+        }
+        f(key, member)?;
+    }
+    Ok(())
+}
+
+/// コーデックパラメータの JSON メンバーを u32 として読み取り、範囲を検証する
+fn params_u32(
+    option_name: &str,
+    key: &str,
+    member: RawJsonValue<'_, '_>,
+    min: u32,
+    max: u32,
+) -> Result<u32> {
+    let value: u32 = member.try_into().map_err(|_: nojson::JsonParseError| {
+        ErrorMessage::new(format!(
+            "--{option_name} の '{key}' は {min} から {max} の範囲の整数で指定してください"
+        ))
+    })?;
+    if !(min..=max).contains(&value) {
+        return Err(ErrorMessage::new(format!(
+            "--{option_name} の '{key}' は {min} から {max} の範囲で指定してください"
+        ))
+        .into());
+    }
+    Ok(value)
+}
+
+/// コーデックパラメータの JSON メンバーを bool として読み取る
+fn params_bool(option_name: &str, key: &str, member: RawJsonValue<'_, '_>) -> Result<bool> {
+    member.try_into().map_err(|_: nojson::JsonParseError| {
+        ErrorMessage::new(format!(
+            "--{option_name} の '{key}' は true または false で指定してください"
+        ))
+        .into()
+    })
+}
+
+/// コーデックパラメータの JSON メンバーを文字列として読み取る
+fn params_string(option_name: &str, key: &str, member: RawJsonValue<'_, '_>) -> Result<String> {
+    member.try_into().map_err(|_: nojson::JsonParseError| {
+        ErrorMessage::new(format!(
+            "--{option_name} の '{key}' は文字列で指定してください"
+        ))
+        .into()
+    })
+}
+
+/// 未知のキーに対するエラーを生成する
+fn unknown_params_key_error(option_name: &str, key: &str) -> Result<()> {
+    Err(ErrorMessage::new(format!(
+        "--{option_name} に未知のキーが含まれています: '{key}'"
+    ))
+    .into())
+}
+
+/// `--sora-video-vp9-params` の JSON を VideoVP9Params に変換する
+///
+/// 全キー未指定の空オブジェクトは None に正規化する (空の vp9_params を
+/// シグナリングに載せるのを避けるため)。
+fn parse_video_vp9_params(json: &str) -> Result<Option<VideoVP9Params>> {
+    let mut params = VideoVP9Params::default();
+    for_each_params_member(json, "sora-video-vp9-params", |key, member| {
+        match key.as_str() {
+            // VP9 のプロファイル ID (0-3、Sora サーバーの検証と一致)
+            "profile_id" => {
+                params.profile_id = Some(params_u32("sora-video-vp9-params", &key, member, 0, 3)?);
+                Ok(())
+            }
+            _ => unknown_params_key_error("sora-video-vp9-params", &key),
+        }
+    })?;
+    if params == VideoVP9Params::default() {
+        Ok(None)
+    } else {
+        Ok(Some(params))
+    }
+}
+
+/// `--sora-video-av1-params` の JSON を VideoAV1Params に変換する
+///
+/// 全キー未指定の空オブジェクトは None に正規化する (空の av1_params を
+/// シグナリングに載せるのを避けるため)。
+fn parse_video_av1_params(json: &str) -> Result<Option<VideoAV1Params>> {
+    let mut params = VideoAV1Params::default();
+    for_each_params_member(json, "sora-video-av1-params", |key, member| {
+        match key.as_str() {
+            // AV1 のプロファイル (0-2、Sora サーバーの検証と一致)
+            "profile" => {
+                params.profile = Some(params_u32("sora-video-av1-params", &key, member, 0, 2)?);
+                Ok(())
+            }
+            // AV1 のレベルインデックス (0-31、Sora サーバーの検証と一致)
+            "level_idx" => {
+                params.level_idx = Some(params_u32("sora-video-av1-params", &key, member, 0, 31)?);
+                Ok(())
+            }
+            // AV1 のティア (0-1、Sora サーバーの検証と一致)
+            "tier" => {
+                params.tier = Some(params_u32("sora-video-av1-params", &key, member, 0, 1)?);
+                Ok(())
+            }
+            _ => unknown_params_key_error("sora-video-av1-params", &key),
+        }
+    })?;
+    if params == VideoAV1Params::default() {
+        Ok(None)
+    } else {
+        Ok(Some(params))
+    }
+}
+
+/// `--sora-video-h264-params` の JSON を VideoH264Params に変換する
+///
+/// 全キー未指定の空オブジェクトは None に正規化する (空の h264_params を
+/// シグナリングに載せるのを避けるため)。
+fn parse_video_h264_params(json: &str) -> Result<Option<VideoH264Params>> {
+    let mut params = VideoH264Params::default();
+    for_each_params_member(json, "sora-video-h264-params", |key, member| {
+        match key.as_str() {
+            // H.264 のプロファイルレベル ID (例: "42e01f")
+            "profile_level_id" => {
+                params.profile_level_id =
+                    Some(params_string("sora-video-h264-params", &key, member)?);
+                Ok(())
+            }
+            // B フレームの有効/無効。Sora サーバー側の sora.conf の h264_b_frame 設定が必要
+            "b_frame" => {
+                params.b_frame = Some(params_bool("sora-video-h264-params", &key, member)?);
+                Ok(())
+            }
+            _ => unknown_params_key_error("sora-video-h264-params", &key),
+        }
+    })?;
+    if params == VideoH264Params::default() {
+        Ok(None)
+    } else {
+        Ok(Some(params))
+    }
+}
+
+/// `--sora-video-h265-params` の JSON を VideoH265Params に変換する
+///
+/// 全キー未指定の空オブジェクトは None に正規化する (空の h265_params を
+/// シグナリングに載せるのを避けるため)。
+fn parse_video_h265_params(json: &str) -> Result<Option<VideoH265Params>> {
+    let mut params = VideoH265Params::default();
+    for_each_params_member(json, "sora-video-h265-params", |key, member| {
+        match key.as_str() {
+            "profile_id" => {
+                params.profile_id = Some(params_u32("sora-video-h265-params", &key, member, 0, 31)?);
+                Ok(())
+            }
+            "tier_flag" => {
+                params.tier_flag = Some(params_u32("sora-video-h265-params", &key, member, 0, 1)?);
+                Ok(())
+            }
+            // 送信モード (SRST / MRST / MRMT)
+            "tx_mode" => {
+                let v = params_string("sora-video-h265-params", &key, member)?;
+                if !matches!(v.as_str(), "SRST" | "MRST" | "MRMT") {
+                    return Err(ErrorMessage::new(format!(
+                        "--sora-video-h265-params の '{key}' は SRST/MRST/MRMT のいずれかで指定してください"
+                    ))
+                    .into());
+                }
+                params.tx_mode = Some(v);
+                Ok(())
+            }
+            // B フレームの有効/無効。Sora サーバー側の sora.conf の h265_b_frame 設定が必要
+            "b_frame" => {
+                params.b_frame = Some(params_bool("sora-video-h265-params", &key, member)?);
+                Ok(())
+            }
+            // level_id は sora_sdk が文字列型で保持するため (DisplayJson では "120")、
+            // Sora サーバーの整数検証 (0-255) と一致せず h265_params 全体が拒否される
+            "level_id" => {
+                Err(ErrorMessage::new(
+                    "--sora-video-h265-params の 'level_id' はサポートされていません (sora_sdk の文字列型での保持が Sora サーバーの整数検証と一致しないため)。'profile_id' / 'tier_flag' / 'tx_mode' / 'b_frame' を指定してください",
+                )
+                .into())
+            }
+            _ => unknown_params_key_error("sora-video-h265-params", &key),
+        }
+    })?;
+    if params == VideoH265Params::default() {
+        Ok(None)
+    } else {
+        Ok(Some(params))
+    }
+}
+
+/// コーデックパラメータ指定とコーデック種別の整合を検証する
+///
+/// params は対応するコーデック種別の指定を前提とする。build_video が
+/// codec type 未指定時に VP8 へフォールバックするため、ここで検証しないと
+/// params が黙って無視される。
+fn validate_video_params_codec_type(
+    video_codec_type: Option<&str>,
+    vp9_params: &Option<VideoVP9Params>,
+    av1_params: &Option<VideoAV1Params>,
+    h264_params: &Option<VideoH264Params>,
+    h265_params: &Option<VideoH265Params>,
+) -> Result<()> {
+    for (option_name, specified, expected) in [
+        ("sora-video-vp9-params", vp9_params.is_some(), "vp9"),
+        ("sora-video-av1-params", av1_params.is_some(), "av1"),
+        ("sora-video-h264-params", h264_params.is_some(), "h264"),
+        ("sora-video-h265-params", h265_params.is_some(), "h265"),
+    ] {
+        if specified && video_codec_type != Some(expected) {
+            let hint = match video_codec_type {
+                Some(t) => format!("。指定された codec type は '{t}' です"),
+                None => "。codec type が指定されていません".to_string(),
+            };
+            return Err(ErrorMessage::new(format!(
+                "--{option_name} を指定するには --sora-video-codec-type {expected} の指定が必要です{hint}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// 単一の JSON 値を `--{key} {value}` の形に展開する
@@ -937,6 +1195,26 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<u32>())?;
 
+    let sora_video_vp9_params: Option<String> = noargs::opt("sora-video-vp9-params")
+        .doc("VP9 video codec parameters (JSON string)")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let sora_video_av1_params: Option<String> = noargs::opt("sora-video-av1-params")
+        .doc("AV1 video codec parameters (JSON string)")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let sora_video_h264_params: Option<String> = noargs::opt("sora-video-h264-params")
+        .doc("H.264 video codec parameters (JSON string)")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let sora_video_h265_params: Option<String> = noargs::opt("sora-video-h265-params")
+        .doc("H.265 video codec parameters (JSON string)")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
     let vp8_encoder: Option<String> = noargs::opt("vp8-encoder")
         .doc("VP8 encoder implementation (internal,cisco_openh264,intel_vpl,nvidia_video_codec,amd_amf)")
         .take(&mut args)
@@ -1086,6 +1364,11 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
                 input_wav,
                 video_codec_type,
                 video_bit_rate,
+                // help_mode 用のダミー (コーデックパラメータのパースはバリデーションセクションで実施)
+                sora_video_vp9_params: None,
+                sora_video_av1_params: None,
+                sora_video_h264_params: None,
+                sora_video_h265_params: None,
                 vp8_encoder,
                 vp9_encoder,
                 av1_encoder,
@@ -1119,6 +1402,30 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
     if framerate == 0 || framerate > 60 {
         return Err(ErrorMessage::new("framerate は 1 から 60 の範囲で指定してください").into());
     }
+    // コーデックパラメータの JSON をパースし、対応するコーデック種別の指定と整合することを検証する
+    let sora_video_vp9_params = match sora_video_vp9_params.as_deref() {
+        Some(json) => parse_video_vp9_params(json)?,
+        None => None,
+    };
+    let sora_video_av1_params = match sora_video_av1_params.as_deref() {
+        Some(json) => parse_video_av1_params(json)?,
+        None => None,
+    };
+    let sora_video_h264_params = match sora_video_h264_params.as_deref() {
+        Some(json) => parse_video_h264_params(json)?,
+        None => None,
+    };
+    let sora_video_h265_params = match sora_video_h265_params.as_deref() {
+        Some(json) => parse_video_h265_params(json)?,
+        None => None,
+    };
+    validate_video_params_codec_type(
+        video_codec_type.as_deref(),
+        &sora_video_vp9_params,
+        &sora_video_av1_params,
+        &sora_video_h264_params,
+        &sora_video_h265_params,
+    )?;
     // ハードウェア系のエンコーダー実装は sora_sdk の features を有効化しないと機能しないため
     // 本バージョンでは利用不可として起動時にエラーにする (C++ 版との差として明示する)
     // 本バージョンで利用できる実装は internal / cisco_openh264 の 2 値のみであり、
@@ -1256,6 +1563,10 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
             input_wav,
             video_codec_type,
             video_bit_rate,
+            sora_video_vp9_params,
+            sora_video_av1_params,
+            sora_video_h264_params,
+            sora_video_h265_params,
             vp8_encoder,
             vp9_encoder,
             av1_encoder,
@@ -2331,6 +2642,249 @@ mod tests {
             instances[0].h264_encoder.as_deref(),
             Some("cisco_openh264"),
             "h264_encoder に cisco_openh264 が反映されるべき"
+        );
+    }
+
+    // ---- コーデックパラメータ (--sora-video-*-params) ----
+
+    #[test]
+    fn parse_video_vp9_params_accepts_valid_json() {
+        let params = parse_video_vp9_params(r#"{ "profile_id": 0 }"#)
+            .expect("VP9 パラメータのパースに失敗")
+            .expect("profile_id が指定されているため Some のべき");
+        assert_eq!(params.profile_id, Some(0), "profile_id が反映されるべき");
+    }
+
+    #[test]
+    fn parse_video_vp9_params_rejects_unknown_key() {
+        let err = parse_video_vp9_params(r#"{ "profile_idd": 0 }"#)
+            .expect_err("未知キーを許容してはならない");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("未知のキー"),
+            "未知キーのエラーメッセージが含まれていない: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_video_vp9_params_rejects_out_of_range_profile_id() {
+        let err = parse_video_vp9_params(r#"{ "profile_id": 4 }"#)
+            .expect_err("profile_id=4 を許容してはならない");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("0 から 3"),
+            "範囲のエラーメッセージが含まれていない: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_video_vp9_params_rejects_wrong_type() {
+        let err = parse_video_vp9_params(r#"{ "profile_id": "0" }"#)
+            .expect_err("文字列の profile_id を許容してはならない");
+        assert!(err.to_string().contains("整数"));
+    }
+
+    #[test]
+    fn parse_params_rejects_float_negative_and_overflow() {
+        // float / 負数 / u32 overflow は全て整数として拒否される (厳密な型チェック)
+        for bad in [
+            r#"{ "profile_id": 0.5 }"#,
+            r#"{ "profile_id": -1 }"#,
+            r#"{ "profile_id": 4294967296 }"#,
+        ] {
+            let err =
+                parse_video_vp9_params(bad).expect_err(&format!("{bad} を許容してはならない"));
+            assert!(
+                err.to_string().contains("整数"),
+                "整数エラーメッセージが必要: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_params_accepts_empty_object() {
+        // 空オブジェクトは None (params なし) に正規化して許可する
+        let params = parse_video_vp9_params("{}").expect("空オブジェクトは許容されるべき");
+        assert_eq!(params, None, "空オブジェクトは None に正規化されるべき");
+    }
+
+    #[test]
+    fn parse_params_rejects_duplicate_key() {
+        // 重複キーは挙動が不定になるため拒否する
+        let err = parse_video_vp9_params(r#"{ "profile_id": 1, "profile_id": 2 }"#)
+            .expect_err("重複キーを許容してはならない");
+        assert!(err.to_string().contains("重複"));
+    }
+
+    #[test]
+    fn parse_video_av1_params_accepts_valid_json() {
+        let params = parse_video_av1_params(r#"{ "profile": 0, "level_idx": 5, "tier": 0 }"#)
+            .expect("AV1 パラメータのパースに失敗")
+            .expect("キーが指定されているため Some のべき");
+        assert_eq!(params.profile, Some(0));
+        assert_eq!(params.level_idx, Some(5));
+        assert_eq!(params.tier, Some(0));
+    }
+
+    #[test]
+    fn parse_video_av1_params_rejects_out_of_range_values() {
+        for (key, value) in [("profile", "3"), ("level_idx", "32"), ("tier", "2")] {
+            let json = format!(r#"{{ "{key}": {value} }}"#);
+            let err = parse_video_av1_params(&json)
+                .expect_err(&format!("{key}={value} を許容してはならない"));
+            assert!(err.to_string().contains(key), "{key} のエラーが出ていない");
+        }
+    }
+
+    #[test]
+    fn parse_video_h264_params_accepts_valid_json() {
+        let params =
+            parse_video_h264_params(r#"{ "profile_level_id": "42e01f", "b_frame": true }"#)
+                .expect("H.264 パラメータのパースに失敗")
+                .expect("キーが指定されているため Some のべき");
+        assert_eq!(params.profile_level_id.as_deref(), Some("42e01f"));
+        assert_eq!(params.b_frame, Some(true));
+    }
+
+    #[test]
+    fn parse_video_h264_params_rejects_wrong_b_frame_type() {
+        let err = parse_video_h264_params(r#"{ "b_frame": "true" }"#)
+            .expect_err("文字列の b_frame を許容してはならない");
+        assert!(err.to_string().contains("true または false"));
+    }
+
+    #[test]
+    fn parse_video_h265_params_accepts_valid_json() {
+        let params = parse_video_h265_params(
+            r#"{ "profile_id": 1, "tier_flag": 0, "tx_mode": "SRST", "b_frame": false }"#,
+        )
+        .expect("H.265 パラメータのパースに失敗")
+        .expect("キーが指定されているため Some のべき");
+        assert_eq!(params.profile_id, Some(1));
+        assert_eq!(params.tier_flag, Some(0));
+        assert_eq!(params.tx_mode.as_deref(), Some("SRST"));
+        assert_eq!(params.b_frame, Some(false));
+    }
+
+    #[test]
+    fn parse_video_h265_params_rejects_unexpected_tx_mode() {
+        let valid = parse_video_h265_params(r#"{ "tx_mode": "MRMT" }"#)
+            .expect("MRMT は正当な送信モードであるべき")
+            .expect("tx_mode が指定されているため Some のべき");
+        assert_eq!(valid.tx_mode.as_deref(), Some("MRMT"));
+        let err = parse_video_h265_params(r#"{ "tx_mode": "INVALID" }"#)
+            .expect_err("不正な tx_mode を許容してはならない");
+        assert!(err.to_string().contains("SRST/MRST/MRMT"));
+    }
+
+    #[test]
+    fn parse_video_h265_params_rejects_level_id() {
+        // level_id は sora_sdk の文字列型での保持と Sora サーバーの整数検証が一致しないため未対応
+        let err = parse_video_h265_params(r#"{ "level_id": "120" }"#)
+            .expect_err("level_id の指定を許容してはならない");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("level_id") && msg.contains("サポートされていません"),
+            "level_id の未対応エラーメッセージが含まれていない: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_params_json_rejects_invalid_json() {
+        let err =
+            parse_video_vp9_params("{not json}").expect_err("不正な JSON を許容してはならない");
+        assert!(err.to_string().contains("JSON が不正"));
+    }
+
+    #[test]
+    fn parse_params_json_rejects_non_object() {
+        let err = parse_video_vp9_params(r#"[1, 2]"#).expect_err("配列を許容してはならない");
+        assert!(err.to_string().contains("JSON オブジェクト"));
+    }
+
+    #[test]
+    fn validate_video_params_codec_type_requires_matching_codec_type() {
+        // コーデックパラメータ指定に codec type がなければエラー
+        let vp9 = Some(VideoVP9Params::default());
+        let err = validate_video_params_codec_type(None, &vp9, &None, &None, &None)
+            .expect_err("codec type 未指定を許容してはならない");
+        assert!(err.to_string().contains("vp9"));
+
+        // codec type が不一致でもエラー
+        let err = validate_video_params_codec_type(Some("h264"), &vp9, &None, &None, &None)
+            .expect_err("codec type 不一致を許容してはならない");
+        let msg = err.to_string();
+        assert!(msg.contains("vp9") && msg.contains("h264"));
+    }
+
+    #[test]
+    fn validate_video_params_codec_type_reports_first_mismatch_first() {
+        // 複数の params を指定した場合は固定順 (vp9 → av1 → h264 → h265) で最初の不一致を報告する
+        let vp9 = Some(VideoVP9Params::default());
+        let av1 = Some(VideoAV1Params::default());
+        let err = validate_video_params_codec_type(Some("vp9"), &vp9, &av1, &None, &None)
+            .expect_err("codec type 不一致を許容してはならない");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sora-video-av1-params") && msg.contains("vp9"),
+            "vp9 コード種別に対して最初に不一致になる av1 params のエラーが必要: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_args_from_argv_parses_video_params() {
+        // codec type 指定 + params で VideoVP9Params が InstanceArgs に反映される
+        let mut tpl = minimal_sora_argv();
+        tpl.extend([
+            "--sora-video-codec-type".into(),
+            "vp9".into(),
+            "--sora-video-vp9-params".into(),
+            r#"{ "profile_id": 2 }"#.into(),
+        ]);
+        let (_common, instances) =
+            parse_args_from_argv("zakuro", Vec::new(), Vec::new(), vec![tpl], Vec::new())
+                .expect("有効な argv のパースに失敗してはならない");
+        assert_eq!(
+            instances[0]
+                .sora_video_vp9_params
+                .as_ref()
+                .and_then(|p| p.profile_id),
+            Some(2),
+            "vp9 params が反映されるべき"
+        );
+    }
+
+    #[test]
+    fn parse_args_from_argv_rejects_params_without_codec_type() {
+        // codec type 未指定で params を指定すると起動時エラー
+        let mut tpl = minimal_sora_argv();
+        tpl.extend([
+            "--sora-video-vp9-params".into(),
+            r#"{ "profile_id": 2 }"#.into(),
+        ]);
+        let err = parse_args_from_argv("zakuro", Vec::new(), Vec::new(), vec![tpl], Vec::new())
+            .expect_err("codec type 未指定の params 指定を許容してはならない");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sora-video-codec-type") && msg.contains("vp9"),
+            "エラーメッセージが期待と異なる: {msg}"
+        );
+    }
+
+    #[test]
+    fn split_cli_argv_routes_video_params_to_instance() {
+        // --sora-video-vp9-params は instance 側の値付きオプションとして振り分けられる
+        let cli: Vec<String> = vec![
+            "--sora-video-vp9-params".into(),
+            r#"{ "profile_id": 0 }"#.into(),
+        ];
+        let (common, instance) = split_cli_argv(cli).expect("正常な CLI は分割できること");
+        assert!(common.is_empty());
+        assert!(
+            instance
+                .windows(2)
+                .any(|w| w[0] == "--sora-video-vp9-params" && w[1].contains("profile_id")),
+            "instance 側に params が振り分けられていない"
         );
     }
 }
