@@ -488,23 +488,28 @@ async fn run_zakuro_instance(
         (config, pending)
     };
 
+    // mp4_reader は capability 登録用に構築したもので、ここで役目を終える。
+    // (VC ごとの Mp4VideoCapturer 用サンプルストリームは spawn ループ内で別途開き直す)
+    drop(mp4_reader);
+
     // context を先に宣言 (= Drop は最後)
     let context = SoraConnectionContext::new_with_config(context_config)?;
 
     // context より「後に」 capturer 系を宣言する (= Drop は context より先)
-    // pending_audio_capturer を late-bind することで宣言順序を保つ
+    // pending_audio_capturer を late-bind することで宣言順序を保つ。
+    // なお MP4 パススルー時の Mp4VideoCapturer は VC ごとに生成し
+    // virtual_client::run のスコープで保持されるため、この宣言順序保証は非適用
+    // (Mp4VideoCapturer は context 由来のリソースを持たないため実害はない)。
     let _fake_audio_capturer = pending_audio_capturer;
     let mut _fake_capturer: Option<FakeVideoCapturer> = None;
     let mut _device_capturer: Option<VideoDeviceCapturer> = None;
-    let mut _mp4_capturer: Option<Mp4VideoCapturer> = None;
+    // MP4 パススルー時は VC ごとに Mp4VideoCapturer を作るためこのスコープでは共有 video_source を持たない。
+    // 詳細は spawn ループ内 (input_mp4 ブランチ) の TODO/コメントを参照。
     let video_source = if !instance.no_video_device && instance.role.wants_send() {
-        if let Some(reader) = mp4_reader {
-            // MP4 パススルーキャプチャ
-            let capturer = Mp4VideoCapturer::new(reader)
-                .map_err(|e| ErrorMessage::new(format!("Failed to start MP4 capturer: {e}")))?;
-            let source = capturer.video_source();
-            _mp4_capturer = Some(capturer);
-            Some(source)
+        if instance.input_mp4.is_some() {
+            // MP4 パススルーは VC ごとに個別の Mp4VideoCapturer を持つため、
+            // ここで共有 video_source を構築しない。spawn ループ内で per-VC に生成する。
+            None
         } else if let Some(ref device_name) = instance.video_input_device {
             // 実デバイスキャプチャ
             let device_id = resolve_device_id(device_name)?;
@@ -623,12 +628,55 @@ async fn run_zakuro_instance(
                     vc_id,
                     vc_hatch_start.elapsed().as_secs_f64(),
                 );
+
+                // MP4 パススルー時は VC ごとに Mp4SampleReader を開き直して
+                // 専用の Mp4VideoCapturer を起動する。
+                // 単一の video_source を複数 encoder に共有すると
+                // shiguredo_webrtc の VideoFrameBuffer スレッド固定チェックに引っかかり
+                // panic するため、VC ごとに分離する必要がある。
+                //
+                // TODO(sora_sdk): 現状は Mp4VideoCapturer::new が Mp4SampleReader を
+                // 消費する API のため、VC 数だけ MP4 ファイルを開いて demux し直す
+                // コストを払っている。加えて Mp4SampleReader が BufReader<File> を
+                // 保持し Mp4VideoCapturer が専用スレッドを起動するため、--vcs N で
+                // ファイルディスクリプタ N 個 + OS スレッド N 本を消費し、
+                // ulimit -n や threads-per-process 上限に触れやすくなる。
+                // 次のいずれかが sora_sdk 側で提供されれば、demux コストと
+                // FD/スレッド消費を instance あたり 1 に削減できる。
+                // - Mp4SampleReader のメタデータ共有 + サンプルストリームの個別発行
+                //   (e.g. Mp4SampleReader::clone_for_capturer())
+                // - MP4 パススルー video_source の per-encoder フォーク
+                //   (VideoFrameBuffer の thread-affinity 制約を SDK 内で吸収)
+                let (per_vc_source, per_vc_mp4_capturer) =
+                    if let Some(ref mp4_path) = instance.input_mp4 {
+                        if !instance.no_video_device && instance.role.wants_send() {
+                            let reader = Mp4SampleReader::new(mp4_path).map_err(|e| {
+                                ErrorMessage::new(format!(
+                                    "Failed to open MP4 file for vc-{vc_id}: {e}"
+                                ))
+                            })?;
+                            let capturer = Mp4VideoCapturer::new(reader).map_err(|e| {
+                                ErrorMessage::new(format!(
+                                    "Failed to start MP4 capturer for vc-{vc_id}: {e}"
+                                ))
+                            })?;
+                            let source = capturer.video_source();
+                            (Some(source), Some(capturer))
+                        } else {
+                            // input_mp4 は指定されているが送信しない (recvonly 等) 場合は何もしない
+                            (None, None)
+                        }
+                    } else {
+                        (video_source.clone(), None)
+                    };
+
                 let child_token = token.child_token();
                 clients.spawn_local(virtual_client::run(
                     instance_id,
                     vc_id,
                     context.clone(),
-                    video_source.clone(),
+                    per_vc_source,
+                    per_vc_mp4_capturer,
                     vc_config.clone(),
                     child_token,
                     stats_tx.clone(),
