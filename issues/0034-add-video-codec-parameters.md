@@ -1,7 +1,7 @@
 # コーデックパラメータ (`--sora-video-vp9-params` 等) を追加する
 
 - Created: 2026-08-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-24
 - Branch: feature/add-video-codec-parameters
 - Polished: 2026-08-24
 
@@ -32,3 +32,12 @@ zakuro (C++) では `--sora-video-vp9-params` / `--sora-video-av1-params` / `--s
 - 4 つのオプションが `--help` に表示される
 - 指定したパラメータがシグナリングの connect メッセージの video に含まれ、Sora サーバーが返す offer の SDP (fmtp) に反映される (Sora サーバー側の sora.conf 設定 `signaling_*_params` と `*_b_frame` が有効な場合)
 - 不正な JSON、`level_id` の指定、params と codec type の不一致を指定すると、エラーメッセージ付きで起動に失敗する
+
+## 解決方法
+
+- `src/args.rs` に `--sora-video-vp9-params` / `--sora-video-av1-params` / `--sora-video-h264-params` / `--sora-video-h265-params` (値付き `Option<String>`) を追加し、JSON 文字列を検証して sora_sdk の `VideoVP9Params` / `VideoAV1Params` / `VideoH264Params` / `VideoH265Params` に変換する
+- JSON はクライアント側で検証する (Sora サーバーは未知キーで params 全体を拒否するため)。不正な JSON、オブジェクト以外、未知キー、重複キー、型違反、範囲外、H.265 の `level_id` は起動時エラーにする
+- パラメータ指定には対応する `--sora-video-codec-type` の指定を必須とし、未指定・不一致は起動時エラーにする
+- `src/main.rs` の `build_video` をパラメータ指定時のみ `Video::new_*(bit_rate, Some(params))` にし、未指定時は従来の `None` を維持する。空オブジェクト `{}` は `None` に正規化する
+- `src/duckdb_stats/stats_json.rs` の config_json および `docs/ZAKURO.md` を更新する
+- 単体テストを追加する (`src/args.rs`: 各コーデックの JSON 検証・整合性、`src/main.rs`: build_video の配線・サーバー設定の注記、`src/duckdb_stats/stats_json.rs`: config_json 出力)。テストの安定化 (RTCStats の未知 type 警告テストの直列化) も併せて実施する
