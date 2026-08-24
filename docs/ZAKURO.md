@@ -262,7 +262,7 @@ POST /rpc          → JSON-RPC 2.0
 - [x] OpenH264 外部ライブラリ (`--openh264`)
 - [x] コーデック個別エンコーダー指定 (`--vp8-encoder` 等)
 - [x] コーデックパラメータ (`--sora-video-vp9-params` 等)
-- [ ] ビデオコーデック能力表示 (`--show-video-codec-capability`)
+- [x] ビデオコーデック能力表示 (`--show-video-codec-capability`)
 
 ### 接続設定
 

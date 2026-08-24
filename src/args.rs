@@ -1,6 +1,9 @@
 use nojson::{JsonValueKind, RawJson, RawJsonOwned, RawJsonValue};
 use shiguredo_webrtc::{VideoCodecType, log, rtc_log_info, rtc_log_warning};
-use sora_sdk::{Role, VideoAV1Params, VideoH264Params, VideoH265Params, VideoVP9Params};
+use sora_sdk::{
+    Mp4SampleReader, Role, SoraConnectionContextConfig, VideoAV1Params, VideoCodecCapability,
+    VideoH264Params, VideoH265Params, VideoVP9Params,
+};
 
 use crate::error::{ErrorMessage, Result};
 use crate::scenario::ScenarioType;
@@ -91,6 +94,8 @@ pub(crate) struct JsoncConfig {
 /// `CommonArgs` に分類すべきキーかどうか
 ///
 /// `CommonArgs` にフィールドを追加するときは本関数も更新すること。
+/// 例外として `show-video-codec-capability` はフィールドを持たない
+/// (処理は `parse_args()` の pre-parse で完結し、JSONC では指定エラーになる)。
 fn is_common_key(key: &str) -> bool {
     matches!(
         key,
@@ -105,6 +110,7 @@ fn is_common_key(key: &str) -> bool {
             | "duckdb-interval"
             | "no-duckdb-output"
             | "log-level"
+            | "show-video-codec-capability"
     )
 }
 
@@ -113,11 +119,15 @@ fn is_common_key(key: &str) -> bool {
 /// CLI argv 分割ロジックで「次トークンを値として取るか取らないか」の判別に用いる。
 /// 振り分け先 (common / instance) の判定は別途 `is_common_key()` で行うこと。
 /// bool フラグを追加するときは本関数も更新すること。
+/// `show-video-codec-capability` は pre-parse で必ず消費されるため
+/// `split_cli_argv()` には実際には到達しないが、`--help` 表示・JSONC 展開の
+/// 整合のため状態遷移を登録しておく (JSONC では指定エラー)。
 fn is_flag(key: &str) -> bool {
     matches!(
         key,
         "insecure"  // CommonArgs
             | "no-duckdb-output"  // CommonArgs
+            | "show-video-codec-capability"  // CommonArgs
             | "no-video-device"  // InstanceArgs
             | "no-audio-device"  // InstanceArgs
             | "sandstorm" // InstanceArgs
@@ -598,6 +608,14 @@ fn parse_jsonc_config(content: &str) -> Result<JsoncConfig> {
                 ErrorMessage::new("'config' cannot be specified inside config file").into(),
             );
         }
+        // --show-video-codec-capability は CLI の pre-parse で処理する専用フラグのため、
+        // config ファイルでは意味を持たない (静かに無視せず明示エラーにする)
+        if key == "show-video-codec-capability" {
+            return Err(ErrorMessage::new(
+                "'show-video-codec-capability' can only be specified via CLI",
+            )
+            .into());
+        }
 
         // ${...} 形式の環境変数置換は現バージョンでは未対応 (エラーで起動を拒否する)
         if value.kind() == JsonValueKind::String && value.as_raw_str().contains("${") {
@@ -964,6 +982,13 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
             _ => Err("log-level は verbose/info/warning/error/none で指定してください"),
         })?
         .unwrap_or(log::Severity::Info);
+
+    // --show-video-codec-capability はヘルプに表示するための定義のみで、
+    // 実際の処理は parse_args() の pre-parse 段階で行う (単独起動時に
+    // InstanceArgs の必須引数を要求しないため)。JSONC からの指定はエラーになる。
+    noargs::flag("show-video-codec-capability")
+        .doc("Show video codec capability and exit")
+        .take(&mut args);
 
     // --no-duckdb-output と他の --duckdb-* 引数の併用検知
     // (引数の登場順を問わず --no-duckdb-output が指定されていれば警告 1 回)
@@ -1627,9 +1652,88 @@ fn parse_args_from_argv(
     Ok((common, instances))
 }
 
+/// `--show-video-codec-capability` の表示対象判定に使う CLI 由来の情報
+///
+/// 表示は CLI 引数 (`--openh264` / `--input-mp4` / `--sora-role`) のみを参照する。
+/// `--config` (JSONC) の設定は対象にしない (CLI の pre-parse で終了するため一致)。
+#[derive(Debug, PartialEq)]
+struct ShowVideoCodecCapabilityInputs {
+    openh264_path: Option<String>,
+    input_mp4_path: Option<String>,
+    role: Role,
+}
+
+/// `--show-video-codec-capability` の表示対象判定に使う情報の探索中に
+/// 値欠落を警告する
+fn warn_show_capability_missing_value(option_name: &str) {
+    rtc_log_warning!("--show-video-codec-capability: {option_name} requires a value");
+}
+
+/// argv から `--show-video-codec-capability` の表示対象を抽出する
+///
+/// `argv[0]` はプログラム名で、走査は 1 番目 (トークン先頭) から開始する。
+/// `--openh264` / `--input-mp4` / `--sora-role` は `--key value` と `--key=value` の
+/// 両形式に対応する。値が欠ける場合 (空文字・末尾・次のトークンが `--` 始まり) は
+/// 警告ログを出して保存せず、表示処理は続行する。この走査は表示専用の pre-parse であり、
+/// 通常経路の noargs 検証 (値欠落のエラー化) とは独立する。
+fn pre_parse_show_video_codec_capability_inputs(
+    argv: &[String],
+) -> Result<ShowVideoCodecCapabilityInputs> {
+    let mut openh264_path: Option<String> = None;
+    let mut input_mp4_path: Option<String> = None;
+    let mut role = Role::SendOnly;
+    let mut i = 1;
+    while i < argv.len() {
+        let token = &argv[i];
+        let next_value = argv.get(i + 1).filter(|v| !v.starts_with("--"));
+        if let Some(value) = token.strip_prefix("--openh264=") {
+            if value.is_empty() {
+                warn_show_capability_missing_value("--openh264");
+            } else {
+                openh264_path = Some(value.to_string());
+            }
+        } else if token == "--openh264" {
+            if let Some(value) = next_value {
+                openh264_path = Some(value.clone());
+                i += 1;
+            } else {
+                warn_show_capability_missing_value("--openh264");
+            }
+        } else if let Some(value) = token.strip_prefix("--input-mp4=") {
+            if value.is_empty() {
+                warn_show_capability_missing_value("--input-mp4");
+            } else {
+                input_mp4_path = Some(value.to_string());
+            }
+        } else if token == "--input-mp4" {
+            if let Some(value) = next_value {
+                input_mp4_path = Some(value.clone());
+                i += 1;
+            } else {
+                warn_show_capability_missing_value("--input-mp4");
+            }
+        } else if let Some(value) = token.strip_prefix("--sora-role=") {
+            role = Role::parse(value)?;
+        } else if token == "--sora-role" {
+            if let Some(value) = next_value {
+                role = Role::parse(value)?;
+                i += 1;
+            } else {
+                warn_show_capability_missing_value("--sora-role");
+            }
+        }
+        i += 1;
+    }
+    Ok(ShowVideoCodecCapabilityInputs {
+        openh264_path,
+        input_mp4_path,
+        role,
+    })
+}
+
 /// プロセス入口の引数パース
 ///
-/// 1. env から `--config` / `--help` / `--version` を pre-parse
+/// 1. env から `--config` / `--help` / `--version` / `--show-video-codec-capability` を pre-parse
 /// 2. JSONC をロードして `JsoncConfig` を構築
 /// 3. 残り CLI 引数を CommonArgs / InstanceArgs 用に分割
 /// 4. `parse_args_from_argv()` に流す
@@ -1637,19 +1741,65 @@ pub(crate) fn parse_args() -> Result<(CommonArgs, Vec<InstanceArgs>, Option<Stri
     let env_argv: Vec<String> = std::env::args().collect();
     let program_name = env_argv.first().cloned().unwrap_or_default();
 
-    // pre-parse: --version / --help を 1 度走査して検出する
+    // pre-parse: --version / --help / --show-video-codec-capability を 1 度走査して検出する
     let mut want_version = false;
     let mut want_help = false;
+    let mut want_show_video_codec_capability = false;
     for token in env_argv.iter().skip(1) {
         if token == "--version" {
             want_version = true;
         } else if token == "--help" || token == "-h" {
             want_help = true;
+        } else if token == "--show-video-codec-capability" {
+            want_show_video_codec_capability = true;
         }
     }
     if want_version {
         rtc_log_info!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
+    }
+
+    // --show-video-codec-capability は C++ 版 zakuro と同様に config 処理より前で表示して終了する
+    // (通常のパース経路だと必須の --sora-signaling-url 等が検証されてしまい、
+    // 単独起動 `zakuro --show-video-codec-capability` が成立しないため)
+    // --help 指定時はヘルプ表示を優先する (C++ 版も CLI11 のヘルプで終了するため一致)
+    // なおこの経路は通常の引数検証 (未知引数・値欠落のエラー化・--config の存在確認) を
+    // 行わない。C++ 版は CLI11 が先に全引数を検証するため後続の挙動差として doc に明記する。
+    if want_show_video_codec_capability && !want_help {
+        let inputs = pre_parse_show_video_codec_capability_inputs(&env_argv)?;
+
+        let mut capabilities: Vec<Box<dyn VideoCodecCapability>> =
+            SoraConnectionContextConfig::default().video_codec_capabilities;
+
+        // MP4 パススルー (読み込み失敗時は表示対象から除外する)。
+        // 登録順は run_zakuro_instance (MP4 → OpenH264 → Nop) と揃える。
+        if let Some(path) = inputs.input_mp4_path {
+            match Mp4SampleReader::new(&path) {
+                Ok(reader) => capabilities.push(Box::new(reader.passthrough_capability())),
+                Err(e) => {
+                    rtc_log_warning!("Failed to open MP4 file for capability display: {e}");
+                }
+            }
+        }
+        // OpenH264 のロードに失敗した場合は表示対象から除外する (表示は続行する)
+        if let Some(path) = inputs.openh264_path {
+            match crate::openh264_video_codec::load_openh264_library(&path) {
+                Ok(lib) => capabilities.push(Box::new(
+                    crate::openh264_video_codec::Openh264VideoCodecCapability::new(lib),
+                )),
+                Err(e) => {
+                    rtc_log_warning!("Failed to load OpenH264 library for capability display: {e}");
+                }
+            }
+        }
+        // 受信ロール指定時は受信映像を廃棄する NopVideoDecoder を表示する
+        if inputs.role.wants_recv() {
+            capabilities.push(Box::new(
+                crate::nop_video_decoder::NopVideoDecoderCapability,
+            ));
+        }
+
+        crate::video_codec_capability::show_video_codec_capability(capabilities);
     }
 
     // pre-parse: --config を取り出して env から除外する (`split_cli_argv()` に渡さない)
@@ -2167,6 +2317,86 @@ mod tests {
     fn is_flag_includes_no_duckdb_output() {
         // is_flag に --no-duckdb-output が含まれている
         assert!(is_flag("no-duckdb-output"));
+    }
+
+    #[test]
+    fn is_common_key_includes_show_video_codec_capability() {
+        // is_common_key に show-video-codec-capability が含まれている
+        assert!(is_common_key("show-video-codec-capability"));
+    }
+
+    #[test]
+    fn is_flag_includes_show_video_codec_capability() {
+        // is_flag に --show-video-codec-capability が含まれている
+        assert!(is_flag("show-video-codec-capability"));
+    }
+
+    // ---- --show-video-codec-capability の pre-parse ----
+
+    /// トークン列 (先頭はプログラム名) を argv (`Vec<String>`) へ変換する
+    fn to_argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn show_capability_inputs_reads_space_and_equal_forms() {
+        // `--key value` 形式と `--key=value` 形式の両方を取り込める
+        let argv = to_argv(&[
+            "zakuro",
+            "--show-video-codec-capability",
+            "--openh264",
+            "/tmp/libopenh264.dylib",
+            "--input-mp4=/tmp/video.mp4",
+            "--sora-role",
+            "recvonly",
+        ]);
+        let inputs = pre_parse_show_video_codec_capability_inputs(&argv)
+            .expect("有効な argv の走査に失敗してはならない");
+        assert_eq!(
+            inputs,
+            ShowVideoCodecCapabilityInputs {
+                openh264_path: Some("/tmp/libopenh264.dylib".into()),
+                input_mp4_path: Some("/tmp/video.mp4".into()),
+                role: Role::RecvOnly,
+            }
+        );
+    }
+
+    #[test]
+    fn show_capability_inputs_rejects_invalid_role() {
+        // --sora-role の不正値は通常経路と同じくエラーになる (sora_sdk の Role::parse に委ねる)
+        let argv = to_argv(&["zakuro", "--sora-role=invalid"]);
+        assert!(
+            pre_parse_show_video_codec_capability_inputs(&argv).is_err(),
+            "不正なロールを許容してはならない"
+        );
+    }
+
+    #[test]
+    fn show_capability_inputs_ignores_option_like_value() {
+        // 値が `--` 始まりのオプションである場合はトークンを値として取り込まない
+        let argv = to_argv(&["zakuro", "--openh264", "--input-mp4", "/tmp/video.mp4"]);
+        let inputs = pre_parse_show_video_codec_capability_inputs(&argv)
+            .expect("有効な argv の走査に失敗してはならない");
+        assert_eq!(
+            inputs.openh264_path, None,
+            "値欠落の --openh264 を保存しない"
+        );
+        assert_eq!(
+            inputs.input_mp4_path.as_deref(),
+            Some("/tmp/video.mp4"),
+            "--openh264 の値として --input-mp4 を誤採用しない"
+        );
+    }
+
+    #[test]
+    fn show_capability_inputs_skips_missing_value_and_continues() {
+        // 末尾で値が欠けるオプションは保存せず (警告のみ)、以降の走査は続行する
+        let argv = to_argv(&["zakuro", "--sora-role", "sendrecv", "--openh264"]);
+        let inputs = pre_parse_show_video_codec_capability_inputs(&argv)
+            .expect("値欠落を警告のみで走査を続行するべき");
+        assert_eq!(inputs.role, Role::SendRecv);
+        assert_eq!(inputs.openh264_path, None);
     }
 
     #[test]

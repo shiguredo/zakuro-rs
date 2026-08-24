@@ -10,6 +10,7 @@ mod nop_video_decoder;
 mod openh264_video_codec;
 mod scenario;
 mod stats;
+mod video_codec_capability;
 mod video_device_capturer;
 mod virtual_client;
 mod wav_reader;
