@@ -291,9 +291,10 @@ POST /rpc          → JSON-RPC 2.0
 - [x] reconnect シナリオ (9 回のランダム Sleep 後に切断 → 再接続ループ)
 - [x] DataChannel メッセージ自動送信 (ZAKURO ヘッダ付き)
 - [x] vcs-hatch-rate (段階的起動)
-- [ ] シナリオ操作 PlayVoiceNumberClient (音声未対応のため)
-- [ ] シナリオ操作 SendDataChannelMessage
-- [ ] シナリオ操作 Exit
+- [ ] シナリオ操作 PlayVoiceNumberClient (数字音声ソース未対応のため)
+- [x] シナリオ操作 SendDataChannelMessage
+- [x] シナリオ操作 Exit
+- [ ] シナリオ操作 Reconnect
 - [x] instance-hatch-rate (JSONC `instances` 配列と組み合わせて使用)
 
 ### その他
@@ -316,6 +317,7 @@ POST /rpc          → JSON-RPC 2.0
 
 - GameKeyCore (キーボード入力制御)
 - GameAudioManager (ゲーム音声)
+- シナリオ操作 PlaySubScenario (実用例がなく DataChannel 連続送信は別実装で実現済みのため)
 - スポットライト数指定 (`--sora-spotlight-number`, Sora で非推奨のため sora-rust-sdk も対象外)
 
 ### 設計差分
