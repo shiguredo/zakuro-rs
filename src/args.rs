@@ -591,19 +591,19 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
     noargs::HELP_FLAG.take_help(&mut args);
 
     let instance_hatch_rate: f64 = noargs::opt("instance-hatch-rate")
-        .doc("インスタンスの起動レート (秒あたりの起動数, デフォルト: 1.0)。複数インスタンスは JSONC `instances` 配列でのみ指定可能")
+        .doc("Instance start rate (instances per second, default: 1.0). Multiple instances can only be specified via the JSONC `instances` array")
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<f64>())?
         .unwrap_or(1.0);
 
     let http_host: Option<String> = noargs::opt("http-host")
-        .doc("HTTP サーバーのホストアドレス")
+        .doc("HTTP server host address")
         .example("0.0.0.0")
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let http_port: Option<u16> = noargs::opt("http-port")
-        .doc("HTTP サーバーのポート番号")
+        .doc("HTTP server port number")
         .example("8080")
         .take(&mut args)
         .present_and_then(|o| {
@@ -613,7 +613,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
         })?;
 
     let openh264: Option<String> = noargs::opt("openh264")
-        .doc("OpenH264 共有ライブラリのパス")
+        .doc("OpenH264 shared library path")
         .example("libopenh264-2.6.0-mac-arm64.dylib")
         .take(&mut args)
         .present_and_then(|o| {
@@ -625,12 +625,12 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
         })?;
 
     let insecure = noargs::flag("insecure")
-        .doc("TLS 証明書の検証をスキップする")
+        .doc("Skip TLS certificate verification")
         .take(&mut args)
         .is_present();
 
     let client_cert: Option<String> = noargs::opt("client-cert")
-        .doc("mTLS クライアント証明書ファイルのパス (PEM)")
+        .doc("mTLS client certificate file path (PEM)")
         .take(&mut args)
         .present_and_then(|o| {
             let path = o.value().to_string();
@@ -641,7 +641,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
         })?;
 
     let client_key: Option<String> = noargs::opt("client-key")
-        .doc("mTLS クライアント秘密鍵ファイルのパス (PEM)")
+        .doc("mTLS client private key file path (PEM)")
         .take(&mut args)
         .present_and_then(|o| {
             let path = o.value().to_string();
@@ -653,7 +653,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
 
     // --no-duckdb-output は単独フラグ
     let no_duckdb_output = noargs::flag("no-duckdb-output")
-        .doc("DuckDB への統計情報出力を無効化する")
+        .doc("Disable DuckDB stats output")
         .take(&mut args)
         .is_present();
 
@@ -662,7 +662,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
     // 明示指定されたかは `dir_presented` フラグで記録し、あとで --no-duckdb-output 併用を警告する
     let mut dir_presented = false;
     let duckdb_output_dir: String = noargs::opt("duckdb-output-dir")
-        .doc("DuckDB ファイルの出力ディレクトリ (デフォルト: カレントディレクトリ)")
+        .doc("DuckDB file output directory (default: current directory)")
         .example(".")
         .take(&mut args)
         .present_and_then(|o| {
@@ -678,7 +678,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
     // --duckdb-interval は 0.1 以上 86400 以下の inclusive 範囲
     let mut interval_presented = false;
     let duckdb_interval: f64 = noargs::opt("duckdb-interval")
-        .doc("DuckDB への統計書き込み間隔 (秒, デフォルト: 1.0)")
+        .doc("DuckDB stats write interval (seconds, default: 1.0)")
         .take(&mut args)
         .present_and_then(|o| {
             interval_presented = true;
@@ -695,7 +695,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
 
     // --log-level は小文字の列挙値のみ受理する (大文字・数値は拒否)
     let log_level: log::Severity = noargs::opt("log-level")
-        .doc("ログレベル (verbose/info/warning/error/none, デフォルト: info)")
+        .doc("Log level (verbose/info/warning/error/none, default: info)")
         .take(&mut args)
         .present_and_then(|o| match o.value() {
             "verbose" => Ok(log::Severity::Verbose),
@@ -783,113 +783,113 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
     noargs::HELP_FLAG.take_help(&mut args);
 
     let signaling_urls: Vec<String> = noargs::opt("sora-signaling-url")
-        .doc("Sora の WebSocket シグナリング URL (カンマ区切りで複数指定可)")
+        .doc("Sora WebSocket signaling URL (comma-separated, multiple URLs allowed)")
         .example("wss://sora.example.com/signaling")
         .take(&mut args)
         .then(|o| Ok::<_, &str>(o.value().split(',').map(|s| s.trim().to_string()).collect()))?;
 
     let channel_id: String = noargs::opt("sora-channel-id")
-        .doc("Sora のチャネル ID")
+        .doc("Sora channel ID")
         .example("zakuro-test")
         .take(&mut args)
         .then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let role: String = noargs::opt("sora-role")
-        .doc("Sora のロール (sendonly, recvonly, sendrecv)")
+        .doc("Sora role (sendonly, recvonly, sendrecv)")
         .example("sendonly")
         .take(&mut args)
         .then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let client_id: Option<String> = noargs::opt("sora-client-id")
-        .doc("Sora のクライアント ID")
+        .doc("Sora client ID")
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let bundle_id: Option<String> = noargs::opt("sora-bundle-id")
-        .doc("Sora のバンドル ID")
+        .doc("Sora bundle ID")
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let metadata: Option<String> = noargs::opt("sora-metadata")
-        .doc("Sora の connect メッセージに含めるメタデータ (JSON)")
+        .doc("Sora connect message metadata (JSON)")
         .example(r#"{"key":"value"}"#)
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let signaling_notify_metadata: Option<String> = noargs::opt("sora-signaling-notify-metadata")
-        .doc("Sora のシグナリング通知メタデータ (JSON)")
+        .doc("Sora signaling notify metadata (JSON)")
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let vcs: u32 = noargs::opt("vcs")
-        .doc("仮想クライアント数 (1-1000, デフォルト: 1)")
+        .doc("Virtual client count (1-1000, default: 1)")
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<u32>())?
         .unwrap_or(1);
 
     let vcs_hatch_rate: f64 = noargs::opt("vcs-hatch-rate")
-        .doc("仮想クライアントの起動レート (秒あたりの起動数, デフォルト: 1.0)")
+        .doc("Virtual client start rate (clients per second, default: 1.0)")
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<f64>())?
         .unwrap_or(1.0);
 
     let duration: Option<f64> = noargs::opt("duration")
-        .doc("仮想クライアントの接続維持秒数 (省略時は無制限)")
+        .doc("Virtual client connection duration (seconds, unlimited if omitted)")
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<f64>())?;
 
     let repeat_interval: Option<f64> = noargs::opt("repeat-interval")
-        .doc("duration 経過後の再接続間隔 (秒)")
+        .doc("Reconnection interval after duration (seconds)")
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<f64>())?;
 
     let max_retry: u32 = noargs::opt("max-retry")
-        .doc("接続失敗時の最大リトライ回数 (デフォルト: 0)")
+        .doc("Maximum retry count on connection failure (default: 0)")
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<u32>())?
         .unwrap_or(0);
 
     let retry_interval: f64 = noargs::opt("retry-interval")
-        .doc("リトライ間隔 (秒, デフォルト: 60.0)")
+        .doc("Retry interval (seconds, default: 60.0)")
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<f64>())?
         .unwrap_or(60.0);
 
     let no_video_device = noargs::flag("no-video-device")
-        .doc("映像デバイスを使用しない")
+        .doc("Disable video device")
         .take(&mut args)
         .is_present();
 
     let no_audio_device = noargs::flag("no-audio-device")
-        .doc("音声デバイスを使用しない")
+        .doc("Disable audio device")
         .take(&mut args)
         .is_present();
 
     let video_input_device: Option<String> = noargs::opt("video-input-device")
-        .doc("映像入力デバイス名または ID")
+        .doc("Video input device name or ID")
         .example("FaceTime HD Camera")
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let resolution: (i32, i32) = noargs::opt("resolution")
-        .doc("映像解像度 (QVGA/VGA/HD/FHD/4K または WxH, デフォルト: VGA)")
+        .doc("Video resolution (QVGA/VGA/HD/FHD/4K or WxH, default: VGA)")
         .take(&mut args)
         .present_and_then(|o| parse_resolution(o.value()))?
         .unwrap_or((640, 480));
 
     let framerate: u32 = noargs::opt("framerate")
-        .doc("映像フレームレート (1-60, デフォルト: 30)")
+        .doc("Video frame rate (1-60, default: 30)")
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<u32>())?
         .unwrap_or(30);
 
     let sandstorm = noargs::flag("sandstorm")
-        .doc("砂嵐映像を生成する")
+        .doc("Generate sandstorm video")
         .take(&mut args)
         .is_present();
 
     let input_y4m: Option<String> = noargs::opt("input-y4m")
-        .doc("Y4M ファイルを映像入力として再生する")
+        .doc("Play a Y4M file as video input")
         .example("video.y4m")
         .take(&mut args)
         .present_and_then(|o| {
@@ -901,7 +901,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         })?;
 
     let input_mp4: Option<String> = noargs::opt("input-mp4")
-        .doc("MP4 ファイルからエンコード済み映像をパススルー送信する")
+        .doc("Send pre-encoded video passthrough from an MP4 file")
         .example("video.mp4")
         .take(&mut args)
         .present_and_then(|o| {
@@ -913,7 +913,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         })?;
 
     let input_wav: Option<String> = noargs::opt("input-wav")
-        .doc("WAV ファイル (PCM 16bit) を音声入力としてループ再生する")
+        .doc("Loop a WAV file (PCM 16bit) as audio input")
         .example("audio.wav")
         .take(&mut args)
         .present_and_then(|o| {
@@ -925,7 +925,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         })?;
 
     let video_codec_type: Option<String> = noargs::opt("sora-video-codec-type")
-        .doc("映像コーデック (vp8/vp9/av1/h264/h265)")
+        .doc("Video codec (vp8/vp9/av1/h264/h265)")
         .take(&mut args)
         .present_and_then(|o| match o.value() {
             "vp8" | "vp9" | "av1" | "h264" | "h265" => Ok(o.value().to_string()),
@@ -933,7 +933,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         })?;
 
     let video_bit_rate: Option<u32> = noargs::opt("sora-video-bit-rate")
-        .doc("映像ビットレート (kbps)")
+        .doc("Video bit rate (kbps)")
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<u32>())?;
 
@@ -963,7 +963,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         .present_and_then(|o| parse_video_codec_implementation("h265-encoder", o.value()))?;
 
     let audio: bool = noargs::opt("sora-audio")
-        .doc("音声の有効/無効 (true/false, デフォルト: true)")
+        .doc("Enable/disable audio (true/false, default: true)")
         .take(&mut args)
         .present_and_then(|o| match o.value() {
             "true" => Ok(true),
@@ -973,7 +973,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         .unwrap_or(true);
 
     let audio_codec_type: Option<String> = noargs::opt("sora-audio-codec-type")
-        .doc("音声コーデック (opus)")
+        .doc("Audio codec (opus)")
         .take(&mut args)
         .present_and_then(|o| match o.value() {
             "opus" => Ok(o.value().to_string()),
@@ -981,17 +981,17 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         })?;
 
     let audio_bit_rate: Option<u32> = noargs::opt("sora-audio-bit-rate")
-        .doc("音声ビットレート (kbps)")
+        .doc("Audio bit rate (kbps)")
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<u32>())?;
 
     let data_channels: Option<String> = noargs::opt("sora-data-channels")
-        .doc("DataChannel メッセージング設定 (JSON 文字列)")
+        .doc("DataChannel messaging configuration (JSON string)")
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let data_channel_signaling: Option<bool> = noargs::opt("sora-data-channel-signaling")
-        .doc("DataChannel 経由でシグナリングを行う (true/false)")
+        .doc("Use DataChannel for signaling (true/false)")
         .take(&mut args)
         .present_and_then(|o| match o.value() {
             "true" => Ok(true),
@@ -1000,7 +1000,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         })?;
 
     let ignore_disconnect_websocket: Option<bool> = noargs::opt("sora-ignore-disconnect-websocket")
-        .doc("DataChannel 使用時に WebSocket 切断を無視する (true/false)")
+        .doc("Ignore WebSocket disconnection when using DataChannel (true/false)")
         .take(&mut args)
         .present_and_then(|o| match o.value() {
             "true" => Ok(true),
@@ -1009,12 +1009,12 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         })?;
 
     let disconnect_wait_timeout: Option<f64> = noargs::opt("sora-disconnect-wait-timeout")
-        .doc("切断待ちタイムアウト (秒, デフォルト: 5.0)")
+        .doc("Disconnect wait timeout (seconds, default: 5.0)")
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<f64>())?;
 
     let simulcast: Option<bool> = noargs::opt("sora-simulcast")
-        .doc("サイマルキャストの有効/無効 (true/false)")
+        .doc("Enable/disable simulcast (true/false)")
         .take(&mut args)
         .present_and_then(|o| match o.value() {
             "true" => Ok(true),
@@ -1023,12 +1023,12 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         })?;
 
     let simulcast_request_rid: Option<String> = noargs::opt("sora-simulcast-request-rid")
-        .doc("サイマルキャストで受信する rid (r0/r1/r2)")
+        .doc("Simulcast rid to receive (r0/r1/r2)")
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let spotlight: Option<bool> = noargs::opt("sora-spotlight")
-        .doc("スポットライトの有効/無効 (true/false)")
+        .doc("Enable/disable spotlight (true/false)")
         .take(&mut args)
         .present_and_then(|o| match o.value() {
             "true" => Ok(true),
@@ -1037,17 +1037,17 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         })?;
 
     let spotlight_focus_rid: Option<String> = noargs::opt("sora-spotlight-focus-rid")
-        .doc("スポットライトでフォーカス時の rid (r0/r1/r2)")
+        .doc("Spotlight focus rid (r0/r1/r2)")
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let spotlight_unfocus_rid: Option<String> = noargs::opt("sora-spotlight-unfocus-rid")
-        .doc("スポットライトでアンフォーカス時の rid (r0/r1/r2)")
+        .doc("Spotlight unfocus rid (r0/r1/r2)")
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let scenario: Option<ScenarioType> = noargs::opt("scenario")
-        .doc("シナリオ種別 (reconnect)")
+        .doc("Scenario type (reconnect)")
         .take(&mut args)
         .present_and_then(|o| {
             ScenarioType::parse(o.value()).ok_or("scenario は reconnect で指定してください")
