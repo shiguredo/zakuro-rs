@@ -706,9 +706,15 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::duckdb_stats::{
-        clear_unknown_types_for_test, schema::SCHEMA_SQL, unknown_types_size_for_test,
-        writer::dispatch_command,
+        clear_unknown_types_for_test, schema::SCHEMA_SQL, writer::dispatch_command,
     };
+
+    /// 未知 RTCStats type の集合 (UNKNOWN_TYPES) を触るテストを直列化するミューテックス
+    ///
+    /// dispatch_stats の UNKNOWN_TYPES 集合 (global static) を操作するテスト同士が
+    /// 並列実行されると clear / サイズ計測が干渉して不安定になるため、この
+    /// ロックでテストを直列化する。
+    static UNKNOWN_TYPES_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// 一時ディレクトリに `.db` ファイルを作りスキーマを投入するヘルパー
     fn setup_db() -> (tempfile::TempDir, Connection) {
@@ -723,6 +729,9 @@ mod tests {
 
     #[test]
     fn dispatch_stats_inserts_known_types() {
+        let _guard = UNKNOWN_TYPES_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let (_dir, conn) = setup_db();
         let (tx, rx) = mpsc::channel::<WriteCommand>(64);
         let client = DuckDBClient {
@@ -777,6 +786,9 @@ mod tests {
 
     #[test]
     fn dispatch_stats_unknown_type_logged_once() {
+        let _guard = UNKNOWN_TYPES_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let (tx, _rx) = mpsc::channel::<WriteCommand>(64);
         let client = DuckDBClient {
             sender: Some(tx),
@@ -786,22 +798,24 @@ mod tests {
             connection_id: "c1".into(),
             session_id: "s1".into(),
         };
-        // テスト並列実行時に他テストが UNKNOWN_TYPES に干渉するのを避けるため、
-        // clear は行わず投入前後の差分で検証する
         let unique = format!("unknown-type-{}-{}", module_path!(), line!());
         let stats = format!(r#"[{{"type":"{unique}","id":"X1","timestamp":1.0}}]"#);
-        let size_before = unknown_types_size_for_test();
-        // 100 回投入しても集合には 1 つだけ追加される
+        // このロックの間は他テストが UNKNOWN_TYPES に触れないため、
+        // clear 後に投入して集合のサイズで「1 つだけ追加される (警告は 1 回のみ)」を検証できる
+        clear_unknown_types_for_test();
         for _ in 0..100 {
             dispatch_stats(0, 0, "ch", &ids, &client, &stats, SystemTime::now());
         }
-        let size_after = unknown_types_size_for_test();
+        let unknown_types = unknown_types();
+        let set = unknown_types.lock().expect("UNKNOWN_TYPES mutex poisoned");
         assert_eq!(
-            size_after - size_before,
+            set.len(),
             1,
-            "同一未知 type は集合に 1 つだけ追加されるべき (before={}, after={})",
-            size_before,
-            size_after
+            "同一未知 type は集合に 1 つだけ追加されるべき"
+        );
+        assert!(
+            set.contains(&unique),
+            "この test 固有の unknown type が登録されるべき"
         );
     }
 

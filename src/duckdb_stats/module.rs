@@ -15,15 +15,6 @@ pub(crate) fn unknown_types() -> &'static Mutex<HashSet<String>> {
     UNKNOWN_TYPES.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// テスト用: 未知 type 集合のサイズを返す
-#[cfg(test)]
-pub(crate) fn unknown_types_size_for_test() -> usize {
-    unknown_types()
-        .lock()
-        .expect("UNKNOWN_TYPES mutex poisoned")
-        .len()
-}
-
 /// テスト用: 未知 type 集合をクリアする
 #[cfg(test)]
 pub(crate) fn clear_unknown_types_for_test() {

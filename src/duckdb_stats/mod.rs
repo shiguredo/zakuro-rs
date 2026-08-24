@@ -19,7 +19,7 @@ pub(crate) mod stats_json;
 pub(crate) mod writer;
 
 #[cfg(test)]
-pub(crate) use module::{clear_unknown_types_for_test, unknown_types_size_for_test};
+pub(crate) use module::clear_unknown_types_for_test;
 pub(crate) use rows::{
     ConnectionIds, InsertConnectionRow, InsertZakuroRow, InsertZakuroScenarioRow, WriteCommand,
 };
