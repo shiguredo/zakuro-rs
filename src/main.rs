@@ -20,8 +20,8 @@ use std::time::Duration;
 use shiguredo_openh264::Openh264Library;
 use shiguredo_webrtc::{log, rtc_log_info, rtc_log_warning};
 use sora_sdk::{
-    AdmConfig, JsonString, Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer,
-    SoraConnectionContext, SoraConnectionContextConfig, VideoCodecPreference,
+    AdmConfig, JsonString, Mp4SampleReader, Mp4VideoCapturer, SoraConnectionContext,
+    SoraConnectionContextConfig, VideoCodecPreference,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -460,7 +460,7 @@ async fn run_zakuro_instance(
         // MP4 パススルーコーデック能力の登録
         if let Some(ref reader) = mp4_reader {
             let mp4_capability: Box<dyn sora_sdk::VideoCodecCapability> =
-                Box::new(Mp4PassthroughVideoCodecCapability::new(reader.codec_type()));
+                Box::new(reader.passthrough_capability());
             let mp4_preference = VideoCodecPreference::new_from_capability(mp4_capability.as_ref());
             config.video_codec_preference.merge(&mp4_preference);
             config.video_codec_capabilities.push(mp4_capability);
