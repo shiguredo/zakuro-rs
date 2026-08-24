@@ -18,10 +18,11 @@ mod y4m_reader;
 use std::time::Duration;
 
 use shiguredo_openh264::Openh264Library;
-use shiguredo_webrtc::{log, rtc_log_info, rtc_log_warning};
+use shiguredo_webrtc::{VideoCodecType, log, rtc_log_info, rtc_log_warning};
 use sora_sdk::{
-    AdmConfig, JsonString, Mp4SampleReader, Mp4VideoCapturer, SoraConnectionContext,
-    SoraConnectionContextConfig, VideoCodecPreference,
+    AdmConfig, CodecDirection, JsonString, Mp4SampleReader, Mp4VideoCapturer,
+    SoraConnectionContext, SoraConnectionContextConfig, VideoCodecCapability,
+    VideoCodecImplementation, VideoCodecPreference,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -104,6 +105,160 @@ fn build_audio(args: &InstanceArgs) -> Option<sora_sdk::Audio> {
     }
 }
 
+/// `--vp8-encoder` 等に指定された CLI 値から sora_sdk の実装名と説明文を解決する
+///
+/// 対応表は C++ 版 zakuro (互換目標) の `util.cpp` 内の `video_codec_implementation_map`
+/// と同一である。値の許容は args.rs の `parse_video_codec_implementation` が行うので、
+/// 許容値の変更時はあちらと同期させること。戻り値は VideoCodecPreference への
+/// エントリ設定にそのまま使う。
+fn resolve_video_codec_implementation(value: &str) -> (&'static str, &'static str) {
+    match value {
+        "internal" => ("internal", "WebRTC built-in VideoCodecFactory"),
+        "cisco_openh264" => ("cisco_openh264", "OpenH264 Software Codec"),
+        "intel_vpl" => ("vpl", "Intel VPL"),
+        "nvidia_video_codec" => ("nvcodec", "NVIDIA NVENC/NVDEC"),
+        "amd_amf" => ("amf", "AMD AMF"),
+        // args.rs の parse_video_codec_implementation が 5 値のみ受理するため到達しない
+        _ => unreachable!("unexpected video codec implementation: {value}"),
+    }
+}
+
+/// コーデック個別のエンコーダー実装指定の spec リストを構築する
+///
+/// 起動時検証 (verify_video_encoder_implementation_specs) と instance 実行時の反映
+/// (run_zakuro_instance) の両方でこの対応表を使い、コーデックとオプション名の対応を
+/// 1 箇所に固定する。
+fn encoder_implementation_specs(
+    instance: &InstanceArgs,
+) -> [(&'static str, VideoCodecType, Option<&str>); 5] {
+    [
+        (
+            "vp8-encoder",
+            VideoCodecType::Vp8,
+            instance.vp8_encoder.as_deref(),
+        ),
+        (
+            "vp9-encoder",
+            VideoCodecType::Vp9,
+            instance.vp9_encoder.as_deref(),
+        ),
+        (
+            "av1-encoder",
+            VideoCodecType::Av1,
+            instance.av1_encoder.as_deref(),
+        ),
+        (
+            "h264-encoder",
+            VideoCodecType::H264,
+            instance.h264_encoder.as_deref(),
+        ),
+        (
+            "h265-encoder",
+            VideoCodecType::H265,
+            instance.h265_encoder.as_deref(),
+        ),
+    ]
+}
+
+/// コーデック別のエンコーダー実装指定を VideoCodecPreference に反映する
+///
+/// 指定された実装に対応する capability が登録されていない場合、または
+/// その capability が指定コーデックのエンコーダーをサポートしていない場合は
+/// エラーを返す (sora_sdk の validate_video_codec_preference が new_with_config で
+/// 失敗するが、原因が分かるエラーメッセージを出すために事前に検証する)。
+/// 反映対象は Encoder 方向のみで、Decoder 方向 (NopVideoDecoder 等) は変更しない。
+fn apply_video_encoder_implementation_specs(
+    preference: &mut VideoCodecPreference,
+    capabilities: &[Box<dyn VideoCodecCapability>],
+    specs: &[(&'static str, VideoCodecType, Option<&str>)],
+) -> Result<()> {
+    for (option_name, codec_type, value) in specs {
+        let Some(value) = *value else { continue };
+        let (implementation_name, description) = resolve_video_codec_implementation(value);
+        let implementation = VideoCodecImplementation::new(implementation_name, description);
+        // 実装名が capabilities に登録されていることと、指定コーデックのエンコーダーを
+        // 提供できることの両方を確認する
+        let capability = capabilities
+            .iter()
+            .find(|cap| cap.get_implementation().name() == implementation_name);
+        let reason = if value == "cisco_openh264" {
+            // Openh264VideoCodecCapability は Encoder 方向に必ず H.264 を提供するため、
+            // capability 存在 + H.264 指定で is_supported=false にはならない。
+            // また H.264 への cisco_openh264 指定は --openh264 未指定だと
+            // parse_args_from_argv が先に拒否するため、ここに到達するのは
+            // capability 登録済みの場合のみである (分岐は防御として残す)
+            if capability.is_none() && *codec_type == VideoCodecType::H264 {
+                "--openh264 を指定すると利用できます"
+            } else {
+                "OpenH264 は H.264 エンコーダーのみサポートします"
+            }
+        } else if capability.is_some() {
+            // 実装は存在するが指定コーデックのエンコーダーを提供していない
+            "この実装は指定したコーデックのエンコーダーをサポートしていません"
+        } else {
+            "対応するコーデック実装が登録されていません"
+        };
+        if !capability.is_some_and(|cap| cap.is_supported(CodecDirection::Encoder, *codec_type)) {
+            return Err(ErrorMessage::new(format!(
+                "--{option_name} に指定した実装 '{value}' は利用できません ({reason})"
+            ))
+            .into());
+        }
+        preference
+            .get_or_add(CodecDirection::Encoder, *codec_type, implementation.clone())
+            .set_implementation(implementation);
+    }
+    Ok(())
+}
+
+/// コーデック個別のエンコーダー実装指定を起動前に検証する
+///
+/// instance 起動後のコーデック検証エラーはインスタンス単位の警告でプロセスが継続するため、
+/// 起動前に検証して無効な指定はプロセス全体のエラーにする。
+/// capability の構成は run_zakuro_instance の構築ブロックと同じく
+/// (既定 + OpenH264 + NopVideoDecoder) である。MP4 パススルーの capability は
+/// エンコーダー実装指定と排他のため考える必要がない。
+fn verify_video_encoder_implementation_specs(
+    instances: &[InstanceArgs],
+    openh264_lib: Option<&Openh264Library>,
+) -> Result<()> {
+    // エンコーダー実装指定を持つ instance が 1 つも無ければ検証は不要
+    let has_spec = instances.iter().any(|i| {
+        i.vp8_encoder.is_some()
+            || i.vp9_encoder.is_some()
+            || i.av1_encoder.is_some()
+            || i.h264_encoder.is_some()
+            || i.h265_encoder.is_some()
+    });
+    if !has_spec {
+        return Ok(());
+    }
+    for instance in instances {
+        // 検証用の config は apply 後の preference を破棄するため、validate は行わない
+        let mut config = SoraConnectionContextConfig {
+            adm_config: AdmConfig::NoAudioDevice,
+            ..Default::default()
+        };
+        if let Some(lib) = openh264_lib {
+            let capability: Box<dyn sora_sdk::VideoCodecCapability> = Box::new(
+                openh264_video_codec::Openh264VideoCodecCapability::new((*lib).clone()),
+            );
+            config.video_codec_capabilities.push(capability);
+        }
+        if instance.role.wants_recv() {
+            let capability: Box<dyn sora_sdk::VideoCodecCapability> =
+                Box::new(nop_video_decoder::NopVideoDecoderCapability);
+            config.video_codec_capabilities.push(capability);
+        }
+        apply_video_encoder_implementation_specs(
+            &mut config.video_codec_preference,
+            &config.video_codec_capabilities,
+            &encoder_implementation_specs(instance),
+        )?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     // `FakeAudioCapturer` などの libwebrtc 由来オブジェクトが !Send のため、
     // instance ごとの future は LocalSet 上で `spawn_local` する必要がある
@@ -142,6 +297,11 @@ async fn async_main() -> Result<()> {
     // OpenH264 ランタイムバージョン (ロード後に取得可能、zakuro テーブル用)
     let openh264_runtime_version: Option<String> =
         openh264_lib.as_ref().map(|lib| lib.runtime_version());
+
+    // コーデック個別のエンコーダー実装指定の事前検証
+    // (instance 起動後の検証エラーはインスタンス単位の警告でプロセスが継続するため、
+    //  起動前に検証して無効な指定はプロセス全体のエラーにする)
+    verify_video_encoder_implementation_specs(&instance_args_vec, openh264_lib.as_ref())?;
 
     // mTLS PEM の読み込み (プロセス全体で 1 回)
     let client_cert_pem: Option<String> = if let Some(ref path) = common.client_cert {
@@ -485,6 +645,13 @@ async fn run_zakuro_instance(
             config.video_codec_capabilities.push(nop_capability);
         }
 
+        // コーデック個別のエンコーダー実装指定 (--vp8-encoder 等) の反映
+        apply_video_encoder_implementation_specs(
+            &mut config.video_codec_preference,
+            &config.video_codec_capabilities,
+            &encoder_implementation_specs(&instance),
+        )?;
+
         (config, pending)
     };
 
@@ -693,4 +860,140 @@ async fn run_zakuro_instance(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nop_video_decoder::NopVideoDecoderCapability;
+    use sora_sdk::InternalVideoCodecCapability;
+
+    #[test]
+    fn resolve_video_codec_implementation_maps_cpp_values() {
+        // CLI 値が sora_sdk の実装名に解決されることを確認する
+        let cases: [(&str, &str, &str); 5] = [
+            ("internal", "internal", "WebRTC built-in VideoCodecFactory"),
+            (
+                "cisco_openh264",
+                "cisco_openh264",
+                "OpenH264 Software Codec",
+            ),
+            ("intel_vpl", "vpl", "Intel VPL"),
+            ("nvidia_video_codec", "nvcodec", "NVIDIA NVENC/NVDEC"),
+            ("amd_amf", "amf", "AMD AMF"),
+        ];
+        for (cli_value, expected_name, expected_description) in cases {
+            let (name, description) = resolve_video_codec_implementation(cli_value);
+            assert_eq!(name, expected_name, "CLI 値 '{cli_value}' の実装名が異なる");
+            assert_eq!(
+                description, expected_description,
+                "CLI 値 '{cli_value}' の説明文が異なる"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_encoder_spec_sets_internal_implementation() {
+        // capabilities に internal がある場合、指定した実装が Encoder 方向へ反映される
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> =
+            vec![Box::new(InternalVideoCodecCapability::new())];
+        let mut preference = VideoCodecPreference::default();
+        apply_video_encoder_implementation_specs(
+            &mut preference,
+            &capabilities,
+            &[("vp8-encoder", VideoCodecType::Vp8, Some("internal"))],
+        )
+        .expect("internal は capabilities にあるので適用できるべき");
+        let codec = preference
+            .find(CodecDirection::Encoder, VideoCodecType::Vp8)
+            .expect("vp8 encoder エントリが追加されるべき");
+        assert_eq!(
+            codec.implementation().name(),
+            "internal",
+            "指定した実装が preference に反映されるべき"
+        );
+        assert!(
+            preference
+                .find(CodecDirection::Decoder, VideoCodecType::Vp8)
+                .is_none(),
+            "Decoder 方向には変更を加えないべき"
+        );
+    }
+
+    #[test]
+    fn apply_encoder_spec_rejects_cisco_openh264_without_lib() {
+        // OpenH264 ライブラリ未ロード時は cisco_openh264 の capability が無くエラーになる
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> =
+            vec![Box::new(InternalVideoCodecCapability::new())];
+        let mut preference = VideoCodecPreference::default();
+        let err = apply_video_encoder_implementation_specs(
+            &mut preference,
+            &capabilities,
+            &[("h264-encoder", VideoCodecType::H264, Some("cisco_openh264"))],
+        )
+        .expect_err("OpenH264 未ロード時の cisco_openh264 指定は拒否されるべき");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--openh264"),
+            "エラーメッセージに --openh264 の案内が含まれていない: {msg}"
+        );
+    }
+
+    #[test]
+    fn apply_encoder_spec_rejects_cisco_openh264_for_non_h264_codec() {
+        // OpenH264 は H.264 エンコーダーのみ提供するため、他コーデックへの指定は拒否される
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> =
+            vec![Box::new(InternalVideoCodecCapability::new())];
+        let mut preference = VideoCodecPreference::default();
+        let err = apply_video_encoder_implementation_specs(
+            &mut preference,
+            &capabilities,
+            &[("vp9-encoder", VideoCodecType::Vp9, Some("cisco_openh264"))],
+        )
+        .expect_err("VP9 への cisco_openh264 指定は拒否されるべき");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("H.264"),
+            "OpenH264 が H.264 のみに対応する旨が含まれていない: {msg}"
+        );
+    }
+
+    #[test]
+    fn apply_encoder_spec_ignores_none_values() {
+        // 未指定 (None) の場合はエラーにもならず、エントリも追加されない
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> =
+            vec![Box::new(InternalVideoCodecCapability::new())];
+        let mut preference = VideoCodecPreference::default();
+        apply_video_encoder_implementation_specs(
+            &mut preference,
+            &capabilities,
+            &[("vp8-encoder", VideoCodecType::Vp8, None)],
+        )
+        .expect("None の指定はエラーになるべきではない");
+        assert!(
+            preference
+                .find(CodecDirection::Encoder, VideoCodecType::Vp8)
+                .is_none(),
+            "None の指定ではエントリを追加しないべき"
+        );
+    }
+
+    #[test]
+    fn apply_encoder_spec_rejects_unknown_implementation() {
+        // capabilities に無い実装名はエラーになる (ハードウェア系は args で拒否済みだが防御として)
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> =
+            vec![Box::new(NopVideoDecoderCapability)];
+        let mut preference = VideoCodecPreference::default();
+        let err = apply_video_encoder_implementation_specs(
+            &mut preference,
+            &capabilities,
+            &[("h264-encoder", VideoCodecType::H264, Some("internal"))],
+        )
+        .expect_err("capabilities に無い実装は拒否されるべき");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("h264-encoder"),
+            "エラーメッセージにオプション名が含まれていない: {msg}"
+        );
+    }
 }

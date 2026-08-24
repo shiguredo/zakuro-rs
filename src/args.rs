@@ -52,6 +52,11 @@ pub(crate) struct InstanceArgs {
     pub(crate) input_wav: Option<String>,
     pub(crate) video_codec_type: Option<String>,
     pub(crate) video_bit_rate: Option<u32>,
+    pub(crate) vp8_encoder: Option<String>,
+    pub(crate) vp9_encoder: Option<String>,
+    pub(crate) av1_encoder: Option<String>,
+    pub(crate) h264_encoder: Option<String>,
+    pub(crate) h265_encoder: Option<String>,
     pub(crate) audio: bool,
     pub(crate) audio_codec_type: Option<String>,
     pub(crate) audio_bit_rate: Option<u32>,
@@ -156,6 +161,27 @@ pub(crate) fn parse_video_codec_type(s: &str) -> Option<VideoCodecType> {
         "h264" => Some(VideoCodecType::H264),
         "h265" => Some(VideoCodecType::H265),
         _ => None,
+    }
+}
+
+/// `--vp8-encoder` 等のコーデック実装の文字列を検証する
+///
+/// 許容値は C++ 版 zakuro (互換目標) の `util.cpp` 内の `video_codec_implementation_map`
+/// と揃える。C++ 版は CLI11 の `ignore_case` で大文字小文字を許容するが、
+/// zakuro-rs は他の列挙オプションと同様に小文字のみ受理する。
+/// 将来 C++ 版に実装が追加された場合は、本関数と main.rs の
+/// `resolve_video_codec_implementation` を同期させること。
+fn parse_video_codec_implementation(
+    option_name: &str,
+    value: &str,
+) -> std::result::Result<String, String> {
+    match value {
+        "internal" | "cisco_openh264" | "intel_vpl" | "nvidia_video_codec" | "amd_amf" => {
+            Ok(value.to_string())
+        }
+        _ => Err(format!(
+            "--{option_name} は internal/cisco_openh264/intel_vpl/nvidia_video_codec/amd_amf のいずれかで指定してください"
+        )),
     }
 }
 
@@ -911,6 +937,31 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<u32>())?;
 
+    let vp8_encoder: Option<String> = noargs::opt("vp8-encoder")
+        .doc("VP8 encoder implementation (internal,cisco_openh264,intel_vpl,nvidia_video_codec,amd_amf)")
+        .take(&mut args)
+        .present_and_then(|o| parse_video_codec_implementation("vp8-encoder", o.value()))?;
+
+    let vp9_encoder: Option<String> = noargs::opt("vp9-encoder")
+        .doc("VP9 encoder implementation (internal,cisco_openh264,intel_vpl,nvidia_video_codec,amd_amf)")
+        .take(&mut args)
+        .present_and_then(|o| parse_video_codec_implementation("vp9-encoder", o.value()))?;
+
+    let av1_encoder: Option<String> = noargs::opt("av1-encoder")
+        .doc("AV1 encoder implementation (internal,cisco_openh264,intel_vpl,nvidia_video_codec,amd_amf)")
+        .take(&mut args)
+        .present_and_then(|o| parse_video_codec_implementation("av1-encoder", o.value()))?;
+
+    let h264_encoder: Option<String> = noargs::opt("h264-encoder")
+        .doc("H.264 encoder implementation (internal,cisco_openh264,intel_vpl,nvidia_video_codec,amd_amf)")
+        .take(&mut args)
+        .present_and_then(|o| parse_video_codec_implementation("h264-encoder", o.value()))?;
+
+    let h265_encoder: Option<String> = noargs::opt("h265-encoder")
+        .doc("H.265 encoder implementation (internal,cisco_openh264,intel_vpl,nvidia_video_codec,amd_amf)")
+        .take(&mut args)
+        .present_and_then(|o| parse_video_codec_implementation("h265-encoder", o.value()))?;
+
     let audio: bool = noargs::opt("sora-audio")
         .doc("音声の有効/無効 (true/false, デフォルト: true)")
         .take(&mut args)
@@ -1035,6 +1086,11 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
                 input_wav,
                 video_codec_type,
                 video_bit_rate,
+                vp8_encoder,
+                vp9_encoder,
+                av1_encoder,
+                h264_encoder,
+                h265_encoder,
                 audio,
                 audio_codec_type,
                 audio_bit_rate,
@@ -1062,6 +1118,46 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
     }
     if framerate == 0 || framerate > 60 {
         return Err(ErrorMessage::new("framerate は 1 から 60 の範囲で指定してください").into());
+    }
+    // ハードウェア系のエンコーダー実装は sora_sdk の features を有効化しないと機能しないため
+    // 本バージョンでは利用不可として起動時にエラーにする (C++ 版との差として明示する)
+    // 本バージョンで利用できる実装は internal / cisco_openh264 の 2 値のみであり、
+    // この一覧を変更するときは main.rs の resolve_video_codec_implementation と同期させること
+    for (option_name, value, supports_cisco_openh264) in [
+        ("vp8-encoder", vp8_encoder.as_deref(), false),
+        ("vp9-encoder", vp9_encoder.as_deref(), false),
+        ("av1-encoder", av1_encoder.as_deref(), false),
+        ("h264-encoder", h264_encoder.as_deref(), true),
+        ("h265-encoder", h265_encoder.as_deref(), false),
+    ] {
+        if let Some(v) = value {
+            if !matches!(v, "internal" | "cisco_openh264") {
+                return Err(ErrorMessage::new(format!(
+                    "--{option_name} に指定した実装 '{v}' は利用できません (ハードウェアエンコーダーは sora_sdk の機能未対応です)。利用できる実装は internal / cisco_openh264 です"
+                ))
+                .into());
+            }
+            // OpenH264 は H.264 エンコーダーのみ提供する (C++ 版と同じ)
+            if v == "cisco_openh264" && !supports_cisco_openh264 {
+                return Err(ErrorMessage::new(format!(
+                    "--{option_name} に指定した実装 'cisco_openh264' は利用できません (OpenH264 は H.264 エンコーダーのみサポートします)"
+                ))
+                .into());
+            }
+        }
+    }
+    // MP4 パススルーはエンコード済み映像をそのまま送るため、エンコーダー実装の指定とは排他にする
+    if input_mp4.is_some()
+        && (vp8_encoder.is_some()
+            || vp9_encoder.is_some()
+            || av1_encoder.is_some()
+            || h264_encoder.is_some()
+            || h265_encoder.is_some())
+    {
+        return Err(ErrorMessage::new(
+            "--input-mp4 と --vp8-encoder 等のエンコーダー実装指定は同時に指定できません",
+        )
+        .into());
     }
     if sandstorm && input_y4m.is_some() {
         return Err(ErrorMessage::new("--sandstorm と --input-y4m は同時に指定できません").into());
@@ -1160,6 +1256,11 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
             input_wav,
             video_codec_type,
             video_bit_rate,
+            vp8_encoder,
+            vp9_encoder,
+            av1_encoder,
+            h264_encoder,
+            h265_encoder,
             audio,
             audio_codec_type,
             audio_bit_rate,
@@ -1199,6 +1300,17 @@ fn parse_args_from_argv(
         merged.extend(instance_cli_argv.clone());
         let (instance, _help_instance) = parse_instance_args(program_name, merged)?;
         instances.push(instance);
+    }
+
+    // --h264-encoder cisco_openh264 の指定は OpenH264 ライブラリのロードが必要
+    // (capability が登録されないとシグナリング接続後に失敗するため、起動時にエラーにする)
+    for instance in &instances {
+        if instance.h264_encoder.as_deref() == Some("cisco_openh264") && common.openh264.is_none() {
+            return Err(ErrorMessage::new(
+                "--h264-encoder に指定した実装 'cisco_openh264' を利用するには --openh264 の指定が必要です",
+            )
+            .into());
+        }
     }
 
     Ok((common, instances))
@@ -2046,6 +2158,179 @@ mod tests {
         assert!(
             msg.contains("log-level"),
             "エラーメッセージに 'log-level' が含まれていない: {msg}"
+        );
+    }
+
+    // ---- コーデックエンコーダー実装指定 (--vp8-encoder 等) ----
+
+    #[test]
+    fn video_codec_implementation_accepts_cpp_compatible_values() {
+        // C++ 版 zakuro の video_codec_implementation_map と同じ 5 値を小文字で受理する
+        for value in [
+            "internal",
+            "cisco_openh264",
+            "intel_vpl",
+            "nvidia_video_codec",
+            "amd_amf",
+        ] {
+            let parsed = parse_video_codec_implementation("vp8-encoder", value)
+                .unwrap_or_else(|e| panic!("有効な値 '{value}' を拒否してはならない: {e}"));
+            assert_eq!(parsed, value, "値 '{value}' がそのまま返るべき");
+        }
+    }
+
+    #[test]
+    fn video_codec_implementation_rejects_lowercase_only_violations() {
+        // 大文字の値は拒否する (未知値の拒否は video_codec_implementation_rejects_unknown_value が確認する)
+        let err = parse_video_codec_implementation("vp8-encoder", "INTEL_VPL")
+            .expect_err("大文字を許容してはならない");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("vp8-encoder"),
+            "エラーメッセージにオプション名が含まれていない: {msg}"
+        );
+        assert!(
+            msg.contains("internal/cisco_openh264/intel_vpl/nvidia_video_codec/amd_amf"),
+            "許容値を列挙したエラーメッセージが必要: {msg}"
+        );
+    }
+
+    #[test]
+    fn video_codec_implementation_rejects_unknown_value() {
+        // 未知値は拒否する
+        let err = parse_video_codec_implementation("h264-encoder", "jpeg")
+            .expect_err("未知の実装名を許容してはならない");
+        assert!(err.to_string().contains("h264-encoder"));
+    }
+
+    #[test]
+    fn parse_args_from_argv_accepts_internal_encoder_implementation() {
+        // --vp8-encoder internal は InstanceArgs に反映される
+        let mut tpl = minimal_sora_argv();
+        tpl.extend(["--vp8-encoder".into(), "internal".into()]);
+        let (_common, instances) =
+            parse_args_from_argv("zakuro", Vec::new(), Vec::new(), vec![tpl], Vec::new())
+                .expect("有効な argv のパースに失敗してはならない");
+        assert_eq!(
+            instances[0].vp8_encoder.as_deref(),
+            Some("internal"),
+            "vp8_encoder に internal が反映されるべき"
+        );
+    }
+
+    #[test]
+    fn parse_args_from_argv_rejects_hardware_encoder_implementation() {
+        // ハードウェア系の実装は sora_sdk の機能未対応のため拒否する
+        for (key, value) in [
+            ("vp8-encoder", "intel_vpl"),
+            ("vp9-encoder", "nvidia_video_codec"),
+            ("av1-encoder", "amd_amf"),
+            ("h264-encoder", "intel_vpl"),
+            ("h265-encoder", "nvidia_video_codec"),
+        ] {
+            let mut tpl = minimal_sora_argv();
+            tpl.extend([format!("--{key}"), value.into()]);
+            let err = parse_args_from_argv("zakuro", Vec::new(), Vec::new(), vec![tpl], Vec::new())
+                .expect_err(&format!("{key}={value} を許容してはならない"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains(key),
+                "エラーメッセージにオプション名 '{key}' が含まれていない: {msg}"
+            );
+            assert!(
+                msg.contains("利用できません"),
+                "エラーメッセージに『利用できません』の文言が含まれていない: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_args_from_argv_rejects_encoder_implementation_with_input_mp4() {
+        // --input-mp4 はエンコード済み映像パススルーのためエンコーダー実装指定と排他
+        let mut tpl = minimal_sora_argv();
+        tpl.extend([
+            "--input-mp4".into(),
+            "video.mp4".into(),
+            "--sora-video-codec-type".into(),
+            "h264".into(),
+            "--sora-video-bit-rate".into(),
+            "1000".into(),
+            "--h264-encoder".into(),
+            "internal".into(),
+        ]);
+        let err = parse_args_from_argv("zakuro", Vec::new(), Vec::new(), vec![tpl], Vec::new())
+            .expect_err("--input-mp4 との併用を許容してはならない");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--input-mp4"),
+            "エラーメッセージに --input-mp4 が含まれていない: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_args_from_argv_rejects_cisco_openh264_for_non_h264_codec() {
+        // cisco_openh264 は H.264 エンコーダーのみ提供するため、他コーデックへの指定は拒否する
+        for key in ["vp8-encoder", "vp9-encoder", "av1-encoder", "h265-encoder"] {
+            let mut tpl = minimal_sora_argv();
+            tpl.extend([format!("--{key}"), "cisco_openh264".into()]);
+            let err = parse_args_from_argv("zakuro", Vec::new(), Vec::new(), vec![tpl], Vec::new())
+                .expect_err(&format!("{key}=cisco_openh264 を許容してはならない"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("H.264"),
+                "OpenH264 が H.264 のみに対応する旨が含まれていない: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_cli_argv_routes_encoder_implementation_keys_to_instance() {
+        // --vp8-encoder はインスタンス側の値付きオプションとして振り分けられる
+        let cli: Vec<String> = vec!["--vp8-encoder".into(), "internal".into()];
+        let (common, instance) = split_cli_argv(cli).expect("正常な CLI は分割できること");
+        assert!(common.is_empty(), "common 側には振り分けられないべき");
+        assert!(
+            instance
+                .windows(2)
+                .any(|w| w[0] == "--vp8-encoder" && w[1] == "internal"),
+            "instance 側に --vp8-encoder が振り分けられていない"
+        );
+    }
+
+    #[test]
+    fn parse_args_from_argv_requires_openh264_for_cisco_openh264_encoder() {
+        // --h264-encoder cisco_openh264 は --openh264 の指定が無いと起動時エラーになる
+        let mut tpl = minimal_sora_argv();
+        tpl.extend(["--h264-encoder".into(), "cisco_openh264".into()]);
+        let err = parse_args_from_argv("zakuro", Vec::new(), Vec::new(), vec![tpl], Vec::new())
+            .expect_err("--openh264 未指定の cisco_openh264 指定を許容してはならない");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--openh264"),
+            "エラーメッセージに --openh264 の案内が含まれていない: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_args_from_argv_accepts_cisco_openh264_encoder_with_openh264() {
+        // --h264-encoder cisco_openh264 は --openh264 が指定されていれば受理する
+        let dir = tempfile::TempDir::new().expect("一時ディレクトリの作成に失敗");
+        let lib = dir.path().join("libopenh264.dylib");
+        std::fs::write(&lib, b"dummy").expect("一時ファイルの書き込みに失敗");
+        let mut tpl = minimal_sora_argv();
+        tpl.extend(["--h264-encoder".into(), "cisco_openh264".into()]);
+        let (_common, instances) = parse_args_from_argv(
+            "zakuro",
+            vec!["--openh264".into(), lib.to_string_lossy().to_string()],
+            Vec::new(),
+            vec![tpl],
+            Vec::new(),
+        )
+        .expect("--openh264 指定時の cisco_openh264 は受理されるべき");
+        assert_eq!(
+            instances[0].h264_encoder.as_deref(),
+            Some("cisco_openh264"),
+            "h264_encoder に cisco_openh264 が反映されるべき"
         );
     }
 }

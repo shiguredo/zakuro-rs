@@ -277,6 +277,8 @@ impl VideoEncoderHandler for Openh264Encoder {
 
     fn get_encoder_info(&mut self) -> VideoEncoderEncoderInfo {
         let mut info = VideoEncoderEncoderInfo::new();
+        // この名前は WebRTC 統計 (encoderImplementation) に載る情報であり、
+        // capability 照合用の実装名 (cisco_openh264) とは役割が異なるため変えない
         info.set_implementation_name("openh264");
         info
     }
@@ -297,7 +299,9 @@ impl Openh264VideoCodecCapability {
 
 impl VideoCodecCapability for Openh264VideoCodecCapability {
     fn get_implementation(&self) -> VideoCodecImplementation {
-        VideoCodecImplementation::new("openh264", "OpenH264 Software Codec")
+        // 実装名は C++ 版 zakuro の `cisco_openh264` (--h264-encoder の許容値) と揃える。
+        // これにより --h264-encoder cisco_openh264 での実装指定が照合できる。
+        VideoCodecImplementation::new("cisco_openh264", "OpenH264 Software Codec")
     }
 
     fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {

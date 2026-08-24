@@ -635,6 +635,21 @@ fn instance_json(i: &crate::args::InstanceArgs) -> impl DisplayJson + '_ {
             if let Some(v) = i.video_bit_rate {
                 f.member("sora_video_bit_rate", v)?;
             }
+            if let Some(ref v) = i.vp8_encoder {
+                f.member("vp8_encoder", v)?;
+            }
+            if let Some(ref v) = i.vp9_encoder {
+                f.member("vp9_encoder", v)?;
+            }
+            if let Some(ref v) = i.av1_encoder {
+                f.member("av1_encoder", v)?;
+            }
+            if let Some(ref v) = i.h264_encoder {
+                f.member("h264_encoder", v)?;
+            }
+            if let Some(ref v) = i.h265_encoder {
+                f.member("h265_encoder", v)?;
+            }
             f.member("audio", i.audio)?;
             if let Some(ref v) = i.audio_codec_type {
                 f.member("sora_audio_codec_type", v)?;
@@ -835,6 +850,11 @@ mod tests {
             input_wav: None,
             video_codec_type: None,
             video_bit_rate: None,
+            vp8_encoder: None,
+            vp9_encoder: None,
+            av1_encoder: None,
+            h264_encoder: None,
+            h265_encoder: None,
             audio: true,
             audio_codec_type: None,
             audio_bit_rate: None,
@@ -911,6 +931,11 @@ mod tests {
             input_wav: None,
             video_codec_type: None,
             video_bit_rate: None,
+            vp8_encoder: None,
+            vp9_encoder: None,
+            av1_encoder: None,
+            h264_encoder: None,
+            h265_encoder: None,
             audio: true,
             audio_codec_type: None,
             audio_bit_rate: None,
@@ -947,6 +972,83 @@ mod tests {
         assert!(
             !json.contains(r#""log_level":"Info""#),
             "log_level に Debug 形式 (PascalCase) を使ってはならない"
+        );
+    }
+
+    #[test]
+    fn build_config_json_includes_encoder_implementation_fields() {
+        // エンコーダー実装指定が値付きで config_json に含まれる
+        use crate::args::{CommonArgs, InstanceArgs};
+        use sora_sdk::Role;
+        let common = CommonArgs {
+            instance_hatch_rate: 1.0,
+            http_host: None,
+            http_port: None,
+            openh264: None,
+            insecure: false,
+            client_cert: None,
+            client_key: None,
+            duckdb_output_dir: ".".into(),
+            duckdb_interval: 1.0,
+            no_duckdb_output: false,
+            log_level: log::Severity::Info,
+        };
+        let inst = InstanceArgs {
+            signaling_urls: vec!["wss://example.com/".into()],
+            channel_id: "ch".into(),
+            role: Role::SendOnly,
+            client_id: None,
+            bundle_id: None,
+            metadata: None,
+            signaling_notify_metadata: None,
+            vcs: 1,
+            vcs_hatch_rate: 1.0,
+            duration: None,
+            repeat_interval: None,
+            max_retry: 0,
+            retry_interval: 60.0,
+            no_video_device: false,
+            no_audio_device: false,
+            video_input_device: None,
+            resolution: (640, 480),
+            framerate: 30,
+            sandstorm: false,
+            input_y4m: None,
+            input_mp4: None,
+            input_wav: None,
+            video_codec_type: None,
+            video_bit_rate: None,
+            vp8_encoder: Some("internal".into()),
+            vp9_encoder: None,
+            av1_encoder: None,
+            h264_encoder: Some("cisco_openh264".into()),
+            h265_encoder: None,
+            audio: true,
+            audio_codec_type: None,
+            audio_bit_rate: None,
+            data_channels: None,
+            data_channel_signaling: None,
+            ignore_disconnect_websocket: None,
+            disconnect_wait_timeout: None,
+            simulcast: None,
+            simulcast_request_rid: None,
+            spotlight: None,
+            spotlight_focus_rid: None,
+            spotlight_unfocus_rid: None,
+            scenario: None,
+        };
+        let json = build_config_json(&common, &[inst]);
+        assert!(
+            json.contains(r#""vp8_encoder":"internal""#),
+            "vp8_encoder が config_json に含まれるべき: {json}"
+        );
+        assert!(
+            json.contains(r#""h264_encoder":"cisco_openh264""#),
+            "h264_encoder が config_json に含まれるべき: {json}"
+        );
+        assert!(
+            !json.contains(r#""vp9_encoder""#),
+            "None の vp9_encoder は省かれるべき: {json}"
         );
     }
 
@@ -993,6 +1095,11 @@ mod tests {
             input_wav: None,
             video_codec_type: None,
             video_bit_rate: None,
+            vp8_encoder: None,
+            vp9_encoder: None,
+            av1_encoder: None,
+            h264_encoder: None,
+            h265_encoder: None,
             audio: true,
             audio_codec_type: None,
             audio_bit_rate: None,
