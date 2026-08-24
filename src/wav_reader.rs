@@ -175,7 +175,7 @@ fn parse_wav(buf: &[u8]) -> Result<ParsedWav> {
     // データを i16 サンプルにデコード (リトルエンディアン)
     // 末尾の余り 1 バイトは破棄 (壊れた WAV 防御)
     let mut samples: Vec<i16> = Vec::new();
-    for chunk in data.chunks_exact(2) {
+    for chunk in data.as_chunks::<2>().0 {
         samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
     }
 
