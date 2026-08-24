@@ -1,7 +1,7 @@
 # ビデオコーデック能力表示 (`--show-video-codec-capability`) を追加する
 
 - Created: 2026-08-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-25
 - Branch: feature/add-show-video-codec-capability
 - Polished: 2026-08-24
 
@@ -38,3 +38,19 @@ zakuro (C++) では `--show-video-codec-capability` で利用可能なコーデ�
 - `--show-video-codec-capability` が `--help` に表示される
 - 単独起動 (`zakuro --show-video-codec-capability`) で、利用可能なコーデック実装と Encoder / Decoder 対応が標準出力に表示され、表示後に終了する
 - `--openh264 <path>` と併用すると OpenH264 の能力が表示に含まれる
+
+## 解決方法
+
+- `args.rs` の `parse_args()` に pre-parse を追加し、`--show-video-codec-capability` を検出して
+  capability 群を構築・表示後に `exit(0)` で終了する:
+  - 表示対象判定は CLI の `--openh264` / `--input-mp4` / `--sora-role` (受信ロール時は NopVideoDecoder) のみを参照する (JSONC は対象外。JSONC 内での指定は静かに無視せず明示エラー)
+  - OpenH264 のロード失敗・MP4 の読み込み失敗は警告ログを出して対象から除外し、表示は継続する
+  - `--help` 併用時はヘルプ表示を優先する
+  - `--key=value` / `--key value` の両形式と値欠落 (警告のみ) に対応する
+- `video_codec_capability.rs` を新設し、`Engine: <実装名> (<説明文>)` / `  - <CODEC> Encoder|Decoder` /
+  `    - Codec Parameters: <key>=<value> ...` の書式で標準出力に表示する:
+  - コーデック対応判定は `get_supported_formats()` の名前一致で行う (C++ 版 zakuro のフォーマット名存在判定と整合)
+  - フォーマットのパラメータはキー名昇順にソートし、フォーマット列もパラメータ文字列で整列する
+- `CommonArgs` の noargs フラグ定義・`is_common_key()` / `is_flag()` への登録により `--help` に表示する
+- テストを追加する: `args.rs` に pre-parse 走査の単体テスト 4 件とキー登録確認 2 件、`video_codec_capability.rs` に表示生成の単体テスト 4 件
+- `docs/ZAKURO.md` の実装状況チェックリストを更新する
