@@ -1,7 +1,7 @@
 # コーデック個別エンコーダー指定 (`--vp8-encoder` 等) を追加する
 
 - Created: 2026-08-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-24
 - Branch: feature/add-video-codec-implementation-selection
 - Polished: 2026-08-24
 
@@ -38,3 +38,12 @@ zakuro (C++) では `--vp8-encoder` / `--vp9-encoder` / `--av1-encoder` / `--h26
 - 5 つのオプションが `--help` に表示され、C++ 版と同じ許容値 (小文字のみ) を取る
 - `--h264-encoder cisco_openh264 --openh264 <path>` のような指定で、指定した実装のエンコーダが利用される (ログで確認可能)
 - `--vp8-encoder intel_vpl` のような利用不可の値、または `--openh264` 未指定時の `--h264-encoder cisco_openh264` を指定すると、起動時にエラーメッセージ付きで終了する
+
+## 解決方法
+
+- `src/args.rs` に `--vp8-encoder` / `--vp9-encoder` / `--av1-encoder` / `--h264-encoder` / `--h265-encoder` (値付き `Option<String>`) を追加し、C++ 版 zakuro と同じ許容値 (internal / cisco_openh264 / intel_vpl / nvidia_video_codec / amd_amf) を小文字のみで受理する
+- `src/main.rs` に CLI 値から sora_sdk の実装名を解決する対応表と、指定されたコーデックの Encoder 方向のみ `VideoCodecPreference` を差し替える反映処理を追加する
+- 起動前に事前検証を行い、ハードウェア系 3 値 (sora_sdk の features 未対応)、OpenH264 の H.264 以外への指定、`--openh264` 未指定時の `cisco_openh264`、MP4 パススルーとの併用はエラーメッセージ付きで終了にする
+- `src/openh264_video_codec.rs` の capability 実装名を `cisco_openh264` に変更し、C++ 版の許容値と照合できるようにする
+- `src/duckdb_stats/stats_json.rs` の config_json に新規オプションを出力する
+- 単体テストを追加する (`src/args.rs`: 許容値と検証、`src/main.rs`: 実装名の解決と反映・エラー経路、`src/duckdb_stats/stats_json.rs`: config_json の値付き出力)
