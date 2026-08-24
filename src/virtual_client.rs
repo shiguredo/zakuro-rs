@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime};
 
 use shiguredo_webrtc::{VideoTrackSource, rtc_log_info, rtc_log_warning};
 use sora_sdk::{
-    ConnectDataChannel, JsonString, Role, SignalingDirection, SoraConnection,
+    ConnectDataChannel, JsonString, Mp4VideoCapturer, Role, SignalingDirection, SoraConnection,
     SoraConnectionContext, SoraConnectionEventHandler,
 };
 use tokio::sync::mpsc;
@@ -60,15 +60,26 @@ enum DisconnectReason {
     Unexpected(sora_sdk::Result<()>),
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn run(
     instance_id: u32,
     vc_id: u32,
     context: Arc<SoraConnectionContext>,
     video_source: Option<VideoTrackSource>,
+    // MP4 パススルー時にのみ Some。
+    // shiguredo_webrtc の MP4 用 VideoFrameBuffer はスレッド固定チェックがあるため、
+    // 1 つの video_source を複数 VC で共有すると `video_frame_buffer callback called from multiple threads`
+    // の panic に至る。VC ごとに専用の Mp4VideoCapturer を持ち、そのライフタイムを
+    // この関数のスコープで受け取ることでフィーダースレッドを VC と同時終了させる。
+    // 参考: sora_sdk 2026.1.0-canary.21 / shiguredo_webrtc 0.150.3。
+    mp4_capturer: Option<Mp4VideoCapturer>,
     config: VirtualClientConfig,
     token: CancellationToken,
     stats_tx: mpsc::Sender<StatsEvent>,
 ) {
+    // capturer は VC のライフタイム全体で保持する必要がある
+    // (フィーダースレッドが停止すると video_source へのフレーム供給が止まるため)。
+    let _mp4_capturer = mp4_capturer;
     let mut retry_count: u32 = 0;
     let mut scenario_player = config
         .scenario
