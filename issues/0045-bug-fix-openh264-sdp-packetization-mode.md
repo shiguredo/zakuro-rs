@@ -3,7 +3,7 @@
 - Created: 2026-08-24
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-openh264-sdp-packetization-mode
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-08-25
 
 ## 目的
 
@@ -14,7 +14,6 @@ OpenH264 エンコーダーの SDP format 広告が packetization-mode 付きで
 - `src/openh264_video_codec.rs` の `Openh264VideoCodecCapability::get_supported_formats()` は Encoder 方向に `SdpVideoFormat::new("H264")` の bare 形式のみを返す (パラメータなし = mode 0 相当の広告)
 - `Openh264Encoder::encode()` は `CodecSpecificInfo::set_h264_packetization_mode(NonInterleaved)` (mode 1) のコーデック情報を出力する
 - sora_sdk の `video_codecs/openh264.rs` の `openh264_supported_formats()` は `packetization-mode=1` / `level-asymmetry-allowed=1` / `ScalabilityMode::L1T1` を広告する
-- Sora サーバーは SDP の fmtp に含まれるパラメータを確認して映像を受信するため、広告と実際の出力の不整合は最悪の場合パケット化モードの解釈に影響する
 
 ## 設計方針
 
@@ -24,4 +23,4 @@ OpenH264 エンコーダーの SDP format 広告が packetization-mode 付きで
 ## 完了条件
 
 - OpenH264 エンコーダーの SDP format 広告に `packetization-mode=1` が含まれる
-- `--h264-encoder cisco_openh264 --openh264 <path>` のシグナリングで、offer の SDP (fmtp) に `packetization-mode=1` が入り、映像が正常にエンコード・送信される
+- `--sora-video-codec-type h264 --h264-encoder cisco_openh264 --openh264 <path>` のシグナリングで、answer (交渉後の SDP) の fmtp に `packetization-mode=1` が入り、映像が正常にエンコード・送信される
