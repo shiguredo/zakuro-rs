@@ -1,13 +1,15 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use shiguredo_openh264::{EncodeOptions, EncoderConfig, FrameType, Openh264Library};
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EnvironmentRef, H264PacketizationMode,
-    SdpVideoFormat, SdpVideoFormatRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
-    VideoEncoder, VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
-    VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
-    VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef, rtc_log_info, rtc_log_warning,
+    ScalabilityMode, SdpVideoFormat, SdpVideoFormatRef, VideoCodecStatus, VideoCodecType,
+    VideoDecoder, VideoEncoder, VideoEncoderEncodedImageCallbackPtr,
+    VideoEncoderEncodedImageCallbackRef, VideoEncoderEncoderInfo, VideoEncoderHandler,
+    VideoEncoderRateControlParametersRef, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
+    rtc_log_info, rtc_log_warning,
 };
 use sora_sdk::{CodecDirection, VideoCodecCapability, VideoCodecImplementation};
 
@@ -284,6 +286,23 @@ impl VideoEncoderHandler for Openh264Encoder {
     }
 }
 
+/// OpenH264 エンコーダの SDP format 広告を構築する
+///
+/// エンコーダは RFC 6184 §8.1 の NonInterleaved (packetization-mode=1) で出力するため、
+/// 広告もそれに揃える。パラメータ構成は sora_sdk の openh264_supported_formats と
+/// 同一にして交渉結果と出力の整合を保証する。RFC 6184 の扱いは将来変更される
+/// 可能性があるため、変更時は sora_sdk 側の実装と整合を取ること。
+fn openh264_encoder_formats() -> Vec<SdpVideoFormat> {
+    vec![SdpVideoFormat::new_with_parameters(
+        "H264",
+        &HashMap::from([
+            (String::from("level-asymmetry-allowed"), String::from("1")),
+            (String::from("packetization-mode"), String::from("1")),
+        ]),
+        &[ScalabilityMode::L1T1],
+    )]
+}
+
 /// OpenH264 コーデック能力
 ///
 /// H.264 エンコーダとして OpenH264 を提供する。
@@ -307,7 +326,7 @@ impl VideoCodecCapability for Openh264VideoCodecCapability {
     fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
         // H.264 のエンコーダのみサポートする (デコーダは将来対応)
         match direction {
-            CodecDirection::Encoder => vec![SdpVideoFormat::new("H264")],
+            CodecDirection::Encoder => openh264_encoder_formats(),
             CodecDirection::Decoder => Vec::new(),
         }
     }
@@ -329,5 +348,88 @@ impl VideoCodecCapability for Openh264VideoCodecCapability {
     ) -> Option<VideoDecoder> {
         // デコーダは将来対応
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openh264_encoder_formats_advertises_packetization_mode_1() {
+        // エンコーダ出力 (NonInterleaved) と広告を一致させるため、
+        // packetization-mode=1 と level-asymmetry-allowed=1 を広告する
+        let formats = openh264_encoder_formats();
+        assert_eq!(formats.len(), 1, "H.264 の format は 1 件のみであるべき");
+        let format = &formats[0];
+        assert_eq!(
+            format.as_ref().name().expect("format 名の取得に失敗"),
+            "H264",
+            "コーデック名は H264 であるべき"
+        );
+        let params = format
+            .as_ref()
+            .parameters_mut()
+            .iter()
+            .collect::<HashMap<String, String>>();
+        assert_eq!(
+            params.get("packetization-mode").map(String::as_str),
+            Some("1"),
+            "packetization-mode=1 を広告するべき"
+        );
+        assert_eq!(
+            params.get("level-asymmetry-allowed").map(String::as_str),
+            Some("1"),
+            "level-asymmetry-allowed=1 を広告するべき"
+        );
+    }
+
+    #[test]
+    fn openh264_encoder_formats_resolves_bare_h264_request() {
+        // パラメータ付き広告に変更しても、既定の is_supported (bare H264 要求を
+        // fuzzy match で解決) が壊れないことを確認する。解決結果は交渉に使われる
+        // 広告そのものなので、packetization-mode=1 が返ることも合わせて確認する
+        let formats = openh264_encoder_formats();
+        let mut matched = shiguredo_webrtc::fuzzy_match_sdp_video_format(
+            &formats,
+            SdpVideoFormat::new("H264").as_ref(),
+        )
+        .expect("bare H264 要求がパラメータ付き広告と解決されるべき");
+        let params = matched
+            .parameters_mut()
+            .iter()
+            .collect::<HashMap<String, String>>();
+        assert_eq!(
+            params.get("packetization-mode").map(String::as_str),
+            Some("1"),
+            "解決結果も packetization-mode=1 を広告するべき"
+        );
+
+        // Sora サーバーが H264 を profile-level-id 付きで offer するケースでも
+        // 広告と解決できることを確認する
+        let resolved_with_profile_level_id = shiguredo_webrtc::fuzzy_match_sdp_video_format(
+            &formats,
+            SdpVideoFormat::new_with_parameters(
+                "H264",
+                &HashMap::from([(String::from("profile-level-id"), String::from("42e01f"))]),
+                &[],
+            )
+            .as_ref(),
+        );
+        assert!(
+            resolved_with_profile_level_id.is_some(),
+            "profile-level-id 付き要求も解決されるべき"
+        );
+    }
+
+    #[test]
+    fn openh264_encoder_formats_advertises_scalability_l1t1() {
+        // sora_sdk の既定実装と同一の ScalabilityMode を広告する
+        let formats = openh264_encoder_formats();
+        let modes = formats[0].scalability_modes();
+        assert!(
+            modes.contains(&ScalabilityMode::L1T1),
+            "ScalabilityMode::L1T1 を広告するべき: {modes:?}"
+        );
     }
 }
