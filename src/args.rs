@@ -1649,6 +1649,18 @@ fn parse_args_from_argv(
         }
     }
 
+    // --input-mp4 (エンコード済み映像パススルー) と --openh264 の併用は、H.264 エンコーダー
+    // 実装が openh264 に上書きされてパススルーが壊れるため、起動時にエラーにする。
+    // --openh264 は共通引数 (CommonArgs) なので、インスタンスと共通引数の両方を
+    // 参照できる parse_args_from_argv で検証する
+    for instance in &instances {
+        if instance.input_mp4.is_some() && common.openh264.is_some() {
+            return Err(
+                ErrorMessage::new("--input-mp4 と --openh264 は同時に指定できません").into(),
+            );
+        }
+    }
+
     Ok((common, instances))
 }
 
@@ -2805,6 +2817,67 @@ mod tests {
         assert!(
             msg.contains("--input-mp4"),
             "エラーメッセージに --input-mp4 が含まれていない: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_args_from_argv_rejects_input_mp4_with_openh264() {
+        // --input-mp4 (エンコード済みパススルー) と --openh264 の併用は、
+        // H.264 エンコーダー実装が openh264 に上書きされてパススルーが壊れるため排他
+        let dir = tempfile::TempDir::new().expect("一時ディレクトリの作成に失敗");
+        let mp4 = dir.path().join("video.mp4");
+        std::fs::write(&mp4, b"dummy").expect("一時 MP4 ファイルの書き込みに失敗");
+        let lib = dir.path().join("libopenh264.dylib");
+        std::fs::write(&lib, b"dummy").expect("一時 OpenH264 ライブラリの書き込みに失敗");
+        let mut tpl = minimal_sora_argv();
+        tpl.extend([
+            "--input-mp4".into(),
+            mp4.to_string_lossy().to_string(),
+            "--sora-video-codec-type".into(),
+            "h264".into(),
+            "--sora-video-bit-rate".into(),
+            "1000".into(),
+        ]);
+        let err = parse_args_from_argv(
+            "zakuro",
+            vec!["--openh264".into(), lib.to_string_lossy().to_string()],
+            Vec::new(),
+            vec![tpl],
+            Vec::new(),
+        )
+        .expect_err("--input-mp4 と --openh264 の併用を許容してはならない");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--input-mp4"),
+            "エラーメッセージに --input-mp4 が含まれていない: {msg}"
+        );
+        assert!(
+            msg.contains("--openh264"),
+            "エラーメッセージに --openh264 が含まれていない: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_args_from_argv_accepts_input_mp4_without_openh264() {
+        // --input-mp4 単独指定は従来どおり受理される
+        let dir = tempfile::TempDir::new().expect("一時ディレクトリの作成に失敗");
+        let mp4 = dir.path().join("video.mp4");
+        std::fs::write(&mp4, b"dummy").expect("一時 MP4 ファイルの書き込みに失敗");
+        let mut tpl = minimal_sora_argv();
+        tpl.extend([
+            "--input-mp4".into(),
+            mp4.to_string_lossy().to_string(),
+            "--sora-video-codec-type".into(),
+            "h264".into(),
+            "--sora-video-bit-rate".into(),
+            "1000".into(),
+        ]);
+        let (_common, instances) =
+            parse_args_from_argv("zakuro", Vec::new(), Vec::new(), vec![tpl], Vec::new())
+                .expect("--input-mp4 単独指定は受理されるべき");
+        assert!(
+            instances[0].input_mp4.is_some(),
+            "input_mp4 が反映されるべき"
         );
     }
 
