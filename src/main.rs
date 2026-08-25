@@ -282,13 +282,12 @@ fn main() -> Result<()> {
 }
 
 async fn async_main() -> Result<()> {
-    log::log_to_debug(log::Severity::Info);
     log::enable_timestamps();
     log::enable_threads();
 
     let (common, instance_args_vec, config_path) = args::parse_args()?;
 
-    // パース結果のログレベルで閾値を上書きする (起動ログより前に適用する)
+    // ログレベルを適用する (libwebrtc は最初のログ出力前に一度だけ設定できる)
     log::log_to_debug(common.log_level);
 
     let total_vcs: u32 = instance_args_vec.iter().map(|i| i.vcs).sum();
