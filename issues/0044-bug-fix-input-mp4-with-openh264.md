@@ -1,7 +1,7 @@
 # `--input-mp4` と `--openh264` の併用で H.264 パススルーが壊れることを修正する
 
 - Created: 2026-08-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-25
 - Branch: feature/fix-input-mp4-with-openh264
 - Polished: 2026-08-25
 
@@ -25,3 +25,16 @@ H.264 の MP4 パススルー送信 (`--input-mp4`) を指定しながら `--ope
 
 - `--input-mp4` と `--openh264` を同時に指定すると、起動時にエラーメッセージ付きで終了する
 - `--input-mp4` のみ、`--openh264` のみの指定では従来どおり動作する
+
+## 解決方法
+
+`src/args.rs` の `parse_args_from_argv()` に、`--input-mp4` と `--openh264` の併用を検出する排他検証を追加した。`--openh264` は共通引数 (`CommonArgs`) のため、インスタンスと共通引数の両方を参照できる `parse_args_from_argv()` で検証する。併用時は既存の排他検証と同形式のエラーメッセージ (`--input-mp4 と --openh264 は同時に指定できません`) で起動時エラーにする。
+
+### 変更ファイル
+
+- `src/args.rs`: `parse_args_from_argv()` に排他検証を追加
+
+### テスト追加
+
+- `parse_args_from_argv_rejects_input_mp4_with_openh264`: 併用指定で起動時エラーになることを検証
+- `parse_args_from_argv_accepts_input_mp4_without_openh264`: `--input-mp4` 単独指定が従来どおり受理されることを検証
