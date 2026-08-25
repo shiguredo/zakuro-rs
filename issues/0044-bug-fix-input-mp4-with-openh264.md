@@ -3,7 +3,7 @@
 - Created: 2026-08-24
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-input-mp4-with-openh264
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-08-25
 
 ## 目的
 
@@ -19,7 +19,7 @@ H.264 の MP4 パススルー送信 (`--input-mp4`) を指定しながら `--ope
 ## 設計方針
 
 1. `--input-mp4` と `--openh264` の併用を起動時エラーにする。MP4 パススルーはエンコード済み映像をそのまま送るため、OpenH264 ライブラリのロードには意味がなく、vcs 単位の失敗に比べ起動時に検知するのが安全
-2. 検証の実装は src/args.rs の `parse_instance_args()` または `parse_args_from_argv()` のバリデーションに追加し、既存の排他検証と同様のエラーメッセージ形式にする
+2. 検証の実装は src/args.rs の `parse_args_from_argv()` のバリデーションに追加し、既存の排他検証と同様のエラーメッセージ形式にする。`--openh264` は共通引数 (`CommonArgs`) のため `parse_instance_args()` からは参照できず、既存の `--h264-encoder cisco_openh264` 検証と同じく `parse_args_from_argv()` で `--input-mp4` との併用を検出する
 
 ## 完了条件
 
