@@ -11,19 +11,17 @@ zakuro (C++) の ScenarioPlayer は `OpPlayVoiceNumberClient` を持ち、シナ
 
 ## 現状
 
-- `src/scenario.rs` の `ScenarioOp` は `Sleep` / `Disconnect` / `Exit` / `SendDataChannelMessage` を持つ (`Exit` と `SendDataChannelMessage` は 0036 / 0037 で実装済み、`PlayVoiceNumberClient` は未実装)。reconnect シナリオは「C++ 版では Sleep の間に PlayVoiceNumberClient が挟まるが、zakuro-rs では音声再生未対応のため Sleep のみ」として実装されている
-- `src/fake_audio_capturer.rs` がフェイク音声の生成 (`GeneratedAudio`: BIP / BOP / HUM / ノイズ、48kHz モノラル) と WAV 再生 (`FakeAudioSource::Wav`) を担い、`FakeAudioCapturer` が `AdmConfig::UseExternal` で Sora の AudioDeviceModule に接続されている。`FakeAudioCapturer` は instance 単位で 1 つ生成され、`start()` がソースを音声スレッドへ move する構造
+- `src/scenario.rs` の `ScenarioOp` は `Sleep` / `Disconnect` / `Exit` / `SendDataChannelMessage` / `Reconnect` を持つ (`PlayVoiceNumberClient` は非対応)
+- `src/fake_audio_capturer.rs` がフェイク音声の生成 (`GeneratedAudio`: BIP / BOP / HUM / ノイズ、48kHz モノラル) と WAV 再生 (`FakeAudioSource::Wav`) を担う
 - C++ 版は数字音声の WAV リソースを EmbeddedBinary でバイナリに埋め込み、VoiceNumberReader が 0-99 を 16kHz モノラルの WAV 断片の連結で合成し、GameAudioManager 経由で再生する。GameAudioManager は zakuro-rs では実装しない方針 (`docs/ZAKURO.md` の「実装しない機能」)
-- 埋め込みリソース機能は `issues/0020-add-embedded-resources.md` で未対応 (open) だが、0020 の音声リソースのスコープはフェイク音声生成の基本波形データであり、数字音声 WAV は含まれない
 
 ## 設計方針
 
 1. `src/scenario.rs` の `ScenarioOp` に `PlayVoiceNumberClient` を追加する (C++ 版と同じく引数なし)。再生番号は vc_id + 1 で決定し、vc_id は `ScenarioPlayer` の生成時に受け取る。vc_id + 1 が 100 以上の場合は再生しない (C++ 版の `Read` は空を返すのと同じ)
-2. 数字音声のリソースは `issues/0020-add-embedded-resources.md` には依存せず、本 issue で C++ 版 `resource/` から取得した WAV 断片 (num000_01.wav 〜 num090_02.wav の 44 ファイル) をリポジトリに配置して `include_bytes!` で埋め込む
-3. 再生経路は GameAudioManager を新設せず、`src/fake_audio_capturer.rs` の `FakeAudioSource` に数字音声ソースを追加して、シナリオ操作がフェイク音声キャプチャに再生を要求する方式とする。再生要求は mpsc チャネルで音声スレッドに送り、数字音声の再生中は数字音声を送出し、再生完了後に元のソース (Generated / Wav) へ戻る。capturer は instance 単位で 1 つのため、複数 vc の同時要求は最後の要求で置き換わる (C++ 版は `Play(client_id, buf)` が範囲外で no-op になり実質 vc 0 のみ再生されるが、zakuro-rs は全 vc の要求を最後勝ちで受け付ける。これは意図した差分)。`FakeAudioCapturer` が生成されない場合 (音声無効や `--input-mp4` / `--video-input-device` 使用時) は再生要求を無視する。C++ 版は数字音声のない間は無音になるが、zakuro-rs は再生完了後に元のソースへ戻って常時送出を継続する (意図した差分)
-4. C++ 版は 16kHz であるが zakuro-rs のフェイク音声は 48kHz のため、`src/wav_reader.rs` のリサンプル処理 (48kHz への変換) を通す (断片ごとにリサンプルして連結する)
-5. 数字の合成規則は C++ 版 `voice_number_reader.h` に合わせる (0-29 は単体、30/40/.../90 は十の位のみ、31-99 は十の位 + 一の位の連結。十の位は連結用リソースを使う)。番号 → 断片の対応は単体テストで検証する
-6. 既存 reconnect シナリオへの組み込みは本 issue では行わず (組み込みは Reconnect 操作対応と合わせて実施する)、動作確認は実サーバー (Sora SFU) への接続による手動確認で行う (モック・スタブ利用不可のため)。確認時のみ既存シナリオへの一時的な組み込みを許容する
+2. 数字音声のリソースは埋め込みリソース issue には依存せず、本 issue で C++ 版 `resource/` から取得した WAV 断片をリポジトリに配置して `include_bytes!` で埋め込む
+3. 再生経路は GameAudioManager を新設せず、`src/fake_audio_capturer.rs` の `FakeAudioSource` に数字音声ソースを追加して、シナリオ操作がフェイク音声キャプチャに再生を要求する方式とする
+4. C++ 版は 16kHz であるが zakuro-rs のフェイク音声は 48kHz のため、リサンプル処理を通す
+5. 数字の合成規則は C++ 版 `voice_number_reader.h` に合わせる
 
 ## 完了条件
 
@@ -32,19 +30,18 @@ zakuro (C++) の ScenarioPlayer は `OpPlayVoiceNumberClient` を持ち、シナ
 
 ## 解決方法
 
-設計方針どおり、GameAudioManager を新設せず `FakeAudioSource` に数字音声ソースを追加し、シナリオ操作から mpsc チャネルで再生要求を送る方式で実装した。
+一度実装したが、zakuro-rs では非対応とすることにした。実装を取り除き、本 issue を closed のまま非対応として扱う。
 
-- `src/scenario.rs`: `ScenarioOp` に `PlayVoiceNumberClient` (引数なし) を追加。`ScenarioPlayer` に数字音声の再生要求送信側 (`Option<std::sync::mpsc::Sender<u32>>`) を持ち、操作到達時に vc_id + 1 の番号を送る (vc_id + 1 が 100 以上、またはキャプチャ未生成で None の場合は無視)。`#[cfg_attr(not(test), expect(dead_code))]` は既存 Exit と同じパターン
-- `src/voice_number_reader.rs` (新規): C++ 版 `VoiceNumberReader::Read` と同じ合成規則 (0-29 は単体、30/40/.../90 は十の位のみ、31-99 は十の位 + 一の位の連結、100 以上は空) で数字音声を合成。C++ 版 `resource/` から取得した WAV 断片 44 個 (16kHz モノラル PCM16) を `resource/voice_number/` に配置し `include_bytes!` で埋め込み、`WavReader` のリサンプル処理で 48kHz に変換して OnceLock でキャッシュする
-- `src/wav_reader.rs`: リサンプル済みサンプル列を直接参照する `samples()` アクセサを追加
-- `src/fake_audio_capturer.rs`: `FakeAudioSource::VoiceNumber(VoiceNumberAudio)` を追加。`original` を保持し再生完了後に元のソース (Generated / Wav) へ戻る。音声スレッドは mpsc で再生要求 (番号) を最後勝ちで受け付け、数字音声を一時再生する
-- `src/virtual_client.rs`: `VirtualClientConfig` に `scenario_voice_tx` を追加し、`ScenarioPlayer` へ渡す
-- `src/main.rs`: フェイク音声キャプチャ生成時に再生要求送信側を取り出して `vc_config` へ渡す (キャプチャ未生成時は None になり無視される)
+判定根拠:
 
-追加したテスト (いずれもモック・スタブなし):
+- GameAudioManager は `docs/ZAKURO.md` の「実装しない機能」であり、数字音声再生はその代替実装になる。GameAudioManager 非実装方針に合わせて PlayVoiceNumberClient も実装しない
+- reconnect シナリオの音声送信タイミング制御は Sleep のみで足りる (C++ 版との差分として許容する)
+- 埋め込み WAV 断片 (44 ファイル) と再生経路の維持コストに見合う利用場面が zakuro-rs にない
 
-- `src/voice_number_reader.rs`: 合成規則 (0-29 / 30,40,...,90 / 31-99 / 100 以上) と 0-99 全数スイープ、48kHz リサンプルの金値
-- `src/fake_audio_capturer.rs`: `with_voice` / `voice_finished` / `revert_voice` の状態遷移 (最後勝ち・元ソース復帰)
-- `src/scenario.rs`: PlayVoiceNumberClient で vc_id + 1 が送信されること、voice_tx なしで無視されること、100 以上で送信されないこと
+取り除いたもの:
 
-完了条件の「Sora 経由で送信される」は実サーバー接続での手動確認が必要なため、実装と単体テストの完了をもって本 issue を閉じ、実サーバーでの確認は reconnect シナリオへの組み込み (Reconnect 操作対応) 時に実施する。
+- `ScenarioOp::PlayVoiceNumberClient` と `ScenarioPlayer` の再生要求経路
+- `src/voice_number_reader.rs` と `resource/voice_number/` の WAV 断片
+- `FakeAudioSource::VoiceNumber` と再生要求チャネル
+
+reconnect シナリオは `Reconnect → [Sleep(1-5s)] × 9 → ループ` とし、C++ 版の PlayVoiceNumberClient 挿入は行わない。`docs/ZAKURO.md` の「実装しない機能」に追記した。
