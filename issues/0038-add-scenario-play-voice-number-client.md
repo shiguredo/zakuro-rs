@@ -1,7 +1,7 @@
 # シナリオ操作 PlayVoiceNumberClient を追加する
 
 - Created: 2026-08-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-26
 - Branch: feature/add-scenario-play-voice-number-client
 - Polished: 2026-08-24
 
@@ -29,3 +29,22 @@ zakuro (C++) の ScenarioPlayer は `OpPlayVoiceNumberClient` を持ち、シナ
 
 - シナリオに PlayVoiceNumberClient 操作が定義できる
 - 操作到達時に vc_id + 1 の番号の数字音声が再生され、Sora 経由で送信される (実サーバー接続での手動確認)
+
+## 解決方法
+
+設計方針どおり、GameAudioManager を新設せず `FakeAudioSource` に数字音声ソースを追加し、シナリオ操作から mpsc チャネルで再生要求を送る方式で実装した。
+
+- `src/scenario.rs`: `ScenarioOp` に `PlayVoiceNumberClient` (引数なし) を追加。`ScenarioPlayer` に数字音声の再生要求送信側 (`Option<std::sync::mpsc::Sender<u32>>`) を持ち、操作到達時に vc_id + 1 の番号を送る (vc_id + 1 が 100 以上、またはキャプチャ未生成で None の場合は無視)。`#[cfg_attr(not(test), expect(dead_code))]` は既存 Exit と同じパターン
+- `src/voice_number_reader.rs` (新規): C++ 版 `VoiceNumberReader::Read` と同じ合成規則 (0-29 は単体、30/40/.../90 は十の位のみ、31-99 は十の位 + 一の位の連結、100 以上は空) で数字音声を合成。C++ 版 `resource/` から取得した WAV 断片 44 個 (16kHz モノラル PCM16) を `resource/voice_number/` に配置し `include_bytes!` で埋め込み、`WavReader` のリサンプル処理で 48kHz に変換して OnceLock でキャッシュする
+- `src/wav_reader.rs`: リサンプル済みサンプル列を直接参照する `samples()` アクセサを追加
+- `src/fake_audio_capturer.rs`: `FakeAudioSource::VoiceNumber(VoiceNumberAudio)` を追加。`original` を保持し再生完了後に元のソース (Generated / Wav) へ戻る。音声スレッドは mpsc で再生要求 (番号) を最後勝ちで受け付け、数字音声を一時再生する
+- `src/virtual_client.rs`: `VirtualClientConfig` に `scenario_voice_tx` を追加し、`ScenarioPlayer` へ渡す
+- `src/main.rs`: フェイク音声キャプチャ生成時に再生要求送信側を取り出して `vc_config` へ渡す (キャプチャ未生成時は None になり無視される)
+
+追加したテスト (いずれもモック・スタブなし):
+
+- `src/voice_number_reader.rs`: 合成規則 (0-29 / 30,40,...,90 / 31-99 / 100 以上) と 0-99 全数スイープ、48kHz リサンプルの金値
+- `src/fake_audio_capturer.rs`: `with_voice` / `voice_finished` / `revert_voice` の状態遷移 (最後勝ち・元ソース復帰)
+- `src/scenario.rs`: PlayVoiceNumberClient で vc_id + 1 が送信されること、voice_tx なしで無視されること、100 以上で送信されないこと
+
+完了条件の「Sora 経由で送信される」は実サーバー接続での手動確認が必要なため、実装と単体テストの完了をもって本 issue を閉じ、実サーバーでの確認は reconnect シナリオへの組み込み (Reconnect 操作対応) 時に実施する。
