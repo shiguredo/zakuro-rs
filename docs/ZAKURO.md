@@ -296,14 +296,14 @@ POST /rpc          → JSON-RPC 2.0
 
 ### シナリオ
 
-- [x] ScenarioPlayer (Sleep, Disconnect 操作)
-- [x] reconnect シナリオ (9 回のランダム Sleep 後に切断 → 再接続ループ)
+- [x] ScenarioPlayer (Sleep, Disconnect, Reconnect 操作)
+- [x] reconnect シナリオ (Reconnect → [Sleep(1-5s) + PlayVoiceNumberClient] × 8 → Sleep(1-5s) → ループ先頭 (Reconnect) に戻る)
 - [x] DataChannel メッセージ自動送信 (ZAKURO ヘッダ付き)
 - [x] vcs-hatch-rate (段階的起動)
 - [x] シナリオ操作 PlayVoiceNumberClient (数字音声 0-99 再生、16kHz 断片を 48kHz にリサンプル)
 - [x] シナリオ操作 SendDataChannelMessage
 - [x] シナリオ操作 Exit
-- [ ] シナリオ操作 Reconnect
+- [x] シナリオ操作 Reconnect
 - [x] instance-hatch-rate (JSONC `instances` 配列と組み合わせて使用)
 
 ### その他

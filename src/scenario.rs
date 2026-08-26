@@ -12,15 +12,31 @@ use crate::duckdb_stats::ConnectionIds;
 
 /// シナリオ操作
 ///
-/// Exit / SendDataChannelMessage / PlayVoiceNumberClient は組み込んだシナリオ種別が
-/// まだ存在しないため #[expect(dead_code)] を付けている。既存 reconnect シナリオへの
-/// 組み込みは後続対応のスコープであり、組み込み時に各 expect を外すこと。
+/// 組み込み済みのシナリオ種別 (reconnect) から参照されていない操作
+/// (Disconnect / Exit / SendDataChannelMessage) には #[expect(dead_code)] を
+/// 付けている。テストで構築する操作 (Disconnect / Exit) はテストビルドで expect を
+/// 外す (#[cfg_attr(not(test), ...)])。後続対応でシナリオに組み込む際に各 expect を
+/// 外すこと。
 #[derive(Debug, Clone)]
 pub(crate) enum ScenarioOp {
     /// ランダムな時間スリープする
     Sleep { min_ms: u64, max_ms: u64 },
-    /// 切断する
+    /// 切断して再接続する
+    ///
+    /// Reconnect 操作と同じく `ScenarioEnd::Reconnect` を返して呼び出し元に制御を
+    /// 返し、切断してから即座に再接続する。現在の reconnect シナリオは Reconnect
+    /// 操作を使うため、本バリアントはテストで構築する (テストビルドでは expect を外す)。
+    #[cfg_attr(not(test), expect(dead_code))]
     Disconnect,
+    /// 切断して再接続する
+    ///
+    /// 実行ループを完了として呼び出し元に制御を返し、呼び出し元は Disconnect
+    /// 操作と同じく切断してから即座に再接続する。再接続後は続きの操作から
+    /// 再開される (op_index が接続をまたいで継続する)。
+    ///
+    /// C++ 版の Reconnect は切断と並行して次の操作を開始するが、zakuro-rs では
+    /// 切断完了を待ってから再接続する直列処理になる (意図した差分)。
+    Reconnect,
     /// 切断して vc タスクを終了する
     ///
     /// 実行ループを完了として呼び出し元に制御を返し、呼び出し元は再接続せず
@@ -45,20 +61,17 @@ pub(crate) enum ScenarioOp {
     /// 再生番号は vc_id + 1 で決定し、vc_id + 1 が 100 以上の場合は再生しない
     /// (C++ 版の Read は空を返すのと同じ)。再生要求はフェイク音声キャプチャへ
     /// mpsc チャネルで送り、capturer が生成されていない場合は無視する。
-    ///
-    /// 本バリアントはテストで構築するため、テストビルドでは expect を外す。
-    #[cfg_attr(not(test), expect(dead_code))]
     PlayVoiceNumberClient,
 }
 
 /// シナリオ実行の終了理由
 ///
-/// 呼び出し元は Reconnect で返ったら切断して再接続し、Exit で返ったら切断して
-/// vc タスクを終了する。Reconnect は現状 Disconnect 操作で返り、将来追加される
-/// Reconnect 操作も同じ値を返す予定。
+/// 呼び出し元は `ScenarioEnd::Reconnect` で返ったら切断して再接続し、
+/// `ScenarioEnd::Exit` で返ったら切断して vc タスクを終了する。Reconnect 操作と
+/// Disconnect 操作はどちらも `ScenarioEnd::Reconnect` を返す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScenarioEnd {
-    /// 再接続が必要 (Disconnect 操作)
+    /// 再接続が必要 (Reconnect / Disconnect 操作)
     Reconnect,
     /// 切断して vc タスクを終了する (Exit 操作)
     Exit,
@@ -67,7 +80,7 @@ pub(crate) enum ScenarioEnd {
 /// シナリオ定義
 ///
 /// ops を先頭から順に実行し、末尾に到達したら loop_index に戻ってループする。
-/// Disconnect / Exit 操作に到達すると呼び出し元に制御を返す。
+/// Reconnect / Disconnect / Exit 操作に到達すると呼び出し元に制御を返す。
 #[derive(Debug, Clone)]
 pub(crate) struct Scenario {
     ops: Vec<ScenarioOp>,
@@ -99,23 +112,31 @@ pub(crate) fn build_scenario(scenario_type: ScenarioType) -> Scenario {
 /// reconnect シナリオ
 ///
 /// C++ 版の再現:
-///   Reconnect (= 接続) → [Sleep(1-5s)] × 9 → ループ先頭に戻る
+///   Reconnect → [Sleep(1-5s) + PlayVoiceNumberClient] × 8 → Sleep(1-5s)
+///   → ループ先頭 (Reconnect) に戻る
 ///
-/// C++ 版では Sleep の間に PlayVoiceNumberClient が挟まるが、zakuro-rs では
-/// reconnect シナリオへの組み込みが後続対応のため Sleep のみ (PlayVoiceNumberClient
-/// 操作自体は実装済み)。
-/// ループ先頭に戻ると呼び出し元が再接続する。
+/// 先頭の Reconnect は接続確立直後に切断 → 再接続を 1 回行う (C++ 版は Reconnect
+/// 操作が初回接続を兼ねるが、zakuro-rs は接続してからシナリオを実行するため、
+/// この差分は避けられない)。再接続後は続きの操作から再開され、接続 2 以降の
+/// 各接続の持続時間は Sleep 合計 (9-45 秒) に相当する。ループ先頭 (Reconnect) に
+/// 戻ると呼び出し元が切断してから再接続する。
 fn build_reconnect_scenario() -> Scenario {
     let mut ops = Vec::new();
-    // 9 回のランダムスリープ (合計 9-45 秒)
-    for _ in 0..9 {
+    // 切断して再接続する (ループ先頭に戻るたびに実行される)
+    ops.push(ScenarioOp::Reconnect);
+    // [Sleep(1-5s) + PlayVoiceNumberClient] × 8
+    for _ in 0..8 {
         ops.push(ScenarioOp::Sleep {
             min_ms: 1000,
             max_ms: 5000,
         });
+        ops.push(ScenarioOp::PlayVoiceNumberClient);
     }
-    // 切断してループ先頭に戻る
-    ops.push(ScenarioOp::Disconnect);
+    // 末尾の Sleep(1-5s) の後にループ先頭 (Reconnect) へ戻る
+    ops.push(ScenarioOp::Sleep {
+        min_ms: 1000,
+        max_ms: 5000,
+    });
     Scenario { ops, loop_index: 0 }
 }
 
@@ -135,10 +156,10 @@ fn random_range(min: u64, max: u64) -> u64 {
 /// シナリオプレイヤー
 ///
 /// 接続中のクライアントに対してシナリオ操作を順次実行する。
-/// Disconnect 操作に到達すると呼び出し元が切断と再接続を行い、
+/// Reconnect / Disconnect 操作に到達すると呼び出し元が切断と再接続を行い、
 /// Exit 操作に到達すると呼び出し元が切断して vc タスクを終了する。
-/// 接続ループの外で 1 回生成され、ラベル別カウンタと xorshift 状態は
-/// 再接続をまたいで保持する。
+/// 接続ループの外で 1 回生成され、op_index (続きの操作からの再開位置) と
+/// ラベル別カウンタ、xorshift 状態は再接続をまたいで保持する。
 pub(crate) struct ScenarioPlayer {
     scenario: Scenario,
     op_index: usize,
@@ -173,7 +194,7 @@ impl ScenarioPlayer {
         }
     }
 
-    /// シナリオを実行し、Disconnect / Exit 操作に到達するまで待機する。
+    /// シナリオを実行し、Reconnect / Disconnect / Exit 操作に到達するまで待機する。
     /// キャンセルされた場合は即座に返る。キャンセル時は vc タスクの終了を意図する
     /// Exit を返すが、呼び出し元の biased select は token.cancelled() を優先する
     /// ため、キャンセル済みの場合は通常 Shutdown 経路が選択される。競合で Exit
@@ -203,6 +224,10 @@ impl ScenarioPlayer {
                         _ = token.cancelled() => return ScenarioEnd::Exit,
                         _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
                     }
+                }
+                ScenarioOp::Reconnect => {
+                    self.advance();
+                    return ScenarioEnd::Reconnect;
                 }
                 ScenarioOp::Disconnect => {
                     self.advance();
@@ -543,6 +568,52 @@ mod tests {
         assert_eq!(player0.op_index, 0, "実運用の loop_index=0 に戻ること");
     }
 
+    /// reconnect シナリオが C++ 版と同じ構造で構築されることを検証する
+    ///
+    /// C++ 版の構造: Reconnect → [Sleep(1-5s) + PlayVoiceNumberClient] × 8 →
+    /// Sleep(1-5s) → ループ先頭 (Reconnect) に戻る。Sleep は 8 + 1 = 9 回で
+    /// 合計 9-45 秒になる。
+    #[test]
+    fn test_build_reconnect_scenario_matches_cpp_structure() {
+        let scenario = build_reconnect_scenario();
+        assert_eq!(scenario.loop_index, 0, "ループ先頭が Reconnect であること");
+
+        // ops: [Reconnect, (Sleep + PlayVoiceNumberClient) × 8, Sleep] = 18 個
+        assert_eq!(scenario.ops.len(), 18, "op 数が 18 であること");
+        assert!(
+            matches!(scenario.ops[0], ScenarioOp::Reconnect),
+            "先頭は Reconnect であること"
+        );
+        // [Sleep + PlayVoiceNumberClient] が 8 回交互に並ぶ
+        for i in 0..8 {
+            assert!(
+                matches!(scenario.ops[1 + i * 2], ScenarioOp::Sleep { .. }),
+                "op[{}] は Sleep であること",
+                1 + i * 2
+            );
+            assert!(
+                matches!(scenario.ops[2 + i * 2], ScenarioOp::PlayVoiceNumberClient),
+                "op[{}] は PlayVoiceNumberClient であること",
+                2 + i * 2
+            );
+        }
+        // 末尾は Sleep
+        assert!(
+            matches!(scenario.ops[17], ScenarioOp::Sleep { .. }),
+            "末尾 (op[17]) は Sleep であること"
+        );
+        // 各 Sleep は 1-5 秒
+        for (i, op) in scenario.ops.iter().enumerate() {
+            if let ScenarioOp::Sleep { min_ms, max_ms } = op {
+                assert_eq!(
+                    (*min_ms, *max_ms),
+                    (1000, 5000),
+                    "op[{i}] の Sleep は 1-5 秒であること"
+                );
+            }
+        }
+    }
+
     /// Exit 操作に到達すると ScenarioEnd::Exit が返り、op_index が進まないことを検証する
     ///
     /// SoraConnectionHandle は実サーバー接続なしで build() できる (run() を呼ばない
@@ -599,6 +670,93 @@ mod tests {
         assert_eq!(
             player.op_index, 1,
             "Disconnect 操作では op_index が進み、再接続時に続きの操作から再開されること"
+        );
+    }
+
+    /// Reconnect 操作に到達すると ScenarioEnd::Reconnect が返り、op_index が進むことを検証する
+    ///
+    /// Reconnect 操作は Disconnect 操作と同じく呼び出し元が切断 → 即再接続を行い、
+    /// 再接続時に続きの操作から再開される。
+    #[tokio::test]
+    async fn test_run_until_disconnect_reconnect_op() {
+        let (_connection, handle) = build_test_connection();
+
+        let scenario = Scenario {
+            ops: vec![
+                ScenarioOp::Reconnect,
+                ScenarioOp::Sleep {
+                    min_ms: 1,
+                    max_ms: 1,
+                },
+            ],
+            loop_index: 0,
+        };
+        let mut player = ScenarioPlayer::new(scenario, 0, 0, None);
+        let token = CancellationToken::new();
+        let ids = std::sync::Mutex::new(None::<ConnectionIds>);
+
+        let end = player.run_until_disconnect(&token, &handle, &ids).await;
+        assert_eq!(
+            end,
+            ScenarioEnd::Reconnect,
+            "Reconnect 操作で ScenarioEnd::Reconnect が返ること"
+        );
+        assert_eq!(
+            player.op_index, 1,
+            "Reconnect 操作では op_index が進み、再接続時に続きの操作から再開されること"
+        );
+    }
+
+    /// ループ折返し後に先頭の Reconnect へ戻り、再接続が続くことを検証する
+    ///
+    /// 実運用の steady state では ops を一巡してループ先頭 (Reconnect) に戻る。
+    /// 2 回目の run_until_disconnect でも ScenarioEnd::Reconnect が返り、op_index が
+    /// 折返し後の位置 (先頭 Reconnect の次) から始まることを検証する。
+    #[tokio::test]
+    async fn test_run_until_disconnect_reconnect_after_loop_wrap() {
+        let (_connection, handle) = build_test_connection();
+
+        let scenario = Scenario {
+            ops: vec![
+                ScenarioOp::Reconnect,
+                ScenarioOp::Sleep {
+                    min_ms: 1,
+                    max_ms: 1,
+                },
+                ScenarioOp::PlayVoiceNumberClient,
+                ScenarioOp::Sleep {
+                    min_ms: 1,
+                    max_ms: 1,
+                },
+            ],
+            loop_index: 0,
+        };
+        let mut player = ScenarioPlayer::new(scenario, 0, 0, None);
+        let token = CancellationToken::new();
+        let ids = std::sync::Mutex::new(None::<ConnectionIds>);
+
+        // 接続 1: 先頭の Reconnect で即切断 → 再接続
+        let end = player.run_until_disconnect(&token, &handle, &ids).await;
+        assert_eq!(
+            end,
+            ScenarioEnd::Reconnect,
+            "先頭 Reconnect で ScenarioEnd::Reconnect が返ること"
+        );
+        assert_eq!(
+            player.op_index, 1,
+            "先頭 Reconnect 後は op_index 1 から再開されること"
+        );
+
+        // 接続 2: ops[1..] を実行して末尾に到達 → ループ先頭 (Reconnect) に戻る
+        let end = player.run_until_disconnect(&token, &handle, &ids).await;
+        assert_eq!(
+            end,
+            ScenarioEnd::Reconnect,
+            "ループ折返し後の Reconnect で ScenarioEnd::Reconnect が返ること"
+        );
+        assert_eq!(
+            player.op_index, 1,
+            "折返し後も op_index 1 (先頭 Reconnect の次) から再開されること"
         );
     }
 

@@ -190,7 +190,7 @@ pub(crate) async fn run(
         let mut run_future = Box::pin(client.run());
 
         let reason = if let Some(ref mut player) = scenario_player {
-            // シナリオモード: シナリオの Disconnect / Exit 操作まで実行する
+            // シナリオモード: シナリオの Reconnect / Disconnect / Exit 操作まで実行する
             tokio::select! {
                 biased;
                 _ = token.cancelled() => DisconnectReason::Shutdown,
