@@ -973,14 +973,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
     let log_level: log::Severity = noargs::opt("log-level")
         .doc("Log level (verbose/info/warning/error/none, default: info)")
         .take(&mut args)
-        .present_and_then(|o| match o.value() {
-            "verbose" => Ok(log::Severity::Verbose),
-            "info" => Ok(log::Severity::Info),
-            "warning" => Ok(log::Severity::Warning),
-            "error" => Ok(log::Severity::Error),
-            "none" => Ok(log::Severity::None),
-            _ => Err("log-level は verbose/info/warning/error/none で指定してください"),
-        })?
+        .present_and_then(|o| parse_log_level_str(o.value()))?
         .unwrap_or(log::Severity::Info);
 
     // --show-video-codec-capability はヘルプに表示するための定義のみで、
@@ -1741,6 +1734,110 @@ fn pre_parse_show_video_codec_capability_inputs(
         input_mp4_path,
         role,
     })
+}
+
+/// `--log-level` / JSONC `"log-level"` の文字列を `log::Severity` に変換する
+fn parse_log_level_str(value: &str) -> std::result::Result<log::Severity, &'static str> {
+    match value {
+        "verbose" => Ok(log::Severity::Verbose),
+        "info" => Ok(log::Severity::Info),
+        "warning" => Ok(log::Severity::Warning),
+        "error" => Ok(log::Severity::Error),
+        "none" => Ok(log::Severity::None),
+        _ => Err("log-level は verbose/info/warning/error/none で指定してください"),
+    }
+}
+
+/// トークン列から最後に現れた `--log-level` の値を取り出す
+///
+/// 不正値・値欠落は `None` を返す (本パース側でエラーにする)。
+fn peek_log_level_from_tokens<'a, I>(tokens: I) -> Option<log::Severity>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    let tokens: Vec<&String> = tokens.into_iter().collect();
+    let mut found: Option<log::Severity> = None;
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = tokens[i].as_str();
+        if let Some(value) = token.strip_prefix("--log-level=") {
+            found = parse_log_level_str(value).ok();
+            i += 1;
+        } else if token == "--log-level" {
+            if let Some(value) = tokens.get(i + 1).filter(|v| !v.starts_with("--")) {
+                found = parse_log_level_str(value).ok();
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    found
+}
+
+/// JSONC 最上位の `"log-level"` だけを静かに読む (ログ出力・警告なし)
+fn peek_log_level_from_jsonc(content: &str) -> Option<log::Severity> {
+    let (json, _) = RawJson::parse_jsonc(content).ok()?;
+    let root = json.value();
+    if root.kind() != JsonValueKind::Object {
+        return None;
+    }
+    let members = root.to_object().ok()?;
+    for (key_value, value) in members {
+        let key: String = key_value.try_into().ok()?;
+        if key != "log-level" {
+            continue;
+        }
+        if value.kind() != JsonValueKind::String {
+            return None;
+        }
+        let s: String = value.try_into().ok()?;
+        return parse_log_level_str(&s).ok();
+    }
+    None
+}
+
+/// ログ初期化用に CLI / JSONC から `--log-level` を覗き見る
+///
+/// `initialize_logging` は最初のログ出力前に 1 回だけ有効なため、
+/// `parse_args()` 内の `rtc_log_*` より前に呼ぶ必要がある。
+/// 優先順位は本パースと同じく CLI が JSONC に勝つ。不正値は無視して `Info` に落とす
+/// (本パース側で同じ不正値をエラーにする)。
+pub(crate) fn peek_log_level() -> log::Severity {
+    let env_argv: Vec<String> = std::env::args().collect();
+
+    // CLI に有効な --log-level があればそれを採用 (JSONC より優先)
+    if let Some(level) = peek_log_level_from_tokens(env_argv.iter().skip(1)) {
+        return level;
+    }
+
+    // CLI に無ければ --config の JSONC 最上位を静かに読む
+    let mut config_path: Option<&str> = None;
+    let mut i = 1;
+    while i < env_argv.len() {
+        let token = env_argv[i].as_str();
+        if token == "--config" {
+            if let Some(value) = env_argv.get(i + 1) {
+                config_path = Some(value.as_str());
+            }
+            break;
+        }
+        if let Some(value) = token.strip_prefix("--config=") {
+            config_path = Some(value);
+            break;
+        }
+        i += 1;
+    }
+    if let Some(path) = config_path
+        && let Ok(content) = std::fs::read_to_string(path)
+        && let Some(level) = peek_log_level_from_jsonc(&content)
+    {
+        return level;
+    }
+
+    log::Severity::Info
 }
 
 /// プロセス入口の引数パース
@@ -2607,6 +2704,55 @@ mod tests {
     fn is_common_key_includes_log_level() {
         // is_common_key に log-level が含まれること
         assert!(is_common_key("log-level"));
+    }
+
+    #[test]
+    fn peek_log_level_from_tokens_takes_last_valid_value() {
+        // 複数指定時は最後の有効値を採用する (本パースの last-wins と揃える)
+        let tokens = vec![
+            "--log-level".to_string(),
+            "info".to_string(),
+            "--log-level".to_string(),
+            "warning".to_string(),
+        ];
+        assert_eq!(
+            peek_log_level_from_tokens(&tokens),
+            Some(log::Severity::Warning),
+            "最後の --log-level を採用すべき"
+        );
+    }
+
+    #[test]
+    fn peek_log_level_from_tokens_ignores_invalid_value() {
+        // 不正値は覗き見では無視し、本パース側でエラーにする
+        let tokens = vec!["--log-level".to_string(), "DEBUG".to_string()];
+        assert_eq!(
+            peek_log_level_from_tokens(&tokens),
+            None,
+            "不正値は peek では None になるべき"
+        );
+    }
+
+    #[test]
+    fn peek_log_level_from_jsonc_reads_top_level_string() {
+        // JSONC 最上位の文字列 log-level を静かに読めること
+        let content = r#"{ "log-level": "error", "instances": [] }"#;
+        assert_eq!(
+            peek_log_level_from_jsonc(content),
+            Some(log::Severity::Error),
+            "JSONC の log-level=error を読めるべき"
+        );
+    }
+
+    #[test]
+    fn peek_log_level_from_jsonc_ignores_numeric() {
+        // 数値は本パースで拒否するため peek でも採用しない
+        let content = r#"{ "log-level": 2 }"#;
+        assert_eq!(
+            peek_log_level_from_jsonc(content),
+            None,
+            "数値の log-level は peek では None になるべき"
+        );
     }
 
     #[test]

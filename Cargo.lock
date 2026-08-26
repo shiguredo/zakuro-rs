@@ -1840,9 +1840,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_webrtc"
-version = "0.150.3"
+version = "0.152.1-canary.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6c801d4b03cc345ccd3767b4745d5324f55a40bd6e6b6e34b2ee13428feb976"
+checksum = "c13e4bc6b7ee0e5e1c0edcf8a93f71b6579d466c1bae6da96bf453aa0cacff57"
 dependencies = [
  "bindgen",
  "nojson",
@@ -1930,9 +1930,9 @@ dependencies = [
 
 [[package]]
 name = "sora_sdk"
-version = "2026.1.0-canary.21"
+version = "2026.2.0-canary.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8adf8e20a3522b039900b84dfb390a56764083e5d6a31f4cd59dfae342a987e"
+checksum = "90abb9354f199f9fe06d98d5939e249497ea6915ae07eb073bc6da82f9ab6cbf"
 dependencies = [
  "aws-lc-rs",
  "noflate",
@@ -2028,7 +2028,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

@@ -283,13 +283,20 @@ fn main() -> Result<()> {
 }
 
 async fn async_main() -> Result<()> {
-    log::enable_timestamps();
-    log::enable_threads();
+    // libwebrtc のログ初期化は最初のログ出力前に 1 回だけ有効。
+    // パース中の rtc_log_* より前に CLI / JSONC から --log-level を覗き見て適用する。
+    // (旧 API の log_to_debug / enable_timestamps / enable_threads は削除された)
+    {
+        let early_log_level = args::peek_log_level();
+        let mut log_config = log::LoggingConfig::new();
+        log_config.set_min_severity(early_log_level);
+        log_config.set_debug_severity(early_log_level);
+        log_config.set_log_timestamp(true);
+        log_config.set_log_thread(true);
+        let _ = log::initialize_logging(log_config);
+    }
 
     let (common, instance_args_vec, config_path) = args::parse_args()?;
-
-    // ログレベルを適用する (libwebrtc は最初のログ出力前に一度だけ設定できる)
-    log::log_to_debug(common.log_level);
 
     let total_vcs: u32 = instance_args_vec.iter().map(|i| i.vcs).sum();
     let instances_count = instance_args_vec.len() as u32;

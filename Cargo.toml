@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 # 暗号ライブラリ (乱数生成に利用)
-aws-lc-rs = "1.17"
+aws-lc-rs = "1.18"
 # DuckDB バインディング (統計記録に利用)
 # bundled は CI でビルド時間 30 分以上かかるため使用しない
 # prebuilt ダウンロードは .cargo/config.toml の DUCKDB_DOWNLOAD_LIB で有効化する
@@ -33,13 +33,13 @@ raden = "2026.2.0-canary.0"
 # HTTP/1.1 サーバー
 shiguredo_http11 = "2026.6"
 # OpenH264 バインディング (H.264 エンコード)
-shiguredo_openh264 = "2026.1"
+shiguredo_openh264 = "2026.2"
 # クロスプラットフォーム ビデオデバイス
 shiguredo_video_device = "2026.2"
 # libwebrtc バインディング
-shiguredo_webrtc = "0.150"
+shiguredo_webrtc = "0.152.1-canary.0"
 # Sora Rust SDK
-sora_sdk = "2026.1.0-canary.21"
+sora_sdk = "2026.2.0-canary.0"
 # tokio Stream ラッパー (ReceiverStream, IntervalStream)
 tokio-stream = "0.1"
 # tokio ユーティリティ (CancellationToken, DelayQueue)
