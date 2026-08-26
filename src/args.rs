@@ -579,6 +579,25 @@ pub(crate) fn load_jsonc_config(path: &str) -> Result<JsoncConfig> {
     parse_jsonc_config(&content)
 }
 
+/// JSONC 文字列を通常起動と同じ規則でパース・検証する (`zakuro lint` 用)
+///
+/// CLI 上書きは空。Sora 接続・ファイル実体の読み込み (OpenH264 dlopen / PEM) は行わない。
+/// 構文エラーは呼び出し側で位置付き診断するため、ここでは意味検証に失敗した場合の
+/// `AppError` をそのまま返す。
+pub(crate) fn validate_jsonc_config_str(content: &str) -> Result<(CommonArgs, Vec<InstanceArgs>)> {
+    let JsoncConfig {
+        common_argv,
+        instance_argvs,
+    } = parse_jsonc_config(content)?;
+    parse_args_from_argv(
+        env!("CARGO_PKG_NAME"),
+        common_argv,
+        Vec::new(),
+        instance_argvs,
+        Vec::new(),
+    )
+}
+
 /// JSONC 文字列をパースして `JsoncConfig` を構築する
 ///
 /// テストから直接呼び出せるように env / I/O 依存を持たない。

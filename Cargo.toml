@@ -15,6 +15,8 @@ name = "zakuro"
 path = "src/main.rs"
 
 [dependencies]
+# CLI 診断メッセージのソース注釈表示 (mikan lint と同系統)
+annotate-snippets = "0.12"
 # 暗号ライブラリ (乱数生成に利用)
 aws-lc-rs = "1.18"
 # DuckDB バインディング (統計記録に利用)

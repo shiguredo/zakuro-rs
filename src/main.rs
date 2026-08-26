@@ -1,5 +1,7 @@
 mod args;
+mod cmd_lint;
 mod data_channel;
+mod diagnostic;
 mod duckdb_stats;
 mod error;
 mod fake_audio_capturer;
@@ -16,6 +18,7 @@ mod virtual_client;
 mod wav_reader;
 mod y4m_reader;
 
+use std::process::ExitCode;
 use std::time::Duration;
 
 use shiguredo_openh264::Openh264Library;
@@ -272,7 +275,27 @@ fn verify_video_encoder_implementation_specs(
     Ok(())
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    // `zakuro lint` は負荷試験を起動せず JSONC 検証だけ行う
+    match cmd_lint::try_run() {
+        Ok(Some(code)) => return code,
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    }
+
+    match run_load_test() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_load_test() -> Result<()> {
     // `FakeAudioCapturer` などの libwebrtc 由来オブジェクトが !Send のため、
     // instance ごとの future は LocalSet 上で `spawn_local` する必要がある
     let rt = tokio::runtime::Runtime::new()
