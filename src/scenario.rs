@@ -12,9 +12,9 @@ use crate::duckdb_stats::ConnectionIds;
 
 /// シナリオ操作
 ///
-/// Exit / SendDataChannelMessage は組み込んだシナリオ種別がまだ存在しないため
-/// #[expect(dead_code)] を付けている。既存 reconnect シナリオへの組み込みは
-/// 後続対応のスコープであり、組み込み時に各 expect を外すこと。
+/// Exit / SendDataChannelMessage / PlayVoiceNumberClient は組み込んだシナリオ種別が
+/// まだ存在しないため #[expect(dead_code)] を付けている。既存 reconnect シナリオへの
+/// 組み込みは後続対応のスコープであり、組み込み時に各 expect を外すこと。
 #[derive(Debug, Clone)]
 pub(crate) enum ScenarioOp {
     /// ランダムな時間スリープする
@@ -40,6 +40,15 @@ pub(crate) enum ScenarioOp {
         min_size: usize,
         max_size: usize,
     },
+    /// 数字音声を再生する
+    ///
+    /// 再生番号は vc_id + 1 で決定し、vc_id + 1 が 100 以上の場合は再生しない
+    /// (C++ 版の Read は空を返すのと同じ)。再生要求はフェイク音声キャプチャへ
+    /// mpsc チャネルで送り、capturer が生成されていない場合は無視する。
+    ///
+    /// 本バリアントはテストで構築するため、テストビルドでは expect を外す。
+    #[cfg_attr(not(test), expect(dead_code))]
+    PlayVoiceNumberClient,
 }
 
 /// シナリオ実行の終了理由
@@ -92,8 +101,9 @@ pub(crate) fn build_scenario(scenario_type: ScenarioType) -> Scenario {
 /// C++ 版の再現:
 ///   Reconnect (= 接続) → [Sleep(1-5s)] × 9 → ループ先頭に戻る
 ///
-/// C++ 版では Sleep の間に PlayVoiceNumberClient が挟まるが、
-/// zakuro-rs では音声再生未対応のため Sleep のみ。
+/// C++ 版では Sleep の間に PlayVoiceNumberClient が挟まるが、zakuro-rs では
+/// reconnect シナリオへの組み込みが後続対応のため Sleep のみ (PlayVoiceNumberClient
+/// 操作自体は実装済み)。
 /// ループ先頭に戻ると呼び出し元が再接続する。
 fn build_reconnect_scenario() -> Scenario {
     let mut ops = Vec::new();
@@ -134,6 +144,11 @@ pub(crate) struct ScenarioPlayer {
     op_index: usize,
     instance_id: u32,
     vc_id: u32,
+    /// 数字音声の再生要求 (番号) をフェイク音声キャプチャへ送る送信側
+    ///
+    /// capturer が生成されない場合 (音声無効や `--input-mp4` / `--video-input-device`
+    /// 使用時) は None になり、PlayVoiceNumberClient 操作は無視する。
+    voice_tx: Option<std::sync::mpsc::Sender<u32>>,
     /// DataChannel 送信のラベル別カウンタ (再接続をまたいで永続する)
     dc_counter: HashMap<String, u64>,
     /// DataChannel ペイロード生成用の xorshift 状態 (送信ごとに更新する)
@@ -141,12 +156,18 @@ pub(crate) struct ScenarioPlayer {
 }
 
 impl ScenarioPlayer {
-    pub(crate) fn new(scenario: Scenario, instance_id: u32, vc_id: u32) -> Self {
+    pub(crate) fn new(
+        scenario: Scenario,
+        instance_id: u32,
+        vc_id: u32,
+        voice_tx: Option<std::sync::mpsc::Sender<u32>>,
+    ) -> Self {
         Self {
             scenario,
             op_index: 0,
             instance_id,
             vc_id,
+            voice_tx,
             dc_counter: HashMap::new(),
             xorshift_state: compute_seed(instance_id, vc_id),
         }
@@ -199,9 +220,30 @@ impl ScenarioPlayer {
                     // Exit で vc タスクが終了しプレイヤーが破棄されるため op_index は進めない
                     return ScenarioEnd::Exit;
                 }
+                ScenarioOp::PlayVoiceNumberClient => {
+                    self.play_voice_number_client();
+                }
             }
 
             self.advance();
+        }
+    }
+
+    /// PlayVoiceNumberClient 操作を実行する
+    ///
+    /// 再生番号は vc_id + 1 (C++ 版の Read(client_id + 1) 相当)。vc_id + 1 が
+    /// 100 以上の場合は再生しない (C++ 版の Read は 100 以上で空を返すのと同じ)。
+    /// フェイク音声キャプチャが生成されていない場合は再生要求を無視する。
+    fn play_voice_number_client(&self) {
+        // vc_id + 1 のオーバーフローを防ぐため saturating_add を使う
+        // (現実的に vc_id = u32::MAX には到達しないが、到達しても 100 以上として無視される)
+        let number = self.vc_id.saturating_add(1);
+        if number >= 100 {
+            return;
+        }
+        if let Some(tx) = &self.voice_tx {
+            // 音声スレッド終了後の send 失敗は無視する
+            let _ = tx.send(number);
         }
     }
 
@@ -476,7 +518,7 @@ mod tests {
             ],
             loop_index: 1,
         };
-        let mut player = ScenarioPlayer::new(scenario, 0, 0);
+        let mut player = ScenarioPlayer::new(scenario, 0, 0, None);
         assert_eq!(player.op_index, 0, "初期 op_index が 0 であること");
         player.advance();
         assert_eq!(player.op_index, 1, "1 回の advance で 1 になること");
@@ -495,7 +537,7 @@ mod tests {
             ],
             loop_index: 0,
         };
-        let mut player0 = ScenarioPlayer::new(scenario0, 0, 0);
+        let mut player0 = ScenarioPlayer::new(scenario0, 0, 0, None);
         player0.advance();
         player0.advance();
         assert_eq!(player0.op_index, 0, "実運用の loop_index=0 に戻ること");
@@ -514,7 +556,7 @@ mod tests {
             ops: vec![ScenarioOp::Exit],
             loop_index: 0,
         };
-        let mut player = ScenarioPlayer::new(scenario, 0, 0);
+        let mut player = ScenarioPlayer::new(scenario, 0, 0, None);
         let token = CancellationToken::new();
         let ids = std::sync::Mutex::new(None::<ConnectionIds>);
 
@@ -544,7 +586,7 @@ mod tests {
             ],
             loop_index: 0,
         };
-        let mut player = ScenarioPlayer::new(scenario, 0, 0);
+        let mut player = ScenarioPlayer::new(scenario, 0, 0, None);
         let token = CancellationToken::new();
         let ids = std::sync::Mutex::new(None::<ConnectionIds>);
 
@@ -575,7 +617,7 @@ mod tests {
             }],
             loop_index: 0,
         };
-        let mut player = ScenarioPlayer::new(scenario, 0, 0);
+        let mut player = ScenarioPlayer::new(scenario, 0, 0, None);
         let token = CancellationToken::new();
         token.cancel();
         let ids = std::sync::Mutex::new(None::<ConnectionIds>);
@@ -585,6 +627,85 @@ mod tests {
             end,
             ScenarioEnd::Exit,
             "キャンセル済みなら ScenarioEnd::Exit が返ること"
+        );
+    }
+
+    /// PlayVoiceNumberClient 操作で vc_id + 1 の番号が再生要求されることを検証する
+    ///
+    /// PlayVoiceNumberClient は handle を使わないため、実サーバー接続なしの
+    /// build_test_connection で実行分岐を検証できる。
+    #[tokio::test]
+    async fn test_run_until_disconnect_play_voice_number_client() {
+        let (_connection, handle) = build_test_connection();
+
+        let (voice_tx, voice_rx) = std::sync::mpsc::channel();
+        let scenario = Scenario {
+            ops: vec![ScenarioOp::PlayVoiceNumberClient, ScenarioOp::Disconnect],
+            loop_index: 0,
+        };
+        // vc_id = 3 なので再生番号は 4
+        let mut player = ScenarioPlayer::new(scenario, 0, 3, Some(voice_tx));
+        let token = CancellationToken::new();
+        let ids = std::sync::Mutex::new(None::<ConnectionIds>);
+
+        let end = player.run_until_disconnect(&token, &handle, &ids).await;
+        assert_eq!(
+            end,
+            ScenarioEnd::Reconnect,
+            "PlayVoiceNumberClient の後は続きの操作 (Disconnect) から進むこと"
+        );
+        assert_eq!(
+            voice_rx.try_recv().ok(),
+            Some(4),
+            "vc_id + 1 の番号が再生要求されること"
+        );
+    }
+
+    /// フェイク音声キャプチャ未生成 (voice_tx なし) では再生要求が無視されることを検証する
+    #[tokio::test]
+    async fn test_run_until_disconnect_play_voice_number_client_without_tx() {
+        let (_connection, handle) = build_test_connection();
+
+        let scenario = Scenario {
+            ops: vec![ScenarioOp::PlayVoiceNumberClient, ScenarioOp::Disconnect],
+            loop_index: 0,
+        };
+        let mut player = ScenarioPlayer::new(scenario, 0, 0, None);
+        let token = CancellationToken::new();
+        let ids = std::sync::Mutex::new(None::<ConnectionIds>);
+
+        let end = player.run_until_disconnect(&token, &handle, &ids).await;
+        assert_eq!(
+            end,
+            ScenarioEnd::Reconnect,
+            "voice_tx なしでもパニックせず続きの操作へ進むこと"
+        );
+    }
+
+    /// vc_id + 1 が 100 以上の場合に再生要求が送られないことを検証する
+    #[tokio::test]
+    async fn test_run_until_disconnect_play_voice_number_client_over_100() {
+        let (_connection, handle) = build_test_connection();
+
+        let (voice_tx, voice_rx) = std::sync::mpsc::channel();
+        let scenario = Scenario {
+            ops: vec![ScenarioOp::PlayVoiceNumberClient, ScenarioOp::Disconnect],
+            loop_index: 0,
+        };
+        // vc_id = 99 なので再生番号は 100 (再生しない)
+        let mut player = ScenarioPlayer::new(scenario, 0, 99, Some(voice_tx));
+        let token = CancellationToken::new();
+        let ids = std::sync::Mutex::new(None::<ConnectionIds>);
+
+        let end = player.run_until_disconnect(&token, &handle, &ids).await;
+        assert_eq!(
+            end,
+            ScenarioEnd::Reconnect,
+            "100 以上でもパニックせず続きの操作へ進むこと"
+        );
+        assert!(
+            voice_rx.try_recv().is_err(),
+            "vc_id + 1 が 100 以上なら再生要求されないこと"
         );
     }
 

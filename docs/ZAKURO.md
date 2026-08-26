@@ -300,7 +300,7 @@ POST /rpc          → JSON-RPC 2.0
 - [x] reconnect シナリオ (9 回のランダム Sleep 後に切断 → 再接続ループ)
 - [x] DataChannel メッセージ自動送信 (ZAKURO ヘッダ付き)
 - [x] vcs-hatch-rate (段階的起動)
-- [ ] シナリオ操作 PlayVoiceNumberClient (数字音声ソース未対応のため)
+- [x] シナリオ操作 PlayVoiceNumberClient (数字音声 0-99 再生、16kHz 断片を 48kHz にリサンプル)
 - [x] シナリオ操作 SendDataChannelMessage
 - [x] シナリオ操作 Exit
 - [ ] シナリオ操作 Reconnect
@@ -312,7 +312,7 @@ POST /rpc          → JSON-RPC 2.0
 - [x] NopVideoDecoder (受信映像廃棄)
 - [x] DuckDB ファイルへの統計情報出力 (`--duckdb-output-dir` / `--duckdb-interval` / `--no-duckdb-output`)
 - [x] ログレベル制御 (`--log-level`)
-- [ ] 埋め込みリソース (フォント・音声)
+- [ ] 埋め込みリソース (フォント。数字音声断片は PlayVoiceNumberClient 用に埋め込み済み)
 - [ ] connection ID ファイル出力 (`--output-file-connection-id`, DuckDB で代替可能)
 
 ### sora-rust-sdk / webrtc-rs 側の制約により未実装の機能

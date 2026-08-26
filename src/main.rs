@@ -13,6 +13,7 @@ mod stats;
 mod video_codec_capability;
 mod video_device_capturer;
 mod virtual_client;
+mod voice_number_reader;
 mod wav_reader;
 mod y4m_reader;
 
@@ -601,9 +602,10 @@ async fn run_zakuro_instance(
     // 必要がある。そのため context を先に宣言し、capturer は後で late-bind する。
     // context_config 構築時には capturer の audio_device_module() ハンドルが必要なので、
     // 構築ブロック内で一時生成して Option として持ち出す。
-    let (context_config, pending_audio_capturer): (
+    let (context_config, pending_audio_capturer, scenario_voice_tx): (
         SoraConnectionContextConfig,
         Option<fake_audio_capturer::FakeAudioCapturer>,
+        Option<std::sync::mpsc::Sender<u32>>,
     ) = {
         let mut config = SoraConnectionContextConfig {
             adm_config: AdmConfig::NoAudioDevice,
@@ -620,10 +622,13 @@ async fn run_zakuro_instance(
         } else {
             None
         };
+        // 数字音声の再生要求送信側 (シナリオ操作が使う。capturer 未生成時は None)
+        let mut scenario_voice_tx = None;
         let pending = if let Some(source) = fake_source {
             let mut capturer = fake_audio_capturer::FakeAudioCapturer::new(source);
             capturer.start();
             config.adm_config = AdmConfig::UseExternal(capturer.audio_device_module());
+            scenario_voice_tx = Some(capturer.voice_number_tx());
             Some(capturer)
         } else {
             None
@@ -664,7 +669,7 @@ async fn run_zakuro_instance(
             &encoder_implementation_specs(&instance),
         )?;
 
-        (config, pending)
+        (config, pending, scenario_voice_tx)
     };
 
     // mp4_reader は capability 登録用に構築したもので、ここで役目を終える。
@@ -780,6 +785,7 @@ async fn run_zakuro_instance(
         client_cert: client_cert_pem,
         client_key: client_key_pem,
         scenario: instance.scenario.map(scenario::build_scenario),
+        scenario_voice_tx,
         duckdb_client,
         duckdb_interval,
     };

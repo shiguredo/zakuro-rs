@@ -20,6 +20,8 @@
   - @voluntas
 - [ADD] DataChannel メッセージング (`--sora-data-channels`) / シナリオ機能 (`--scenario reconnect`) に対応する
   - @voluntas
+- [ADD] シナリオ操作 PlayVoiceNumberClient (数字音声 0-99 再生) に対応する
+  - @voluntas
 - [ADD] OpenH264 エンコード (`--openh264`) / NopVideoDecoder (受信映像廃棄) に対応する
   - @voluntas
 - [ADD] 映像コーデック指定 (VP8/VP9/AV1/H264/H265) / 解像度 / フレームレート / ビットレート指定に対応する

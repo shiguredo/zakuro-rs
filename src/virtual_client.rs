@@ -46,6 +46,11 @@ pub(crate) struct VirtualClientConfig {
     pub(crate) client_cert: Option<String>,
     pub(crate) client_key: Option<String>,
     pub(crate) scenario: Option<Scenario>,
+    /// 数字音声の再生要求 (番号) をフェイク音声キャプチャへ送る送信側
+    ///
+    /// capturer が生成されない場合 (音声無効や `--input-mp4` / `--video-input-device`
+    /// 使用時) は None になり、PlayVoiceNumberClient 操作は無視する。
+    pub(crate) scenario_voice_tx: Option<std::sync::mpsc::Sender<u32>>,
     /// DuckDB 統計書き込みクライアント (disabled 時は noop)
     pub(crate) duckdb_client: DuckDBClient,
     /// DuckDB への統計書き込み間隔
@@ -81,10 +86,14 @@ pub(crate) async fn run(
     // (フィーダースレッドが停止すると video_source へのフレーム供給が止まるため)。
     let _mp4_capturer = mp4_capturer;
     let mut retry_count: u32 = 0;
-    let mut scenario_player = config
-        .scenario
-        .clone()
-        .map(|scenario| ScenarioPlayer::new(scenario, instance_id, vc_id));
+    let mut scenario_player = config.scenario.clone().map(|scenario| {
+        ScenarioPlayer::new(
+            scenario,
+            instance_id,
+            vc_id,
+            config.scenario_voice_tx.clone(),
+        )
+    });
 
     loop {
         let connection_token = token.child_token();
