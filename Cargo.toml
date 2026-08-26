@@ -65,5 +65,7 @@ features = [
 ]
 
 [dev-dependencies]
+# スナップショットテスト (フォーマッタ出力の golden master)
+insta = "1.48"
 # テストで一時ディレクトリを使う
 tempfile = "3.27"

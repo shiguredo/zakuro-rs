@@ -1,0 +1,15 @@
+---
+source: src/jsonc_fmt.rs
+expression: render(input)
+---
+--- input ---
+{
+  "key1": "value1", // Comment after value
+  "key2": "value2", // Another comment
+  // Final comment before trailing comma
+}--- output ---
+{
+  "key1": "value1", // Comment after value
+  "key2": "value2", // Another comment
+  // Final comment before trailing comma
+}

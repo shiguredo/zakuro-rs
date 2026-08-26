@@ -1,0 +1,19 @@
+---
+source: src/jsonc_fmt.rs
+expression: render(input)
+---
+--- input ---
+{
+"level1": {
+    "level2": {
+      "level3": "value"
+    }
+  }
+}--- output ---
+{
+  "level1": {
+    "level2": {
+      "level3": "value"
+    }
+  }
+}

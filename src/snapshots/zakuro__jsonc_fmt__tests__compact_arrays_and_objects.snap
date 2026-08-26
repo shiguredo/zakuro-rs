@@ -1,0 +1,7 @@
+---
+source: src/jsonc_fmt.rs
+expression: render(input)
+---
+--- input ---
+{"a": 1, "b": 2}--- output ---
+{"a": 1, "b": 2}

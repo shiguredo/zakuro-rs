@@ -1,4 +1,5 @@
 mod args;
+mod cmd_fmt;
 mod cmd_lint;
 mod data_channel;
 mod diagnostic;
@@ -8,6 +9,7 @@ mod fake_audio_capturer;
 mod fake_video_capturer;
 mod http_server;
 mod json_rpc;
+mod jsonc_fmt;
 mod nop_video_decoder;
 mod openh264_video_codec;
 mod scenario;
@@ -276,13 +278,15 @@ fn verify_video_encoder_implementation_specs(
 }
 
 fn main() -> ExitCode {
-    // `zakuro lint` は負荷試験を起動せず JSONC 検証だけ行う
-    match cmd_lint::try_run() {
-        Ok(Some(code)) => return code,
-        Ok(None) => {}
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
+    // `zakuro lint` / `zakuro fmt` は負荷試験を起動しない
+    for try_run in [cmd_lint::try_run, cmd_fmt::try_run] {
+        match try_run() {
+            Ok(Some(code)) => return code,
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
         }
     }
 

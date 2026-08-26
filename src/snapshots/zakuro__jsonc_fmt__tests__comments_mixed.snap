@@ -1,0 +1,17 @@
+---
+source: src/jsonc_fmt.rs
+expression: render(input)
+---
+--- input ---
+{
+  // Comment before key
+  "key1": "value1", // Trailing comment
+  /* Block comment */
+  "key2": "value2"
+}--- output ---
+{
+  // Comment before key
+  "key1": "value1", // Trailing comment
+  /* Block comment */
+  "key2": "value2"
+}
