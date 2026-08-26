@@ -1,7 +1,7 @@
 # lint / fmt サブコマンドを追加する
 
 - Created: 2026-08-26
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-26
 - Branch: feature/add-lint-fmt-subcommands
 - Polished: {YYYY-MM-DD}
 
@@ -44,3 +44,20 @@ JSONC 設定ファイルに対する lint (妥当性検証) と fmt (整形) を
 - `zakuro lint <FILE.jsonc>` で、正しい設定は exit 0、不正な設定は非 0 になり、Sora に接続しない
 - `zakuro fmt <FILE.jsonc>` で JSONC が整形され、整形前後でコメント・空行・trailing comma が保持される
 - 通常の負荷試験起動 (`zakuro --config ...` や CLI フラグのみ) の挙動は変えない
+
+## 解決方法
+
+`lint` を実装して本 issue を closed にする。`fmt` は未実装のまま別 issue で対応する。
+
+実装内容 (`lint`):
+
+- `zakuro lint <FILE.jsonc>` サブコマンドを追加 (`src/cmd_lint.rs`)
+- 構文エラーは `RawJson::parse_jsonc` の位置情報付きで報告する
+- 意味検証は `validate_jsonc_config_str` 経由で `parse_jsonc_config` / `parse_args_from_argv` を再利用する (Sora 接続・OpenH264 dlopen・PEM 読み込みは行わない)
+- 診断出力は mikan と同系統の `annotate-snippets` を使う (`src/diagnostic.rs`)
+- 成功時は無出力 exit 0、失敗時は stderr に診断を出して exit 1
+- 通常の負荷試験起動 (`zakuro --config ...` 等) の挙動は変えない
+
+未実装 (`fmt`):
+
+- コメント保持 JSONC 整形 (`jcfmt` 相当の内製) は別 issue で起票する
