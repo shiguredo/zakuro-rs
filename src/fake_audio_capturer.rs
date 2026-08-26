@@ -114,68 +114,10 @@ impl GeneratedAudio {
 ///
 /// `Generated` は C++ Safari 相当の BIP / BOP / HUM / ノイズ 2 秒ループ。
 /// `Wav` は WAV ファイルを 48kHz モノラルにリサンプリング済みのサンプル列として
-/// ループ再生する。`VoiceNumber` はシナリオの PlayVoiceNumberClient 操作で
-/// 再生する数字音声で、再生完了後に元のソースへ戻る。
+/// ループ再生する。
 pub(crate) enum FakeAudioSource {
     Generated(GeneratedAudio),
     Wav(WavReader),
-    /// 数字音声の再生中のみ一時的に有効なソース (再生完了後に元のソースへ戻る)
-    VoiceNumber(VoiceNumberAudio),
-}
-
-/// 数字音声の再生状態
-///
-/// C++ 版の GameAudioManager (Play でバッファを置き換え、Render で消費して
-/// 無音に戻る) に相当する機能を持つ。GameAudioManager 本体は実装しない方針のため、
-/// 数字音声の再生に必要な機能だけを本構造に内包する。zakuro-rs では再生完了後に
-/// `original` のソースへ戻って常時送出を継続する (C++ 版は数字音声のない間は
-/// 無音になる。意図した差分)。
-pub(crate) struct VoiceNumberAudio {
-    /// 再生前に戻る元のソース
-    original: Box<FakeAudioSource>,
-    /// 48kHz モノラルの数字音声サンプル列
-    samples: Vec<i16>,
-    /// 次に返すサンプル位置
-    cursor: usize,
-}
-
-impl FakeAudioSource {
-    /// 数字音声で一時的に置き換える
-    ///
-    /// 既に数字音声の再生中なら元のソースを保持したままサンプルだけ差し替える
-    /// (capturer は instance 単位で 1 つのため、複数 vc の同時要求は最後勝ちで
-    /// 置き換わる)。
-    fn with_voice(self, samples: Vec<i16>) -> Self {
-        match self {
-            Self::VoiceNumber(voice) => Self::VoiceNumber(VoiceNumberAudio {
-                original: voice.original,
-                samples,
-                cursor: 0,
-            }),
-            other => Self::VoiceNumber(VoiceNumberAudio {
-                original: Box::new(other),
-                samples,
-                cursor: 0,
-            }),
-        }
-    }
-
-    /// 数字音声の再生が完了しているか
-    fn voice_finished(&self) -> bool {
-        matches!(
-            self,
-            Self::VoiceNumber(VoiceNumberAudio { cursor, samples, .. })
-                if *cursor >= samples.len()
-        )
-    }
-
-    /// 数字音声の再生が完了していたら元のソースへ戻す
-    fn revert_voice(self) -> Self {
-        match self {
-            Self::VoiceNumber(voice) => *voice.original,
-            other => other,
-        }
-    }
 }
 
 /// フェイク音声キャプチャの内部状態 (スレッド間で共有する制御フラグのみ)
@@ -193,17 +135,12 @@ struct FakeAudioState {
 ///
 /// - `FakeAudioSource::Generated`: Safari 相当の 2 秒ループを常時送出する。
 /// - `FakeAudioSource::Wav`: WAV ファイルから読み込んだサンプル列をループ再生する。
-/// - `FakeAudioSource::VoiceNumber`: シナリオ操作の再生要求で一時的に数字音声を送出する。
 pub(crate) struct FakeAudioCapturer {
     adm: AudioDeviceModule,
     state: FakeAudioState,
     /// `start()` で音声スレッドに move する。
     source: Option<FakeAudioSource>,
     handle: Option<thread::JoinHandle<()>>,
-    /// 数字音声の再生要求 (番号) を音声スレッドへ送る送信側
-    voice_tx: std::sync::mpsc::Sender<u32>,
-    /// `start()` で音声スレッドに move する受信側
-    voice_rx: Option<std::sync::mpsc::Receiver<u32>>,
 }
 
 struct FakeAudioHandler {
@@ -290,29 +227,16 @@ impl FakeAudioCapturer {
             stop,
         };
 
-        // 数字音声の再生要求チャネル (受信側は start() で音声スレッドに move する)
-        let (voice_tx, voice_rx) = std::sync::mpsc::channel::<u32>();
-
         Self {
             adm,
             state,
             source: Some(source),
             handle: None,
-            voice_tx,
-            voice_rx: Some(voice_rx),
         }
     }
 
     pub(crate) fn audio_device_module(&self) -> AudioDeviceModule {
         self.adm.clone()
-    }
-
-    /// 数字音声の再生要求を送る送信側を返す
-    ///
-    /// シナリオプレイヤーなどがこの送信側を clone して使い、番号 (vc_id + 1) を
-    /// 送ると数字音声が再生される。
-    pub(crate) fn voice_number_tx(&self) -> std::sync::mpsc::Sender<u32> {
-        self.voice_tx.clone()
     }
 
     pub(crate) fn start(&mut self) {
@@ -326,14 +250,10 @@ impl FakeAudioCapturer {
             .source
             .take()
             .expect("FakeAudioCapturer::start called twice");
-        let voice_rx = self
-            .voice_rx
-            .take()
-            .expect("FakeAudioCapturer::start called twice");
         let handle = thread::Builder::new()
             .name("fake-audio-capturer".to_string())
             .spawn(move || {
-                audio_thread(state, source, voice_rx);
+                audio_thread(state, source);
             })
             .expect("failed to spawn fake audio thread");
 
@@ -351,14 +271,7 @@ impl Drop for FakeAudioCapturer {
 }
 
 /// 10ms ごとに PCM データを生成して WebRTC に送信するスレッド
-///
-/// 数字音声の再生要求 (番号) は mpsc チャネルで受け取り、最後勝ちで再生する。
-/// 再生が完了すると元のソース (Generated / Wav) へ戻って常時送出を継続する。
-fn audio_thread(
-    state: FakeAudioState,
-    mut source: FakeAudioSource,
-    voice_rx: std::sync::mpsc::Receiver<u32>,
-) {
+fn audio_thread(state: FakeAudioState, mut source: FakeAudioSource) {
     // 10ms 分のサンプル数
     let samples_per_10ms = (SAMPLE_RATE / 100) as usize;
     let mut buffer = vec![0i16; samples_per_10ms * CHANNELS];
@@ -367,20 +280,6 @@ fn audio_thread(
     let mut next_time = std::time::Instant::now();
 
     while !state.stop.load(Ordering::Acquire) {
-        // 数字音声の再生要求を最後勝ちで受け付ける
-        // (capturer は instance 単位で 1 つのため、複数 vc の同時要求は最後の要求で置き換わる)
-        while let Ok(number) = voice_rx.try_recv() {
-            let samples = crate::voice_number_reader::read(number);
-            if samples.is_empty() {
-                continue;
-            }
-            source = source.with_voice(samples);
-        }
-        // 数字音声の再生が完了したら元のソースへ戻す
-        if source.voice_finished() {
-            source = source.revert_voice();
-        }
-
         match &mut source {
             FakeAudioSource::Generated(generated) => {
                 generated.read_samples(&mut buffer);
@@ -388,16 +287,6 @@ fn audio_thread(
             FakeAudioSource::Wav(reader) => {
                 // WAV からサンプルを取り出してループ再生する
                 reader.read_samples(&mut buffer);
-            }
-            FakeAudioSource::VoiceNumber(voice) => {
-                // 数字音声の続きでバッファを埋める (末尾に達した分は無音)
-                // 再生完了は次のイテレーション先頭で判定して元のソースへ戻るため、
-                // サンプル数が 10ms フレームの整数倍でない場合は末尾に最大 1 フレーム
-                // (10ms) の無音が入る (フレーム粒度に起因する意図した挙動)
-                for slot in buffer.iter_mut() {
-                    *slot = voice.samples.get(voice.cursor).copied().unwrap_or(0);
-                    voice.cursor += 1;
-                }
             }
         }
 
@@ -547,74 +436,5 @@ mod tests {
             "末尾到達後は先頭から繰り返し、出力長が要求どおりのはず"
         );
         assert_eq!(generated.cursor, 4, "カーソルは折り返し後の位置のはず");
-    }
-
-    /// 数字音声で一時的に置き換わり、再生完了で元のソースへ戻ることを検証する
-    #[test]
-    fn voice_number_replaces_then_reverts_to_original() {
-        let original = FakeAudioSource::Generated(GeneratedAudio::new());
-        let source = original.with_voice(vec![1, 2, 3]);
-
-        let FakeAudioSource::VoiceNumber(voice) = &source else {
-            panic!("with_voice 後は VoiceNumber になること");
-        };
-        assert_eq!(voice.samples, vec![1, 2, 3], "再生サンプルが設定されること");
-        assert!(
-            !source.voice_finished(),
-            "カーソル 0 の状態では再生未完了であること"
-        );
-
-        // カーソルを末尾まで進めて再生完了状態にする
-        let mut source = source;
-        if let FakeAudioSource::VoiceNumber(voice) = &mut source {
-            voice.cursor = voice.samples.len();
-        }
-        assert!(
-            source.voice_finished(),
-            "カーソルが末尾なら再生完了であること"
-        );
-
-        let reverted = source.revert_voice();
-        assert!(
-            matches!(reverted, FakeAudioSource::Generated(_)),
-            "再生完了後は元のソースへ戻ること"
-        );
-    }
-
-    /// 数字音声再生中の再要求はサンプルだけ差し替わり、元のソースが保持されることを検証する
-    ///
-    /// capturer は instance 単位で 1 つのため、複数 vc の同時要求は最後勝ちで
-    /// 置き換わる (C++ 版との意図した差分)。
-    #[test]
-    fn voice_number_replaces_samples_keeping_original() {
-        let original = FakeAudioSource::Generated(GeneratedAudio::new());
-        let source = original
-            .with_voice(vec![1, 2, 3])
-            .with_voice(vec![4, 5, 6, 7]);
-
-        let FakeAudioSource::VoiceNumber(voice) = &source else {
-            panic!("with_voice 後は VoiceNumber になること");
-        };
-        assert_eq!(
-            voice.samples,
-            vec![4, 5, 6, 7],
-            "最後の要求のサンプルで置き換わること"
-        );
-        assert_eq!(voice.cursor, 0, "カーソルは 0 に戻ること");
-        assert!(
-            matches!(*voice.original, FakeAudioSource::Generated(_)),
-            "元のソースが保持されること"
-        );
-    }
-
-    /// 元のソースが VoiceNumber でない場合も revert_voice でそのまま返ることを検証する
-    #[test]
-    fn revert_voice_returns_unchanged_source() {
-        let source = FakeAudioSource::Generated(GeneratedAudio::new());
-        let reverted = source.revert_voice();
-        assert!(
-            matches!(reverted, FakeAudioSource::Generated(_)),
-            "VoiceNumber でないソースはそのまま返ること"
-        );
     }
 }

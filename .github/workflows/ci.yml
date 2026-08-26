@@ -4,7 +4,6 @@ on:
   push:
     paths:
       - "src/**"
-      - "resource/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "Makefile"

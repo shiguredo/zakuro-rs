@@ -107,12 +107,12 @@ Bytes 22-47: Connection ID (最大 26 文字)
 ### シナリオ操作
 
 - OpSleep: 待機
-- OpPlayVoiceNumberClient: 数字音声再生
 - OpSendDataChannelMessage: メッセージ送信
 - OpDisconnect: 切断
 - OpReconnect: 再接続
 - OpExit: 終了
-- OpPlaySubScenario: サブシナリオ再生
+- OpPlaySubScenario: サブシナリオ再生 (実装しない)
+- OpPlayVoiceNumberClient: 数字音声再生 (実装しない)
 
 ### HTTP API
 
@@ -297,10 +297,9 @@ POST /rpc          → JSON-RPC 2.0
 ### シナリオ
 
 - [x] ScenarioPlayer (Sleep, Disconnect, Reconnect 操作)
-- [x] reconnect シナリオ (Reconnect → [Sleep(1-5s) + PlayVoiceNumberClient] × 8 → Sleep(1-5s) → ループ先頭 (Reconnect) に戻る)
+- [x] reconnect シナリオ (Reconnect → [Sleep(1-5s)] × 9 → ループ先頭 (Reconnect) に戻る。C++ 版の PlayVoiceNumberClient は実装しない)
 - [x] DataChannel メッセージ自動送信 (ZAKURO ヘッダ付き)
 - [x] vcs-hatch-rate (段階的起動)
-- [x] シナリオ操作 PlayVoiceNumberClient (数字音声 0-99 再生、16kHz 断片を 48kHz にリサンプル)
 - [x] シナリオ操作 SendDataChannelMessage
 - [x] シナリオ操作 Exit
 - [x] シナリオ操作 Reconnect
@@ -312,7 +311,7 @@ POST /rpc          → JSON-RPC 2.0
 - [x] NopVideoDecoder (受信映像廃棄)
 - [x] DuckDB ファイルへの統計情報出力 (`--duckdb-output-dir` / `--duckdb-interval` / `--no-duckdb-output`)
 - [x] ログレベル制御 (`--log-level`)
-- [ ] 埋め込みリソース (フォント。数字音声断片は PlayVoiceNumberClient 用に埋め込み済み)
+- [ ] 埋め込みリソース (フォント)
 - [ ] connection ID ファイル出力 (`--output-file-connection-id`, DuckDB で代替可能)
 
 ### sora-rust-sdk / webrtc-rs 側の制約により未実装の機能
@@ -327,6 +326,7 @@ POST /rpc          → JSON-RPC 2.0
 - GameKeyCore (キーボード入力制御)
 - GameAudioManager (ゲーム音声)
 - シナリオ操作 PlaySubScenario (実用例がなく DataChannel 連続送信は別実装で実現済みのため)
+- シナリオ操作 PlayVoiceNumberClient (数字音声再生。GameAudioManager 非実装方針に合わせ、C++ 版との差分として許容する)
 - スポットライト数指定 (`--sora-spotlight-number`, Sora で非推奨のため sora-rust-sdk も対象外)
 
 ### 設計差分

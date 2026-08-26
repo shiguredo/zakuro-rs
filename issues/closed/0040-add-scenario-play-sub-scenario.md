@@ -12,7 +12,7 @@ zakuro (C++) の ScenarioPlayer は `OpPlaySubScenario` を持ち、名前付き
 ## 現状
 
 - `src/scenario.rs` の `ScenarioOp` は `Sleep` と `Disconnect` のみで、シナリオは 1 つの ops ベクターを op_index で直列に実行するだけであり、サブシナリオの概念がない
-- DataChannel 連続送信は `src/data_channel.rs` の `run_messaging()` タスクで実現済み (C++ 版は dcs サブシナリオで実現)。数字音声はシナリオ操作 PlayVoiceNumberClient の対応時に `src/fake_audio_capturer.rs` の `FakeAudioSource` へ追加される予定
+- DataChannel 連続送信は `src/data_channel.rs` の `run_messaging()` タスクで実現済み (C++ 版は dcs サブシナリオで実現)。数字音声はシナリオ操作 PlayVoiceNumberClient で対応する想定だったが、後に非対応とした
 - C++ 版の `OpPlaySubScenario` は `name` / `data` (サブシナリオの ScenarioData) / `loop_op_index` を持ち、サブシナリオは独立したループ開始位置を持つ
 
 ## 設計方針
@@ -35,7 +35,7 @@ zakuro (C++) の ScenarioPlayer は `OpPlaySubScenario` を持ち、名前付き
 
 判定根拠 (陳腐化):
 
-- zakuro-rs ではサブシナリオ機構の実用例が存在しない。DataChannel 連続送信は `src/data_channel.rs` の `run_messaging()` が実現済み (本 issue 自身がスコープ外と宣言)、数字音声はシナリオ操作 PlayVoiceNumberClient の対応で `src/fake_audio_capturer.rs` の `FakeAudioSource` へ直接組み込む予定
+- zakuro-rs ではサブシナリオ機構の実用例が存在しない。DataChannel 連続送信は `src/data_channel.rs` の `run_messaging()` が実現済み (本 issue 自身がスコープ外と宣言)、数字音声はシナリオ操作 PlayVoiceNumberClient で対応する想定だったが後に非対応とした
 - CLI のシナリオは `--scenario reconnect` のみで、PlaySubScenario を含むシナリオ種別が選択できないため、機構を追加してもデッドコードになる
 - C++ 版との機能互換性は、0016 (closed) の判断と同じく「観測可能な機能を別実装で実現」で満たされる (並行実行は tokio タスクで実現済み)
 

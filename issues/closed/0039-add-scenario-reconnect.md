@@ -34,7 +34,7 @@ zakuro (C++) の ScenarioPlayer は `OpReconnect` を持ち、シナリオ実行
 
 設計方針どおり、`ScenarioOp` に `Reconnect` を追加し、`build_reconnect_scenario()` を C++ 版と同じ構造へ書き換えた。呼び出し元 (外側ループ) は既存の `ScenarioEnd::Reconnect` 経路で切断 → 即再接続するため、新しい分岐は不要だった。
 
-- `src/scenario.rs`: `ScenarioOp` に `Reconnect` (引数なし) を追加。`run_until_disconnect()` は Reconnect 到達時に op_index を進めてから `ScenarioEnd::Reconnect` を返す (Disconnect 操作と同じ動作。再接続後は続きの操作から再開される)。`build_reconnect_scenario()` を「Reconnect → [Sleep(1-5s) + PlayVoiceNumberClient] × 8 → Sleep(1-5s) → ループ先頭 (Reconnect)」の 18 ops / loop_index 0 に書き換え。PlayVoiceNumberClient は reconnect シナリオに組み込んだため `#[cfg_attr(not(test), expect(dead_code))]` を外し、逆に reconnect シナリオから使われなくなった Disconnect に `#[cfg_attr(not(test), expect(dead_code))]` を付けた (既存 Exit と同じパターン)
+- `src/scenario.rs`: `ScenarioOp` に `Reconnect` (引数なし) を追加。`run_until_disconnect()` は Reconnect 到達時に op_index を進めてから `ScenarioEnd::Reconnect` を返す (Disconnect 操作と同じ動作。再接続後は続きの操作から再開される)。`build_reconnect_scenario()` を「Reconnect → [Sleep(1-5s)] × 9 → ループ先頭 (Reconnect)」の 10 ops / loop_index 0 に書き換え (当初は PlayVoiceNumberClient を挟む 18 ops だったが、数字音声を非対応としたため Sleep のみに変更)。reconnect シナリオから使われなくなった Disconnect に `#[cfg_attr(not(test), expect(dead_code))]` を付けた (既存 Exit と同じパターン)
 - `src/virtual_client.rs`: シナリオモードのコメントを Reconnect を含む形に更新 (コード変更なし)
 - 接続確立直後に先頭の Reconnect が切断 → 再接続を 1 回行う点は設計方針どおりの意図した差分 (初回接続は短命になり、接続 2 以降の各接続が Sleep 合計 9-45 秒で持続する)
 
@@ -42,6 +42,8 @@ zakuro (C++) の ScenarioPlayer は `OpReconnect` を持ち、シナリオ実行
 
 - `test_run_until_disconnect_reconnect_op`: Reconnect 操作で `ScenarioEnd::Reconnect` が返り、op_index が進むこと
 - `test_run_until_disconnect_reconnect_after_loop_wrap`: ループ折返し後に先頭の Reconnect へ戻り、再接続後も op_index 1 (先頭 Reconnect の次) から再開されること
-- `test_build_reconnect_scenario_matches_cpp_structure`: reconnect シナリオが C++ 版と同じ構造 (18 ops / loop_index 0 / [Sleep + PlayVoiceNumberClient] × 8 の交互 / Sleep 1-5 秒) であること
+- `test_build_reconnect_scenario_structure`: reconnect シナリオが Reconnect → [Sleep] × 9 の構造であること
 
-実サーバーでの手動確認は、シナリオ操作 PlayVoiceNumberClient (0038) の数字音声再生確認とあわせて実施する。確認時は「初回接続が短命であること」「以降の各接続の持続時間が 9-45 秒のパターンになること (続きの操作からの再開)」を確認する (初回接続の DuckDB 接続行はタイミング依存で現れない可能性がある)。
+実サーバーでの手動確認時は「初回接続が短命であること」「以降の各接続の持続時間が 9-45 秒のパターンになること (続きの操作からの再開)」を確認する (初回接続の DuckDB 接続行はタイミング依存で現れない可能性がある)。
+
+その後、PlayVoiceNumberClient を zakuro-rs では非対応としたため、reconnect シナリオから数字音声操作を外し `Reconnect → [Sleep(1-5s)] × 9 → ループ` に変更した (C++ 版との差分として許容)。
