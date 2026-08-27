@@ -84,3 +84,7 @@
 - MP4 音声 demux、Opus / AAC デコード、有界 PCM キュー、`FakeAudioCapturer` 配線、CLI 排他、ステレオダウンミックスなど、zakuro 単独でも実装範囲が広い
 - 負荷試験としての優先度は映像パススルーに比べ低く、いま着手する必然性が薄い
 - エンコード済み Opus のパススルーはさらに sora-rust-sdk / webrtc-rs の変更が必要で、本 issue の再エンコード方式でも上記の実装量がある
+
+## reopened にした理由
+
+pending にしたのは誤りで、後回しにする対象は sora-rust-sdk 側の MP4 音声対応である。zakuro-rs の本 issue は open のまま残す。
