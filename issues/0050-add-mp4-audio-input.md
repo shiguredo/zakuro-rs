@@ -76,3 +76,11 @@
 - `src/main.rs`（`use_fake_audio` 条件、MP4 音声ソースの組み立て）
 - `src/args.rs`（`--input-mp4` と `--input-wav` の排他）
 - `docs/ZAKURO.md`
+
+## pending にした理由
+
+調査の結果、対応量が想定より大きいため後回しとする。
+
+- MP4 音声 demux、Opus / AAC デコード、有界 PCM キュー、`FakeAudioCapturer` 配線、CLI 排他、ステレオダウンミックスなど、zakuro 単独でも実装範囲が広い
+- 負荷試験としての優先度は映像パススルーに比べ低く、いま着手する必然性が薄い
+- エンコード済み Opus のパススルーはさらに sora-rust-sdk / webrtc-rs の変更が必要で、本 issue の再エンコード方式でも上記の実装量がある
