@@ -1,7 +1,7 @@
 # fmt サブコマンドを追加する
 
 - Created: 2026-08-26
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-26
 - Branch: feature/add-fmt-subcommand
 - Polished: {YYYY-MM-DD}
 
@@ -33,3 +33,11 @@ JSONC 設定ファイルを、負荷試験起動とは独立した `zakuro fmt` 
 - `zakuro fmt <FILE.jsonc>` で JSONC が整形され、整形前後でコメント・空行・trailing comma が保持される
 - 構文エラー時は非 0 で、lint と同様の診断形式が stderr に出る
 - 通常の負荷試験起動 (`zakuro --config ...` や CLI フラグのみ) の挙動は変えない
+
+## 解決方法
+
+- `zakuro fmt <FILE.jsonc>` サブコマンドを追加 (`src/cmd_fmt.rs`、`src/main.rs` の pre-parse 経路に登録)
+- 整形処理は `src/jsonc_fmt.rs` に `RawJson::parse_jsonc` の comment ranges を辿る実装を追加し、`jcfmt` 相当を zakuro 内へ移植 (外部プロセス起動・依存追加なし)
+- `//` / `/* */` (inline / trailing)・空行・trailing comma を保持したまま 2 スペースインデントへ正規化する
+- 構文エラー時は `src/diagnostic.rs` の `annotate-snippets` 形式で stderr に診断を出して exit 1
+- 整形前後で変更が無いときはファイルを書き換えず exit 0 (無出力)
