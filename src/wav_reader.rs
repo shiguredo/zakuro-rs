@@ -189,7 +189,8 @@ fn parse_wav(buf: &[u8]) -> Result<ParsedWav> {
 /// 多チャンネルを平均化してモノラル化する
 ///
 /// ステレオの場合、サンプル列が L0, R0, L1, R1, ... の順に並んでいる前提。
-fn downmix_to_mono(samples: &[i16], channels: u16) -> Vec<i16> {
+/// MP4 音声 (mp4_audio モジュール) のステレオダウンミックスにも利用する。
+pub(crate) fn downmix_to_mono(samples: &[i16], channels: u16) -> Vec<i16> {
     if channels == 1 {
         return samples.to_vec();
     }
@@ -205,7 +206,8 @@ fn downmix_to_mono(samples: &[i16], channels: u16) -> Vec<i16> {
 /// 線形補間で `in_rate` Hz から `out_rate` Hz にリサンプリングする
 ///
 /// 性能より堅牢性優先で単純な線形補間を採用。負荷試験用の音声品質としては十分。
-fn resample(input: &[i16], in_rate: u32, out_rate: u32) -> Vec<i16> {
+/// MP4 音声 (mp4_audio モジュール) が 48kHz 以外の AAC を扱う際にも利用する。
+pub(crate) fn resample(input: &[i16], in_rate: u32, out_rate: u32) -> Vec<i16> {
     if input.is_empty() || in_rate == out_rate {
         return input.to_vec();
     }

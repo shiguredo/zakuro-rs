@@ -34,8 +34,13 @@ nojson = "0.3"
 raden = "2026.2.0-canary.0"
 # HTTP/1.1 サーバー
 shiguredo_http11 = "2026.6"
+# MP4 コンテナからの音声トラックの demux に利用 (映像は sora_sdk 経由。
+# sora_sdk と同じ shiguredo_mp4 バージョンに解決される)
+shiguredo_mp4 = "2026.4"
 # OpenH264 バインディング (H.264 エンコード)
 shiguredo_openh264 = "2026.2"
+# Opus デコード (MP4 音声を PCM へ変換する際に利用)
+shiguredo_opus = "2026.2"
 # クロスプラットフォーム ビデオデバイス
 shiguredo_video_device = "2026.2"
 # libwebrtc バインディング
@@ -69,3 +74,9 @@ features = [
 insta = "1.48"
 # テストで一時ディレクトリを使う
 tempfile = "3.27"
+
+# AAC デコード (FDK AAC 共有ライブラリを実行時に動的ロードする)
+# shiguredo_fdk_aac は非 Linux でコンパイルエラーになるクレートのため、
+# 依存とコードを Linux 限定にする (他 OS では AAC は未対応扱い)
+[target.'cfg(target_os = "linux")'.dependencies]
+shiguredo_fdk_aac = "2026.1"

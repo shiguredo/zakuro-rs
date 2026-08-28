@@ -12,7 +12,7 @@ Sora WebRTC SFU の負荷試験ツール `zakuro` の Rust 実装です。
 - 複数の仮想クライアントを段階的に起動 (`--vcs` / `--vcs-hatch-rate`)
 - Sora への `sendonly` / `recvonly` / `sendrecv` 接続
 - フェイク映像 (Raden デジタル時計)、砂嵐、Y4M 入力、実カメラ入力、MP4 パススルー送信
-- フェイク音声 (BIP / BOP / HUM / ノイズの連続自動生成。旧映像同期ビープは廃止)、WAV ファイル入力 (`--input-wav`)
+- フェイク音声 (BIP / BOP / HUM / ノイズの連続自動生成。旧映像同期ビープは廃止)、WAV ファイル入力 (`--input-wav`)、MP4 内の音声トラック送信 (Opus / AAC、`--input-mp4` 時)
 - 映像 / 音声コーデック指定、OpenH264 エンコード (`--openh264`)
 - 受信映像をデコードせず廃棄する NopVideoDecoder
 - DataChannel メッセージング (`--sora-data-channels`、ZAKURO ヘッダ付き自動送信)
@@ -96,12 +96,27 @@ cargo run -- \
 
 `--input-mp4` はエンコード済み映像を再エンコードせずにパススルー送信します。ファイル終端に達するとループ再生します。使用時は `--sora-video-codec-type` と `--sora-video-bit-rate` が必須です。
 
+MP4 内の音声トラックがある場合はデコードして送信します (Opus / AAC、モノラル / ステレオ)。Opus は 20ms パケット、AAC は 1 サンプル = 1 フレームの mp4a を前提とします (通常のエンコード済み MP4 はこの構成です)。音声トラックが無い・未対応コーデックの MP4 は従来どおり映像のみになります。音声送信を有効にしている場合 (デフォルト)、音声トラックが 2 本以上ある MP4 は起動時エラーになります。
+
 ```bash
 cargo run -- \
   --sora-signaling-url wss://sora.example.com/signaling \
   --sora-channel-id zakuro-mp4 \
   --sora-role sendonly \
   --input-mp4 ./video.mp4 \
+  --sora-video-codec-type h264 \
+  --sora-video-bit-rate 2000
+```
+
+AAC 音声は Linux 限定で、libfdk-aac 共有ライブラリの動的ロードが必要です。`--fdk-aac-lib` で共有ライブラリのパスを指定します (Opus 音声のみの MP4 では指定は不要です)。Linux 上で libfdk-aac をロードできない環境 (ライブラリ未導入・`--fdk-aac-lib` 未指定) では、音声送信を有効にしている場合 (デフォルト) に AAC 音声を含む MP4 を使用すると起動時エラーになります。`--no-audio-device` / `--sora-audio=false` では MP4 音声も送信しません。また AAC のサンプルは 1 サンプル = 1 フレームの mp4a を前提としています (通常のエンコード済み MP4 はこの構成です)。
+
+```bash
+cargo run -- \
+  --sora-signaling-url wss://sora.example.com/signaling \
+  --sora-channel-id zakuro-mp4-aac \
+  --sora-role sendonly \
+  --fdk-aac-lib /usr/lib/x86_64-linux-gnu/libfdk-aac.so.2 \
+  --input-mp4 ./video-with-aac.mp4 \
   --sora-video-codec-type h264 \
   --sora-video-bit-rate 2000
 ```
@@ -162,7 +177,7 @@ cargo run -- --config ./config.jsonc
 
 ### 複数の Zakuro インスタンスを起動する
 
-1 プロセスで複数の Zakuro インスタンスを起動するには JSONC `instances` 配列を使います。各要素が独立した `SoraConnectionContext` と仮想クライアント群を持ち、i 番目のインスタンスは `i / instance-hatch-rate` 秒の遅延後に起動します。最上位のキーはインスタンス共通設定 (HTTP サーバー、`--instance-hatch-rate`、mTLS、`--openh264`、`--log-level`、DuckDB) と全インスタンス向けテンプレート (`instances[i]` で上書き可) を兼ねます。
+1 プロセスで複数の Zakuro インスタンスを起動するには JSONC `instances` 配列を使います。各要素が独立した `SoraConnectionContext` と仮想クライアント群を持ち、i 番目のインスタンスは `i / instance-hatch-rate` 秒の遅延後に起動します。最上位のキーはインスタンス共通設定 (HTTP サーバー、`--instance-hatch-rate`、mTLS、`--openh264`、`--fdk-aac-lib`、`--log-level`、DuckDB) と全インスタンス向けテンプレート (`instances[i]` で上書き可) を兼ねます。
 
 ```jsonc
 {
@@ -215,7 +230,7 @@ cargo run -- --config ./config.jsonc
 | `--retry-interval` | リトライ間隔 (秒) |
 | `--video-input-device` | 映像入力デバイス名または ID |
 | `--input-y4m` | Y4M ファイル入力 |
-| `--input-mp4` | MP4 パススルー入力 (ループ再生) |
+| `--input-mp4` | MP4 パススルー入力 (映像・音声、ループ再生) |
 | `--input-wav` | WAV ファイル音声入力 (PCM 16bit、ループ再生) |
 | `--sandstorm` | 砂嵐映像を生成 |
 | `--resolution` | `QVGA` / `VGA` / `HD` / `FHD` / `4K` / `WxH` |
@@ -228,6 +243,7 @@ cargo run -- --config ./config.jsonc
 | `--sora-audio-codec-type` | 現状は `opus` |
 | `--sora-audio-bit-rate` | 音声ビットレート (kbps) |
 | `--openh264` | OpenH264 共有ライブラリのパス |
+| `--fdk-aac-lib` | FDK AAC 共有ライブラリのパス (Linux で AAC 音声をデコードするときに使用) |
 | `--sora-data-channels` | DataChannel 設定 JSON |
 | `--sora-data-channel-signaling` | DataChannel 経由シグナリング (`true` / `false`) |
 | `--sora-simulcast` | サイマルキャスト (`true` / `false`) |
@@ -275,6 +291,6 @@ curl -s http://127.0.0.1:8080/rpc \
 - `--http-host` と `--http-port` は両方指定が必要です
 - `--client-cert` と `--client-key` は両方指定が必要です
 - `--sandstorm` は `--input-y4m` / `--video-input-device` / `--input-mp4` と同時指定できません
-- `--input-mp4` は `--video-input-device` / `--input-y4m` / `--sandstorm` と同時指定できません
+- `--input-mp4` は `--video-input-device` / `--input-y4m` / `--sandstorm` / `--input-wav` と同時指定できません
 - `--input-wav` は `--no-audio-device` / `--sora-audio=false` と同時指定できません
 - `--openh264` を使う場合は共有ライブラリのパスを指定します (H.264 エンコード用)

@@ -253,6 +253,8 @@ POST /rpc          → JSON-RPC 2.0
 - [x] 音声無効化 (`--no-audio-device`)
 - [x] フェイク音声フル実装 (BIP / BOP / HUM / ノイズ自動生成、48kHz モノラル・2 秒ループ)
 - [x] WAV 音声ファイル読込 (`--input-wav`)
+- [x] MP4 音声トラック送信 (`--input-mp4` 内の Opus / AAC をデコードして送信。音声トラック無し・未対応の MP4 は映像のみで続行)
+  - AAC は Linux 限定で libfdk-aac の動的ロードが必要 (`--fdk-aac-lib`)。Linux 上でライブラリをロードできない環境で AAC 音声を含む MP4 を指定した場合は起動時エラー (非 Linux では AAC は未対応扱い)
 
 ### コーデック
 
@@ -349,3 +351,4 @@ POST /rpc          → JSON-RPC 2.0
 | WAV 未指定時のデフォルト音源 | External / GameAudio | Safari ループ (GameAudioManager 非実装のため) |
 | カメラ指定 | `--video-device` | `--video-input-device` |
 | MP4 パススルー | なし | `--input-mp4` |
+| MP4 パススルー音声 | なし | `--input-mp4` 内の Opus / AAC をデコードして送信 (AAC は Linux 限定・`--fdk-aac-lib` が必要) |

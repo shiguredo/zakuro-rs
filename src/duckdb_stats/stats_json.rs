@@ -850,6 +850,7 @@ mod tests {
             duckdb_interval: 1.0,
             no_duckdb_output: false,
             log_level: log::Severity::Info,
+            fdk_aac_lib: None,
         };
         let inst = InstanceArgs {
             signaling_urls: vec!["wss://example.com/".into()],
@@ -935,6 +936,7 @@ mod tests {
             duckdb_interval: 1.0,
             no_duckdb_output: false,
             log_level: log::Severity::Info,
+            fdk_aac_lib: None,
         };
         let inst = InstanceArgs {
             signaling_urls: vec!["wss://example.com/".into()],
@@ -1026,6 +1028,7 @@ mod tests {
             duckdb_interval: 1.0,
             no_duckdb_output: false,
             log_level: log::Severity::Info,
+            fdk_aac_lib: None,
         };
         let inst = InstanceArgs {
             signaling_urls: vec!["wss://example.com/".into()],
@@ -1107,6 +1110,7 @@ mod tests {
             duckdb_interval: 1.0,
             no_duckdb_output: false,
             log_level: log::Severity::Warning,
+            fdk_aac_lib: None,
         };
         let inst = InstanceArgs {
             signaling_urls: vec!["wss://example.com/".into()],

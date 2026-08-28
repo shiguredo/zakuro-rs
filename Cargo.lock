@@ -1845,6 +1845,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "shiguredo_fdk_aac"
+version = "2026.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754d5ed98ad27ba59e8ccb6df6a5ee4119976782d666e20c14f07b53e0fb56c7"
+dependencies = [
+ "bindgen",
+]
+
+[[package]]
 name = "shiguredo_http11"
 version = "2026.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1863,6 +1872,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f4a52b63138f4f927e7f5adc3b9f3a7b57dfacd53277aa2d1f2c66020a12338d"
 dependencies = [
  "bindgen",
+ "shiguredo_toml",
+]
+
+[[package]]
+name = "shiguredo_opus"
+version = "2026.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3064a246b3e243aee5cacb327400754d7c0ce7a74244c3a524afe4d59d9553a9"
+dependencies = [
+ "bindgen",
+ "shiguredo_cmake",
  "shiguredo_toml",
 ]
 
@@ -2623,8 +2643,11 @@ dependencies = [
  "noargs",
  "nojson",
  "raden",
+ "shiguredo_fdk_aac",
  "shiguredo_http11",
+ "shiguredo_mp4",
  "shiguredo_openh264",
+ "shiguredo_opus",
  "shiguredo_video_device",
  "shiguredo_webrtc",
  "sora_sdk",

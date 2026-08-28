@@ -7,6 +7,7 @@ use shiguredo_webrtc::{
     AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportRef, rtc_log_warning,
 };
 
+use crate::mp4_audio::Mp4AudioSource;
 use crate::wav_reader::WavReader;
 
 /// サンプルレート (Hz)。C++ Safari 音源と同じく 48kHz。
@@ -115,9 +116,12 @@ impl GeneratedAudio {
 /// `Generated` は C++ Safari 相当の BIP / BOP / HUM / ノイズ 2 秒ループ。
 /// `Wav` は WAV ファイルを 48kHz モノラルにリサンプリング済みのサンプル列として
 /// ループ再生する。
+/// `Mp4Audio` は MP4 内の音声トラック (Opus / AAC) をデコードした PCM を供給し、
+/// トラック終端で先頭からループ再生する。
 pub(crate) enum FakeAudioSource {
     Generated(GeneratedAudio),
     Wav(WavReader),
+    Mp4Audio(Box<Mp4AudioSource>),
 }
 
 /// フェイク音声キャプチャの内部状態 (スレッド間で共有する制御フラグのみ)
@@ -135,6 +139,7 @@ struct FakeAudioState {
 ///
 /// - `FakeAudioSource::Generated`: Safari 相当の 2 秒ループを常時送出する。
 /// - `FakeAudioSource::Wav`: WAV ファイルから読み込んだサンプル列をループ再生する。
+/// - `FakeAudioSource::Mp4Audio`: MP4 の音声トラックをデコードした PCM を送出する。
 pub(crate) struct FakeAudioCapturer {
     adm: AudioDeviceModule,
     state: FakeAudioState,
@@ -287,6 +292,10 @@ fn audio_thread(state: FakeAudioState, mut source: FakeAudioSource) {
             FakeAudioSource::Wav(reader) => {
                 // WAV からサンプルを取り出してループ再生する
                 reader.read_samples(&mut buffer);
+            }
+            FakeAudioSource::Mp4Audio(source) => {
+                // MP4 の音声トラックをデコードした PCM を取り出す
+                source.read_samples(&mut buffer);
             }
         }
 

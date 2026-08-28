@@ -26,6 +26,8 @@ pub(crate) struct CommonArgs {
     pub(crate) no_duckdb_output: bool,
     /// libwebrtc のデバッグログ閾値 (`--log-level`, デフォルト: Info)
     pub(crate) log_level: log::Severity,
+    /// FDK AAC 共有ライブラリのパス (`--fdk-aac-lib`、Linux で MP4 の AAC 音声をデコードするときに使用)
+    pub(crate) fdk_aac_lib: Option<String>,
 }
 
 /// インスタンスごとの設定 (vc 群・Sora 接続 / 映像音声キャプチャ / シナリオ等)
@@ -110,6 +112,7 @@ fn is_common_key(key: &str) -> bool {
             | "duckdb-interval"
             | "no-duckdb-output"
             | "log-level"
+            | "fdk-aac-lib"
             | "show-video-codec-capability"
     )
 }
@@ -995,6 +998,19 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
         .present_and_then(|o| parse_log_level_str(o.value()))?
         .unwrap_or(log::Severity::Info);
 
+    // --fdk-aac-lib は値付きオプション (--openh264 と同様にファイル存在を検証する)
+    let fdk_aac_lib: Option<String> = noargs::opt("fdk-aac-lib")
+        .doc("FDK AAC shared library path (required to decode AAC audio in MP4, Linux only)")
+        .example("libfdk-aac.so.2")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let path = o.value().to_string();
+            if !help_mode && !std::path::Path::new(&path).exists() {
+                return Err("fdk-aac-lib: library file not found");
+            }
+            Ok(path)
+        })?;
+
     // --show-video-codec-capability はヘルプに表示するための定義のみで、
     // 実際の処理は parse_args() の pre-parse 段階で行う (単独起動時に
     // InstanceArgs の必須引数を要求しないため)。JSONC からの指定はエラーになる。
@@ -1026,6 +1042,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
                 duckdb_interval,
                 no_duckdb_output,
                 log_level,
+                fdk_aac_lib,
             },
             help,
         ));
@@ -1059,6 +1076,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
             duckdb_interval,
             no_duckdb_output,
             log_level,
+            fdk_aac_lib,
         },
         help,
     ))
@@ -1572,6 +1590,9 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
             "--input-mp4 使用時は --sora-video-bit-rate の指定が必須です",
         )
         .into());
+    }
+    if input_mp4.is_some() && input_wav.is_some() {
+        return Err(ErrorMessage::new("--input-mp4 と --input-wav は同時に指定できません").into());
     }
 
     Ok((
@@ -3043,6 +3064,135 @@ mod tests {
         assert!(
             instances[0].input_mp4.is_some(),
             "input_mp4 が反映されるべき"
+        );
+    }
+
+    #[test]
+    fn parse_args_from_argv_rejects_input_mp4_with_input_wav() {
+        // --input-mp4 の MP4 音声再生と --input-wav の音声入力はどちらを使うか
+        // 曖昧になるため同時指定は起動時エラーにする
+        let dir = tempfile::TempDir::new().expect("一時ディレクトリの作成に失敗");
+        let mp4 = dir.path().join("video.mp4");
+        std::fs::write(&mp4, b"dummy").expect("一時 MP4 ファイルの書き込みに失敗");
+        let wav = dir.path().join("audio.wav");
+        std::fs::write(&wav, b"dummy").expect("一時 WAV ファイルの書き込みに失敗");
+        let mut tpl = minimal_sora_argv();
+        tpl.extend([
+            "--input-mp4".into(),
+            mp4.to_string_lossy().to_string(),
+            "--sora-video-codec-type".into(),
+            "h264".into(),
+            "--sora-video-bit-rate".into(),
+            "1000".into(),
+            "--input-wav".into(),
+            wav.to_string_lossy().to_string(),
+        ]);
+        let err = parse_args_from_argv("zakuro", Vec::new(), Vec::new(), vec![tpl], Vec::new())
+            .expect_err("--input-mp4 と --input-wav の併用を許容してはならない");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--input-mp4"),
+            "エラーメッセージに --input-mp4 が含まれていない: {msg}"
+        );
+        assert!(
+            msg.contains("--input-wav"),
+            "エラーメッセージに --input-wav が含まれていない: {msg}"
+        );
+    }
+
+    #[test]
+    fn fdk_aac_lib_parses_as_common_arg() {
+        // --fdk-aac-lib が CommonArgs に反映される
+        let dir = tempfile::TempDir::new().expect("一時ディレクトリの作成に失敗");
+        let lib = dir.path().join("libfdk-aac.so.2");
+        std::fs::write(&lib, b"dummy").expect("一時 FDK AAC ライブラリの書き込みに失敗");
+        let lib_str = lib.to_string_lossy().to_string();
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            vec!["--fdk-aac-lib".into(), lib_str.clone()],
+            Vec::new(),
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect("--fdk-aac-lib 指定は受理されるべき");
+        assert_eq!(
+            common.fdk_aac_lib.as_deref(),
+            Some(lib_str.as_str()),
+            "--fdk-aac-lib の値が CommonArgs に反映されるべき"
+        );
+    }
+
+    #[test]
+    fn fdk_aac_lib_missing_file_rejected() {
+        // 存在しないライブラリパスは --openh264 と同じく起動時エラーになる
+        let err = parse_args_from_argv(
+            "zakuro",
+            vec!["--fdk-aac-lib".into(), "/nonexistent/libfdk-aac.so".into()],
+            Vec::new(),
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect_err("存在しない --fdk-aac-lib のパスを許容してはならない");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("fdk-aac-lib"),
+            "エラーメッセージに fdk-aac-lib が含まれていない: {msg}"
+        );
+    }
+
+    #[test]
+    fn is_common_key_includes_fdk_aac_lib() {
+        // fdk-aac-lib は CommonArgs のキーである
+        assert!(is_common_key("fdk-aac-lib"));
+    }
+
+    #[test]
+    fn jsonc_fdk_aac_lib_expands_to_common_args() {
+        // JSONC 最上位の fdk-aac-lib が --fdk-aac-lib に展開されて
+        // CommonArgs に反映される (--openh264 と同じ共通引数として使える)
+        let dir = tempfile::TempDir::new().expect("一時ディレクトリの作成に失敗");
+        let lib = dir.path().join("libfdk-aac.so.2");
+        std::fs::write(&lib, b"dummy").expect("一時 FDK AAC ライブラリの書き込みに失敗");
+        let lib_str = lib.to_string_lossy().to_string();
+        let content = format!(
+            r#"{{
+                "fdk-aac-lib": "{lib_str}",
+                "instances": [
+                    {{ "sora": {{ "signaling-url": "wss://a/", "channel-id": "c", "role": "sendonly" }} }}
+                ]
+            }}"#
+        );
+        let cfg = parse_jsonc_config(&content)
+            .expect("fdk-aac-lib を含む JSONC のパースに失敗してはならない");
+        let idx = cfg
+            .common_argv
+            .iter()
+            .position(|s| s == "--fdk-aac-lib")
+            .expect("--fdk-aac-lib が common_argv に展開されるべき");
+        assert_eq!(
+            cfg.common_argv[idx + 1],
+            lib_str,
+            "fdk-aac-lib の値が common_argv に反映されるべき"
+        );
+    }
+
+    #[test]
+    fn jsonc_fdk_aac_lib_inside_instance_rejected() {
+        // instances[i] 内に共通引数を書くとエラー (既存の common key 規則どおり)
+        let content = r#"{
+            "instances": [
+                {
+                    "fdk-aac-lib": "/nonexistent/libfdk-aac.so",
+                    "sora": { "signaling-url": "wss://a/", "channel-id": "c", "role": "sendonly" }
+                }
+            ]
+        }"#;
+        let err = parse_jsonc_config(content)
+            .expect_err("instances 内の fdk-aac-lib を許容してはならない");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("fdk-aac-lib"),
+            "エラーメッセージに fdk-aac-lib が含まれていない: {msg}"
         );
     }
 

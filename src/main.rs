@@ -10,6 +10,7 @@ mod fake_video_capturer;
 mod http_server;
 mod json_rpc;
 mod jsonc_fmt;
+mod mp4_audio;
 mod nop_video_decoder;
 mod openh264_video_codec;
 mod scenario;
@@ -592,7 +593,7 @@ async fn run_zakuro_instance(
     // MP4 パススルー時はコーデック能力をカスタマイズする
     let mp4_reader = if let Some(ref mp4_path) = instance.input_mp4 {
         let reader = Mp4SampleReader::new(mp4_path)
-            .map_err(|e| ErrorMessage::new(format!("Failed to read MP4 file: {e}")))?;
+            .map_err(|e| ErrorMessage::new(format!("MP4 ファイルの読み込みエラー: {e}")))?;
         let expected_codec =
             args::parse_video_codec_type(instance.video_codec_type.as_deref().expect(
                 "guarded by InstanceArgs validation: input_mp4 requires sora-video-codec-type",
@@ -612,12 +613,13 @@ async fn run_zakuro_instance(
     };
 
     // フェイク音声キャプチャの初期化
-    // 音声有効かつフェイク映像モード時に連続自動生成 PCM または WAV ファイル再生を行う
-    let use_fake_audio = !instance.no_audio_device
-        && instance.audio
-        && instance.role.wants_send()
-        && instance.input_mp4.is_none()
-        && instance.video_input_device.is_none();
+    // 音声有効かつ送信ロールかつ --no-audio-device でないときに、
+    // フェイク映像モードでは連続自動生成 PCM / WAV ファイル再生、
+    // MP4 パススルー時は MP4 内の音声トラック再生を行う
+    let wants_send_audio =
+        !instance.no_audio_device && instance.audio && instance.role.wants_send();
+    let use_fake_audio =
+        wants_send_audio && instance.input_mp4.is_none() && instance.video_input_device.is_none();
     let use_wav_audio = use_fake_audio && instance.input_wav.is_some();
     // WAV モードの場合は事前にファイルを開いて 48kHz モノラルにリサンプル済みのサンプル列を保持する
     let wav_source = if use_wav_audio {
@@ -626,6 +628,23 @@ async fn run_zakuro_instance(
             .as_ref()
             .expect("use_wav_audio は input_wav の存在を含意する");
         Some(wav_reader::WavReader::open(wav_path)?)
+    } else {
+        None
+    };
+
+    // MP4 パススルー時の音声トラック調査
+    // (--input-mp4 かつ送信ロールかつ音声有効かつ --no-audio-device でないときのみ。
+    //  - 対応音声トラックが無い・未対応コーデックの場合は映像のみで続行する
+    //  - 音声トラックが 2 本以上の場合は起動時エラーになる)
+    let mp4_audio_result = if wants_send_audio {
+        if let Some(ref mp4_path) = instance.input_mp4 {
+            Some(mp4_audio::inspect_mp4_audio(
+                std::path::Path::new(mp4_path),
+                common.fdk_aac_lib.as_deref(),
+            )?)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -644,9 +663,18 @@ async fn run_zakuro_instance(
             ..Default::default()
         };
 
-        // フェイク音声 ADM の登録 (WAV または Safari 相当の連続自動生成)
+        // フェイク音声 ADM の登録 (WAV / Safari 相当の連続自動生成 / MP4 音声)
         let fake_source = if let Some(reader) = wav_source {
             Some(fake_audio_capturer::FakeAudioSource::Wav(reader))
+        } else if let Some(result) = mp4_audio_result {
+            match result {
+                mp4_audio::Mp4AudioTrackResult::Supported(source) => {
+                    Some(fake_audio_capturer::FakeAudioSource::Mp4Audio(source))
+                }
+                // 音声トラックが無い・未対応の場合は映像のみで続行する (警告は調査時に出力済み)
+                mp4_audio::Mp4AudioTrackResult::NoAudioTrack
+                | mp4_audio::Mp4AudioTrackResult::Unsupported => None,
+            }
         } else if use_fake_audio {
             Some(fake_audio_capturer::FakeAudioSource::Generated(
                 fake_audio_capturer::GeneratedAudio::new(),
@@ -865,12 +893,12 @@ async fn run_zakuro_instance(
                         if !instance.no_video_device && instance.role.wants_send() {
                             let reader = Mp4SampleReader::new(mp4_path).map_err(|e| {
                                 ErrorMessage::new(format!(
-                                    "Failed to open MP4 file for vc-{vc_id}: {e}"
+                                    "vc-{vc_id} 用の MP4 ファイルのオープンエラー: {e}"
                                 ))
                             })?;
                             let capturer = Mp4VideoCapturer::new(reader).map_err(|e| {
                                 ErrorMessage::new(format!(
-                                    "Failed to start MP4 capturer for vc-{vc_id}: {e}"
+                                    "vc-{vc_id} 用の MP4 キャプチャの開始エラー: {e}"
                                 ))
                             })?;
                             let source = capturer.video_source();
