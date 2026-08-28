@@ -30,7 +30,7 @@ jobs:
       # libduckdb-sys に prebuilt バイナリをダウンロードさせる (bundled ビルドは CI で 30 分以上かかるため)
       DUCKDB_DOWNLOAD_LIB: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup update stable
       - name: Install dependencies
         if: runner.os == 'Linux'
