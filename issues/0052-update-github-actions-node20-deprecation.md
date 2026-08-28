@@ -1,7 +1,7 @@
 # GitHub Actions の Node.js 20 非推奨警告に対応する
 
 - Created: 2026-08-28
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-28
 - Branch: feature/update-ci-node20
 - Polished: {YYYY-MM-DD}
 - Reporter: @voluntas
@@ -28,3 +28,7 @@ CI 実行時に GitHub が出力する「Node.js 20 is deprecated」警告 (acti
 ## 変更対象
 
 - `.github/workflows/ci.yml` (`actions/checkout@v4` の参照先)
+
+## 解決方法
+
+`/update-actions` で `actions/checkout` の最新版を調査し、`.github/workflows/ci.yml` の参照を `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1` に更新した。v7 は Node.js 24 で実行されるため、CI の Node.js 20 非推奨警告が解消される。`shiguredo/github-actions/.github/actions/slack-notify@main` はブランチ追従運用のため変更していない。
