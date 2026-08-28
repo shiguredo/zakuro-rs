@@ -21,6 +21,7 @@ Sora WebRTC SFU の負荷試験ツール `zakuro` の Rust 実装です。
 - mTLS (`--client-cert` / `--client-key`) と TLS 検証スキップ (`--insecure`)
 - DuckDB ファイルへの統計情報出力
 - JSONC 設定ファイル (`--config`)
+- 設定ファイルの検証・整形サブコマンド (`zakuro lint` / `zakuro fmt`)
 - HTTP API (`GET /.ok`, `POST /rpc` / `GetVersion`)
 - ログレベル制御 (`--log-level`)
 
@@ -209,6 +210,49 @@ cargo run -- --config ./config.jsonc
 ```
 
 `instances` が無い JSONC や CLI 単独起動は従来通り単一インスタンスとして動作します。
+
+### 設定ファイルを検証・整形する (lint / fmt)
+
+`zakuro lint <FILE.jsonc>` は負荷試験を起動せずに設定ファイルを検証します。通常起動と同じ規則で構文パースと意味検証 (必須キーの欠落、未知のキー、排他指定など) を行い、Sora へは接続しません。OpenH264 / FDK AAC 共有ライブラリや PEM などのファイル実体の読み込み検証は行いません。成功時は無出力で exit 0、失敗時はソース注釈付きの診断を stderr に出して exit 1 になります。
+
+`zakuro fmt <FILE.jsonc>` は設定ファイルをその場で整形します。2 スペースインデントに正規化し、`//` / `/* */` コメント・空行・trailing comma は保持します。変更が無い場合はファイルを書き換えません。構文エラー時は非 0 で、ファイルは書き換えられません。
+
+```bash
+# 検証 (負荷試験は起動しない)
+cargo run -- lint ./config.jsonc
+
+# 整形 (ファイルを書き換え)
+cargo run -- fmt ./config.jsonc
+```
+
+## シナリオ
+
+シナリオは仮想クライアント 1 つ 1 つが接続確立後に切断・再接続などの動作を順次実行する機能です。
+
+### 指定の書き方
+
+CLI では `--scenario reconnect`、JSONC では `"scenario": "reconnect"` と書きます。インスタンスごとの設定なので、最上位テンプレート (全インスタンス共通) と `instances[i]` (インスタンスごとに上書き) の両方で指定できます。現状種別は `reconnect` のみで、未指定ならシナリオは動きません (接続したまま維持される)。
+
+reconnect シナリオは接続確立後「切断してすぐ再接続 → 1-5 秒のランダムスリープ × 9 回 (合計 9-45 秒)」を繰り返します。2 接続目以降の持続時間は各 9-45 秒です。実行例は「実行例」節の再接続シナリオを参照してください。
+
+```jsonc
+{
+  "sora": {
+    "signaling-url": "wss://sora.example.com/signaling",
+    "channel-id": "zakuro-reconnect",
+    "role": "sendonly"
+  },
+  "vcs": 10,
+  "scenario": "reconnect"
+}
+```
+
+### 新しいシナリオを追加するには (ソース改変)
+
+- `src/scenario.rs` の `ScenarioType` に種別を追加し (`ScenarioType::parse` の文字列も含む)、`build_scenario` でシナリオ定義を返す
+- シナリオ定義は `ScenarioOp` の列とループ開始位置 `loop_index` で構成する。利用可能な操作は `Sleep` (ランダムスリープ)、`Reconnect` / `Disconnect` (切断 → 再接続)、`Exit` (切断して仮想クライアントタスクを終了)、`SendDataChannelMessage` (指定ラベルで 1 回送信)
+- 再接続をまたいでも実行位置は続きから再開される (1 接続で全操作をやり直さない)
+- C++ 版との対応表や未実装方針 (数字音声再生など) は `docs/ZAKURO.md` のシナリオ節を参照
 
 ## 主なオプション
 
