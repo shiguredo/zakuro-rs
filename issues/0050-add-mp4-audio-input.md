@@ -1,7 +1,7 @@
 # `--input-mp4` で MP4 の音声も送信する（デコード → PCM → 再エンコード）
 
 - Created: 2026-08-27
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-28
 - Branch: feature/add-mp4-audio-input
 - Polished: 2026-08-27
 
@@ -93,3 +93,24 @@
 ## reopened にした理由
 
 pending にしたのは誤りで、後回しにする対象は sora-rust-sdk 側の MP4 音声対応である。zakuro-rs の本 issue は open のまま残す。
+
+## 解決方法
+
+`--input-mp4` 指定時に MP4 内の音声トラック (Opus / AAC) をデコードして送信できるようにした。
+
+- `src/mp4_audio.rs` を新規作成
+  - `inspect_mp4_audio()`: MP4 の音声トラックを調査する。音声トラック無しは映像のみで続行、2 本以上は起動時エラー、未対応コーデック (FLAC 等)・チャンネル構成非対応 (3 チャンネル以上) は warning のうえ映像のみで続行
+  - `Mp4AudioSource`: 音声サンプルを順次読み出して Opus / AAC を PCM (48kHz モノラル) にデコードし、有界 FIFO で 10ms ごとの供給に合わせて切り出す。ファイル全体の PCM は保持しない
+  - トラック終端で先頭からループ再生 (映像のループとは独立)。Opus はデコーダーをリセットして dOps の PreSkip を再破棄、AAC はデコーダーを再生成 (FDK 内部バッファの持ち越し防止)
+  - ステレオは `wav_reader::downmix_to_mono` でダウンミックス、44.1kHz 等の AAC は `wav_reader::resample` で 48kHz へリサンプリング (既存実装を共用)
+  - `--fdk-aac-lib` で指定した libfdk-aac を Linux で動的ロードする AAC デコードは Linux 限定 (クレートが非 Linux でコンパイルエラーになるため依存とコードを cfg ゲート)
+- `src/fake_audio_capturer.rs`: `FakeAudioSource::Mp4Audio` バリアントを追加し、音声スレッドから MP4 音声を供給
+- `src/main.rs`: `--input-mp4` かつ送信ロール・音声有効・`--no-audio-device` でないときに MP4 音声トラックを調査し、対応音声があれば外部 ADM を起動 (既存の `input_mp4.is_none()` ガードを外した)
+- `src/args.rs`: 共通引数 `--fdk-aac-lib` を追加。`--input-mp4` と `--input-wav` の同時指定を起動時エラーに変更
+- `Cargo.toml` / `Cargo.lock`: `shiguredo_mp4` / `shiguredo_opus` を追加。`shiguredo_fdk_aac` は `[target.'cfg(target_os = "linux")'.dependencies]` で Linux 限定に追加
+- `.github/workflows/ci.yml`: Linux CI のビルドに `libfdk-aac-dev` を追加
+- テスト
+  - `src/mp4_audio.rs`: `testdata/` の ffmpeg 生成フィクスチャを使う単体テストを追加。Opus ステレオ / モノラルの調査とデコード (PreSkip 破棄・ループ時の再適用・2 周目の PCM 一致・FIFO 枯渇時の無音送出・破損入力での継続)、映像 + 音声の複合 MP4、音声トラック無し / 2 本以上 / FLAC / 6ch の分岐、AAC (Linux 限定) のデコード・リサンプリング・ループ一致
+  - `src/args.rs`: `--input-mp4` × `--input-wav` 排他、`--fdk-aac-lib` のパース / 存在検証 / JSONC 経由の展開と拒否のテストを追加
+- ドキュメント: `docs/ZAKURO.md` の実装状況と設計差分表、`README.md` の MP4 パススルー節・オプション表・排他制約表を更新。`testdata/README.md` にフィクスチャの生成コマンドを記録
+- `CHANGES.md` は CODEBASE.md の規約 (2026.0.0 の間は記載しない) により更新していない
