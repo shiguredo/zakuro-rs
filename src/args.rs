@@ -2986,10 +2986,16 @@ mod tests {
     #[test]
     fn parse_args_from_argv_rejects_encoder_implementation_with_input_mp4() {
         // --input-mp4 はエンコード済み映像パススルーのためエンコーダー実装指定と排他
+        // 引数パースの存在チェックはファイル内容を参照しないので、実在するダミー MP4 を指定すれば
+        // 存在チェックを通過して排他検証に到達する (存在しないファイルでは排他検証は検証できない)
+        // 排他検証の文言はエンコーダー実装側を実際の指定名では挙げず `--vp8-encoder 等` の汎用表記になる
+        let dir = tempfile::TempDir::new().expect("一時ディレクトリの作成に失敗");
+        let mp4 = dir.path().join("video.mp4");
+        std::fs::write(&mp4, b"dummy").expect("一時 MP4 ファイルの書き込みに失敗");
         let mut tpl = minimal_sora_argv();
         tpl.extend([
             "--input-mp4".into(),
-            "video.mp4".into(),
+            mp4.to_string_lossy().to_string(),
             "--sora-video-codec-type".into(),
             "h264".into(),
             "--sora-video-bit-rate".into(),
@@ -3001,8 +3007,10 @@ mod tests {
             .expect_err("--input-mp4 との併用を許容してはならない");
         let msg = format!("{err}");
         assert!(
-            msg.contains("--input-mp4"),
-            "エラーメッセージに --input-mp4 が含まれていない: {msg}"
+            msg.contains(
+                "--input-mp4 と --vp8-encoder 等のエンコーダー実装指定は同時に指定できません"
+            ),
+            "エラーメッセージに排他検証の文言が含まれていない: {msg}"
         );
     }
 
