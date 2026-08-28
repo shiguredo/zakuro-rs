@@ -1,7 +1,7 @@
 # エンコーダー実装指定 × `--input-mp4` の排他検証テストが偽陽性になっているのを修正する
 
 - Created: 2026-08-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-28
 - Branch: feature/fix-input-mp4-exclusivity-test
 - Polished: 2026-08-28
 
@@ -28,3 +28,20 @@
 - `parse_args_from_argv_rejects_encoder_implementation_with_input_mp4` が実在する MP4 ファイルを使い、排他検証のエラーメッセージ (`--input-mp4 と --vp8-encoder 等のエンコーダー実装指定は同時に指定できません`) を検証していること
 - エンコーダー実装指定の排他検証を一時的に無効化すると当該テストが fail することを確認していること (確認後は元に戻し、コミットしない。これが偽陽性の解消そのものの確認になる)
 - 全テストスイートが通過すること
+
+## 解決方法
+
+`src/args.rs` の `parse_args_from_argv_rejects_encoder_implementation_with_input_mp4` だけを変更した。`tempfile::TempDir` に `std::fs::write(&mp4, b"dummy")` で実在する MP4 ファイルを作成し、その絶対パスを `--input-mp4` に渡すようにしたため、`parse_instance_args()` のファイル存在チェックを通過してエンコーダー実装指定との排他検証に到達する。書き方は同じ `mod tests` 内の `parse_args_from_argv_rejects_input_mp4_with_openh264` に揃えた。
+
+assert は `msg.contains("--input-mp4")` を排他検証の文言そのもの `msg.contains("--input-mp4 と --vp8-encoder 等のエンコーダー実装指定は同時に指定できません")` に置き換えた。排他文言は `parse_instance_args()` 内に 1 箇所しか存在せず、他の「同時に指定できません」で終わる排他エラー (`--input-mp4 と --input-y4m` 等) とは区別される。`AppError::Message` 経由で先頭に `AppError::Message: ` が付くため完全一致ではなく `contains` を使っている。テストが渡している `--h264-encoder` は排他文言に現れないため assert していない。`parse_instance_args()` の検証ロジックとエラー文言は変更していない。
+
+### 変更ファイル
+
+- `src/args.rs`: `parse_args_from_argv_rejects_encoder_implementation_with_input_mp4` のテスト本文のみ (本番コードは無変更。`CODEBASE.md` の規約により develop へ直接コミットし、`Branch:` のブランチは切っていない)
+
+### 確認したこと
+
+- 実在しない `video.mp4` を渡した場合のエラーは `argument '--input-mp4' has an invalid value "video.mp4": input-mp4: file not found` であり、新しい assert 文言を含まないことを実測で確認 (旧 assert はこの文言で pass していた)
+- 実在する `b"dummy"` MP4 を渡すと `AppError::Message: --input-mp4 と --vp8-encoder 等のエンコーダー実装指定は同時に指定できません` になることを実測で確認
+- エンコーダー実装指定の排他検証を一時的に無効化すると当該テストが `expect_err` で fail することを確認し、確認後は元に戻してコミットしていない
+- `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace` (204 passed) がすべて通過すること
