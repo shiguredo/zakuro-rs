@@ -218,7 +218,7 @@ POST /rpc          → JSON-RPC 2.0
 | shiguredo_video_device | 2026.3 | クロスプラットフォーム ビデオデバイス |
 | shiguredo_mp4 | 2026.5 | MP4 コンテナからの音声トラック demux |
 | shiguredo_opus | 2026.2 | Opus デコード (MP4 音声 → PCM) |
-| shiguredo_fdk_aac | 2026.1 | AAC デコード (Linux 限定、実行時動的ロード) |
+| shiguredo_fdk_aac | 2026.1 | AAC デコード (Linux 限定・feature `fdk-aac`・実行時動的ロード) |
 | raden | 2026.2 | 2D ベクターグラフィックス (フェイク映像生成) |
 | annotate-snippets | 0.12 | CLI 診断メッセージのソース注釈表示 |
 | nojson | 0.3 | JSON / JSONC パース |
@@ -258,7 +258,7 @@ POST /rpc          → JSON-RPC 2.0
 - [x] フェイク音声フル実装 (BIP / BOP / HUM / ノイズ自動生成、48kHz モノラル・2 秒ループ)
 - [x] WAV 音声ファイル読込 (`--input-wav`)
 - [x] MP4 音声トラック送信 (`--input-mp4` 内の Opus / AAC をデコードして送信。音声トラック無し・未対応の MP4 は映像のみで続行)
-  - AAC は Linux 限定で libfdk-aac の動的ロードが必要 (`--fdk-aac-lib`)。Linux 上でライブラリをロードできない環境で AAC 音声を含む MP4 を指定した場合は起動時エラー (非 Linux では AAC は未対応扱い)
+  - AAC は Linux + feature `fdk-aac` で libfdk-aac の動的ロードが必要 (`--fdk-aac-lib`)。Linux 上でライブラリをロードできない環境で AAC 音声を含む MP4 を指定した場合は起動時エラー (feature 無し / 非 Linux では AAC は未対応扱い)
 
 ### コーデック
 
@@ -357,6 +357,6 @@ POST /rpc          → JSON-RPC 2.0
 | WAV 未指定時のデフォルト音源 | External / GameAudio | Safari ループ (GameAudioManager 非実装のため) |
 | カメラ指定 | `--video-device` | `--video-input-device` |
 | MP4 パススルー | なし | `--input-mp4` |
-| MP4 パススルー音声 | なし | `--input-mp4` 内の Opus / AAC をデコードして送信 (AAC は Linux 限定・`--fdk-aac-lib` が必要) |
+| MP4 パススルー音声 | なし | `--input-mp4` 内の Opus / AAC をデコードして送信 (AAC は Linux + feature `fdk-aac`・`--fdk-aac-lib` が必要) |
 | 設定ファイル検証 | なし | `zakuro lint <FILE.jsonc>` (負荷試験を起動せず構文・意味検証。`--fix` は無し) |
 | 設定ファイル整形 | なし | `zakuro fmt <FILE.jsonc>` (コメント / 空行 / trailing comma を保持。`--check` で書き戻しなし確認) |

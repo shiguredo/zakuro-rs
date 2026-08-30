@@ -110,10 +110,10 @@ cargo run -- \
   --sora-video-bit-rate 2000
 ```
 
-AAC 音声は Linux 限定で、libfdk-aac 共有ライブラリの動的ロードが必要です。`--fdk-aac-lib` で共有ライブラリのパスを指定します (Opus 音声のみの MP4 では指定は不要です)。Linux 上で libfdk-aac をロードできない環境 (ライブラリ未導入・`--fdk-aac-lib` 未指定) では、音声送信を有効にしている場合 (デフォルト) に AAC 音声を含む MP4 を使用すると起動時エラーになります。`--no-audio-device` / `--sora-audio=false` では MP4 音声も送信しません。また AAC のサンプルは 1 サンプル = 1 フレームの mp4a を前提としています (通常のエンコード済み MP4 はこの構成です)。
+AAC 音声は Linux で feature `fdk-aac` を有効にしたビルド (`cargo build --features fdk-aac`) でのみ利用できます。libfdk-aac 共有ライブラリの動的ロードが必要で、`--fdk-aac-lib` でパスを指定します (Opus 音声のみの MP4 では指定は不要です)。Linux 上で libfdk-aac をロードできない環境 (ライブラリ未導入・`--fdk-aac-lib` 未指定) では、音声送信を有効にしている場合 (デフォルト) に AAC 音声を含む MP4 を使用すると起動時エラーになります。feature 無し / 非 Linux では AAC は未対応として映像のみで続行します。`--no-audio-device` / `--sora-audio=false` では MP4 音声も送信しません。また AAC のサンプルは 1 サンプル = 1 フレームの mp4a を前提としています (通常のエンコード済み MP4 はこの構成です)。
 
 ```bash
-cargo run -- \
+cargo run --features fdk-aac -- \
   --sora-signaling-url wss://sora.example.com/signaling \
   --sora-channel-id zakuro-mp4-aac \
   --sora-role sendonly \
@@ -297,7 +297,7 @@ reconnect シナリオは接続確立後「切断してすぐ再接続 → 1-5 �
 | `--sora-audio-codec-type` | 現状は `opus` |
 | `--sora-audio-bit-rate` | 音声ビットレート (kbps) |
 | `--openh264` | OpenH264 共有ライブラリのパス |
-| `--fdk-aac-lib` | FDK AAC 共有ライブラリのパス (Linux で AAC 音声をデコードするときに使用) |
+| `--fdk-aac-lib` | FDK AAC 共有ライブラリのパス (feature `fdk-aac` の Linux ビルドで AAC 音声をデコードするときに使用) |
 | `--sora-data-channels` | DataChannel 設定 JSON |
 | `--sora-data-channel-signaling` | DataChannel 経由シグナリング (`true` / `false`) |
 | `--sora-simulcast` | サイマルキャスト (`true` / `false`) |

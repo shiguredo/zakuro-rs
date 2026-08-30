@@ -75,8 +75,13 @@ insta = "1.48"
 # テストで一時ディレクトリを使う
 tempfile = "3.27"
 
+[features]
+# Linux で MP4 の AAC 音声デコードを有効にする (libfdk-aac を実行時に動的ロードする)
+# 非 Linux ではこの feature を有効にしても依存は解決されない
+fdk-aac = ["dep:shiguredo_fdk_aac"]
+
 # AAC デコード (FDK AAC 共有ライブラリを実行時に動的ロードする)
 # shiguredo_fdk_aac は非 Linux でコンパイルエラーになるクレートのため、
-# 依存とコードを Linux 限定にする (他 OS では AAC は未対応扱い)
+# Linux 限定かつ optional にする (feature `fdk-aac` で有効化。他 OS では AAC は未対応扱い)
 [target.'cfg(target_os = "linux")'.dependencies]
-shiguredo_fdk_aac = "2026.1"
+shiguredo_fdk_aac = { version = "2026.1", optional = true }

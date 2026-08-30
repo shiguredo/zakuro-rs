@@ -2,7 +2,7 @@
 //!
 //! `--input-mp4` の映像パススルーに加えて、MP4 内の音声トラック (Opus / AAC) を
 //! PCM (48kHz モノラル) にデコードし、`FakeAudioCapturer` 経由で WebRTC の
-//! builtin Opus エンコーダーに渡す。
+//! builtin Opus エンコーダーに渡す。AAC は feature `fdk-aac` (Linux 限定) が必要。
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -15,8 +15,8 @@ use shiguredo_webrtc::rtc_log_warning;
 
 use crate::error::{ErrorMessage, Result};
 use crate::wav_reader::downmix_to_mono;
-// resample は AAC (Linux 限定) のデコード経路でのみ使う
-#[cfg(target_os = "linux")]
+// resample は AAC (Linux + feature `fdk-aac`) のデコード経路でのみ使う
+#[cfg(all(target_os = "linux", feature = "fdk-aac"))]
 use crate::wav_reader::resample;
 
 /// FakeAudioCapturer が要求するサンプルレート (Hz)。
@@ -133,9 +133,9 @@ enum AudioDecoderKind {
         /// デコード出力のチャンネル数 (1 または 2)
         channels: u8,
     },
-    /// AAC (FDK AAC、Linux 限定)。出力サンプルレートは 48kHz とは限らないため
+    /// AAC (FDK AAC、Linux + feature `fdk-aac`)。出力サンプルレートは 48kHz とは限らないため
     /// 必要に応じてリサンプリングする。
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "fdk-aac"))]
     Aac {
         decoder: shiguredo_fdk_aac::Decoder,
         /// ループごとのデコーダー再生成に使う libfdk-aac (Decoder と共有する clone)
@@ -249,7 +249,7 @@ impl Mp4AudioSource {
                 self.fifo
                     .extend(downmix_to_mono(&pcm[skip_interleaved..], channels as u16));
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "fdk-aac"))]
             AudioDecoderKind::Aac { decoder, .. } => {
                 if let Err(err) = decoder.decode(&data) {
                     if emit_warning {
@@ -308,7 +308,7 @@ impl Mp4AudioSource {
                 }
                 *skip_remaining = *pre_skip;
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "fdk-aac"))]
             AudioDecoderKind::Aac { decoder, lib, asc } => {
                 match shiguredo_fdk_aac::Decoder::new(lib.clone(), asc) {
                     Ok(new_decoder) => *decoder = new_decoder,
@@ -327,9 +327,10 @@ impl Mp4AudioSource {
 /// 音声トラックが無い場合と、未対応コーデック・対応外チャンネル構成の場合は
 /// 警告を出力したうえで映像のみで続行できる結果を返す。
 ///
-/// AAC 音声トラックは `--fdk-aac-lib` で指定した libfdk-aac 共有ライブラリを
-/// 実行時に動的ロードする必要がある (Linux のみ)。ロードできない環境で
-/// AAC 音声を含む MP4 を指定した場合は起動時エラーを返す。
+/// AAC 音声トラックは feature `fdk-aac` (Linux 限定) と `--fdk-aac-lib` で
+/// 指定した libfdk-aac 共有ライブラリの動的ロードが必要。ロードできない環境で
+/// AAC 音声を含む MP4 を指定した場合は起動時エラーを返す。feature 無し / 非 Linux
+/// では未対応として映像のみで続行する。
 pub(crate) fn inspect_mp4_audio(
     path: &Path,
     fdk_aac_lib_path: Option<&str>,
@@ -516,11 +517,11 @@ fn build_opus_source(
     })))
 }
 
-/// AAC デコーダーを構築する (Linux 限定)
+/// AAC デコーダーを構築する (Linux + feature `fdk-aac`)
 ///
 /// libfdk-aac 共有ライブラリを動的ロードする。ロードに失敗した場合と
 /// `--fdk-aac-lib` が未指定の場合は起動時エラーを返す。
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "fdk-aac"))]
 fn build_aac_source(
     track_info: AudioTrackInfo,
     fdk_aac_lib_path: Option<&str>,
@@ -560,8 +561,8 @@ fn build_aac_source(
     })))
 }
 
-/// AAC 音声トラックは非 Linux ではデコードできないため未対応として扱う
-#[cfg(not(target_os = "linux"))]
+/// AAC 音声トラックは Linux + feature `fdk-aac` 以外ではデコードできないため未対応として扱う
+#[cfg(not(all(target_os = "linux", feature = "fdk-aac")))]
 fn build_aac_source(
     _track_info: AudioTrackInfo,
     _fdk_aac_lib_path: Option<&str>,
@@ -569,7 +570,7 @@ fn build_aac_source(
     _samples: Vec<AudioSampleMeta>,
 ) -> Result<Mp4AudioTrackResult> {
     Ok(unsupported(
-        "AAC audio decoding is not supported on this platform",
+        "AAC audio decoding requires building with the fdk-aac feature on Linux",
     ))
 }
 
@@ -633,7 +634,7 @@ mod tests {
                 skip_remaining,
                 ..
             } => (*channels, *pre_skip, *skip_remaining),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "fdk-aac"))]
             AudioDecoderKind::Aac { .. } => {
                 panic!("Opus 入力が AAC として扱われました")
             }
@@ -880,20 +881,20 @@ mod tests {
         );
     }
 
-    /// AAC 音声の MP4 は非 Linux では未対応として扱われる
-    #[cfg(not(target_os = "linux"))]
+    /// AAC 音声の MP4 は Linux + feature `fdk-aac` 以外では未対応として扱われる
+    #[cfg(not(all(target_os = "linux", feature = "fdk-aac")))]
     #[test]
-    fn aac_is_unsupported_on_non_linux() {
+    fn aac_is_unsupported_without_fdk_aac_feature() {
         let result = inspect_mp4_audio(&testdata("mp4-audio-aac-stereo.m4a"), None)
-            .expect("非 Linux ではエラーにならないはず");
+            .expect("fdk-aac feature 無しではエラーにならないはず");
         assert!(
             matches!(result, Mp4AudioTrackResult::Unsupported),
-            "AAC 音声は非 Linux では未対応として扱われるはず"
+            "AAC 音声は fdk-aac feature 無しでは未対応として扱われるはず"
         );
     }
 
-    /// AAC 音声の MP4 は --fdk-aac-lib 未指定なら起動時エラーになる (Linux)
-    #[cfg(target_os = "linux")]
+    /// AAC 音声の MP4 は --fdk-aac-lib 未指定なら起動時エラーになる (Linux + feature `fdk-aac`)
+    #[cfg(all(target_os = "linux", feature = "fdk-aac"))]
     #[test]
     fn aac_requires_fdk_aac_lib_option() {
         let err = inspect_mp4_audio(&testdata("mp4-audio-aac-stereo.m4a"), None)
@@ -909,16 +910,16 @@ mod tests {
     /// AAC のデコードテストは libfdk-aac の動的ロードが必要。未導入の
     /// ローカル Linux 環境では検証をスキップする (CI には導入済みなので
     /// CI では常に検証される)。
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "fdk-aac"))]
     fn fdk_aac_lib_available() -> bool {
         shiguredo_fdk_aac::FdkAacLibrary::load("libfdk-aac.so.2").is_ok()
     }
 
-    /// AAC のデコードで 480 サンプルの供給と信号の再現ができる (Linux)
+    /// AAC のデコードで 480 サンプルの供給と信号の再現ができる (Linux + feature `fdk-aac`)
     ///
     /// 44.1kHz ステレオの AAC は 1 フレーム (1024 サンプル/チャンネル) が
     /// 48kHz モノラルへダウンミックス・リサンプリングされて FIFO に入る。
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "fdk-aac"))]
     #[test]
     fn aac_decodes_and_resamples_to_48khz_mono() {
         if !fdk_aac_lib_available() {
@@ -947,12 +948,12 @@ mod tests {
         );
     }
 
-    /// ループ再生で 2 周目の PCM が 1 周目と完全に一致する (Linux)
+    /// ループ再生で 2 周目の PCM が 1 周目と完全に一致する (Linux + feature `fdk-aac`)
     ///
     /// ループ境界で FDK デコーダーが作り直され、各ループがストリーム先頭からの
     /// 再生として扱われるため、2 周目の先頭パケットのデコード結果は
     /// 1 周目と同一になるはず (FDK AAC のデコードは決定論的)。
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "fdk-aac"))]
     #[test]
     fn aac_loop_replays_identical_pcm() {
         if !fdk_aac_lib_available() {

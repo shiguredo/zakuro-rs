@@ -39,9 +39,9 @@ jobs:
           sudo apt-get install -y libpulse-dev libx11-dev libfdk-aac-dev
       - run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --features fdk-aac -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --features fdk-aac
       - name: Verify Cargo metadata
         run: |
           DESCRIPTION=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.name == "zakuro") | .description')

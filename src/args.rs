@@ -26,7 +26,8 @@ pub(crate) struct CommonArgs {
     pub(crate) no_duckdb_output: bool,
     /// libwebrtc のデバッグログ閾値 (`--log-level`, デフォルト: Info)
     pub(crate) log_level: log::Severity,
-    /// FDK AAC 共有ライブラリのパス (`--fdk-aac-lib`、Linux で MP4 の AAC 音声をデコードするときに使用)
+    /// FDK AAC 共有ライブラリのパス (`--fdk-aac-lib`、feature `fdk-aac` の Linux ビルドで
+    /// MP4 の AAC 音声をデコードするときに使用)
     pub(crate) fdk_aac_lib: Option<String>,
 }
 
