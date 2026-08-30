@@ -173,6 +173,8 @@ POST /rpc          → JSON-RPC 2.0
 
 コーデックパラメータの送信は Sora サーバー側の sora.conf 設定 (`signaling_vp9_params` / `signaling_av1_params` / `signaling_h264_params` / `signaling_h265_params`) が有効である必要がある。`b_frame` はさらに `h264_b_frame` / `h265_b_frame` 設定が必要。無効な状態で指定すると Sora サーバーが検証エラーを返す。
 
+`--input-mp4` かつ H.264 / AV1 のとき、上記パラメータのうち CLI / 設定で未指定のフィールドは MP4 の実値（`avcC` / `av1C`）から connect へ自動補完する。明示指定したフィールドは上書きしない。Sora は offerer のため、offer のコーデックパラメータと bitstream を揃えないとクライアント側で video m-line が reject される。
+
 # 制御
 --duration <SEC>                    実行時間
 --repeat-interval <SEC>             再接続間隔

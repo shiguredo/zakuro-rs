@@ -108,6 +108,77 @@ fn build_video(args: &InstanceArgs) -> Option<sora_sdk::Video> {
     }
 }
 
+/// MP4 パススルー時に、connect へ載せる映像コーデックパラメータをファイル実値で補完する。
+///
+/// Sora は offerer のため、offer の `profile-level-id` 等と bitstream 実値が合わないと
+/// クライアント側の SDP answer で video m-line が reject される。
+/// CLI / 設定で未指定のフィールドだけを、`passthrough_capability` の required format から埋める。
+/// 明示指定されたフィールドは上書きしない。
+fn apply_mp4_passthrough_video_params(instance: &mut InstanceArgs, reader: &Mp4SampleReader) {
+    let mut formats = reader
+        .passthrough_capability()
+        .get_supported_formats(CodecDirection::Encoder);
+    let Some(format) = formats.first_mut() else {
+        return;
+    };
+    let params: std::collections::HashMap<String, String> =
+        format.parameters_mut().iter().collect();
+
+    match reader.codec_type() {
+        VideoCodecType::H264 => {
+            let Some(plid) = params.get("profile-level-id") else {
+                return;
+            };
+            let mut h264 = instance.sora_video_h264_params.clone().unwrap_or_default();
+            if h264.profile_level_id.is_some() {
+                return;
+            }
+            rtc_log_info!(
+                "MP4 passthrough: filling connect h264_params.profile_level_id={}",
+                plid
+            );
+            h264.profile_level_id = Some(plid.clone());
+            instance.sora_video_h264_params = Some(h264);
+        }
+        VideoCodecType::Av1 => {
+            let mut av1 = instance.sora_video_av1_params.clone().unwrap_or_default();
+            let mut filled = Vec::new();
+            if av1.profile.is_none()
+                && let Some(profile) = params.get("profile").and_then(|s| s.parse().ok())
+            {
+                av1.profile = Some(profile);
+                filled.push(format!("profile={profile}"));
+            }
+            if av1.level_idx.is_none()
+                && let Some(level_idx) = params.get("level-idx").and_then(|s| s.parse().ok())
+            {
+                av1.level_idx = Some(level_idx);
+                filled.push(format!("level_idx={level_idx}"));
+            }
+            if av1.tier.is_none()
+                && let Some(tier) = params.get("tier").and_then(|s| s.parse().ok())
+            {
+                av1.tier = Some(tier);
+                filled.push(format!("tier={tier}"));
+            }
+            if filled.is_empty() {
+                return;
+            }
+            rtc_log_info!(
+                "MP4 passthrough: filling connect av1_params ({})",
+                filled.join(", ")
+            );
+            instance.sora_video_av1_params = Some(av1);
+        }
+        // VP8 / VP9 / H265 のパススルー required format は現状追加パラメータを持たない。
+        VideoCodecType::Vp8
+        | VideoCodecType::Vp9
+        | VideoCodecType::H265
+        | VideoCodecType::Generic
+        | VideoCodecType::Unknown(_) => {}
+    }
+}
+
 fn build_audio(args: &InstanceArgs) -> Option<sora_sdk::Audio> {
     if args.no_audio_device || !args.audio {
         return Some(sora_sdk::Audio::new_bool(false));
@@ -572,7 +643,7 @@ async fn async_main() -> Result<()> {
 async fn run_zakuro_instance(
     instance_id: u32,
     common: CommonArgs,
-    instance: InstanceArgs,
+    mut instance: InstanceArgs,
     openh264_lib: Option<Openh264Library>,
     client_cert_pem: Option<String>,
     client_key_pem: Option<String>,
@@ -607,6 +678,8 @@ async fn run_zakuro_instance(
             ))
             .into());
         }
+        // connect のコーデックパラメータを MP4 実値で補完し、Sora offer と揃える。
+        apply_mp4_passthrough_video_params(&mut instance, &reader);
         Some(reader)
     } else {
         None
@@ -1056,6 +1129,124 @@ mod tests {
             !json.contains("level_id"),
             "level_id は出力されないべき: {json}"
         );
+    }
+
+    /// テスト用フィクスチャへのパスを返す。
+    fn testdata(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata")
+            .join(name)
+    }
+
+    #[test]
+    fn apply_mp4_passthrough_video_params_fills_h264_profile_level_id() {
+        // H.264 MP4 で profile_level_id 未指定なら、avcC 由来の値を connect 用に埋める。
+        // fixture は High Profile Level 2.1 (profile-level-id=640015)。
+        let reader = Mp4SampleReader::new(testdata("mp4-video-h264.mp4"))
+            .expect("H.264 フィクスチャを開けるはずです");
+        let mut args = minimal_instance_args();
+        args.video_codec_type = Some("h264".into());
+        args.video_bit_rate = Some(1000);
+        apply_mp4_passthrough_video_params(&mut args, &reader);
+
+        let params = args
+            .sora_video_h264_params
+            .as_ref()
+            .expect("h264_params が補完されるはずです");
+        assert_eq!(
+            params.profile_level_id.as_deref(),
+            Some("640015"),
+            "High Profile fixture の profile_level_id が載るはずです"
+        );
+
+        // build_video 経由でも connect JSON に含まれることを確認する。
+        let video = build_video(&args).expect("Video が返るべきです");
+        let json = nojson::Json(&video).to_string();
+        assert!(
+            json.contains("\"profile_level_id\":\"640015\""),
+            "connect 用 Video JSON に profile_level_id が含まれるべき: {json}"
+        );
+    }
+
+    #[test]
+    fn apply_mp4_passthrough_video_params_keeps_explicit_h264_profile_level_id() {
+        // CLI で明示した profile_level_id は MP4 実値で上書きしない。
+        let reader = Mp4SampleReader::new(testdata("mp4-video-h264.mp4"))
+            .expect("H.264 フィクスチャを開けるはずです");
+        let mut args = minimal_instance_args();
+        args.video_codec_type = Some("h264".into());
+        args.sora_video_h264_params = Some(sora_sdk::VideoH264Params {
+            profile_level_id: Some("42e01f".to_string()),
+            b_frame: Some(true),
+        });
+        apply_mp4_passthrough_video_params(&mut args, &reader);
+
+        let params = args
+            .sora_video_h264_params
+            .as_ref()
+            .expect("明示指定の h264_params が残るはずです");
+        assert_eq!(
+            params.profile_level_id.as_deref(),
+            Some("42e01f"),
+            "明示指定の profile_level_id を保持するはずです"
+        );
+        assert_eq!(params.b_frame, Some(true), "b_frame も保持するはずです");
+    }
+
+    #[test]
+    fn apply_mp4_passthrough_video_params_fills_h264_plid_when_only_b_frame_set() {
+        // b_frame だけ指定されていても、未指定の profile_level_id は補完する。
+        let reader = Mp4SampleReader::new(testdata("mp4-video-h264.mp4"))
+            .expect("H.264 フィクスチャを開けるはずです");
+        let mut args = minimal_instance_args();
+        args.video_codec_type = Some("h264".into());
+        args.sora_video_h264_params = Some(sora_sdk::VideoH264Params {
+            profile_level_id: None,
+            b_frame: Some(false),
+        });
+        apply_mp4_passthrough_video_params(&mut args, &reader);
+
+        let params = args
+            .sora_video_h264_params
+            .as_ref()
+            .expect("h264_params が残るはずです");
+        assert_eq!(
+            params.profile_level_id.as_deref(),
+            Some("640015"),
+            "未指定の profile_level_id だけ補完するはずです"
+        );
+        assert_eq!(
+            params.b_frame,
+            Some(false),
+            "明示した b_frame は保持するはずです"
+        );
+    }
+
+    #[test]
+    fn apply_mp4_passthrough_video_params_fills_av1_params() {
+        // AV1 MP4 で av1_params 未指定なら、av1C 由来の profile / level_idx / tier を埋める。
+        let reader = Mp4SampleReader::new(testdata("mp4-video-av1.mp4"))
+            .expect("AV1 フィクスチャを開けるはずです");
+        let mut args = minimal_instance_args();
+        args.video_codec_type = Some("av1".into());
+        args.video_bit_rate = Some(1000);
+        apply_mp4_passthrough_video_params(&mut args, &reader);
+
+        let params = args
+            .sora_video_av1_params
+            .as_ref()
+            .expect("av1_params が補完されるはずです");
+        assert_eq!(
+            params.profile,
+            Some(0),
+            "fixture の profile は 0 のはずです"
+        );
+        assert_eq!(
+            params.level_idx,
+            Some(0),
+            "fixture の level_idx は 0 のはずです"
+        );
+        assert_eq!(params.tier, Some(0), "fixture の tier は 0 のはずです");
     }
 
     #[test]

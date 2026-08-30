@@ -96,7 +96,7 @@ cargo run -- \
 
 ### MP4 パススルーで送信する
 
-`--input-mp4` はエンコード済み映像を再エンコードせずにパススルー送信します。ファイル終端に達するとループ再生します。使用時は `--sora-video-codec-type` と `--sora-video-bit-rate` が必須です。
+`--input-mp4` はエンコード済み映像を再エンコードせずにパススルー送信します。ファイル終端に達するとループ再生します。使用時は `--sora-video-codec-type` と `--sora-video-bit-rate` が必須です。H.264 / AV1 では、CLI で未指定のコーデックパラメータ (`profile_level_id` や `profile` / `level_idx` / `tier`) を MP4 の実値から connect へ自動で載せます（Sora の offer と bitstream を揃えるため。明示指定があればそれを優先します）。自動載せには Sora 側で `signaling_h264_params` / `signaling_av1_params` が有効である必要があります。
 
 MP4 内の音声トラックがある場合はデコードして送信します (Opus / AAC、モノラル / ステレオ)。Opus は 20ms パケット、AAC は 1 サンプル = 1 フレームの mp4a を前提とします (通常のエンコード済み MP4 はこの構成です)。音声トラックが無い・未対応コーデックの MP4 は従来どおり映像のみになります。音声送信を有効にしている場合 (デフォルト)、音声トラックが 2 本以上ある MP4 は起動時エラーになります。
 
