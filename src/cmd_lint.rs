@@ -55,7 +55,7 @@ pub(crate) fn try_run() -> Result<Option<ExitCode>> {
 
 /// 1 ファイルを lint する
 ///
-/// 成功時は出力なし (mikan lint と同様)。失敗時は annotate-snippets 形式で
+/// 成功時は出力なし。失敗時は annotate-snippets 形式で
 /// stderr に診断を出して `Err(())` を返す (呼び出し側で exit 1)。
 fn lint_file(path: &Path) -> std::result::Result<(), ()> {
     let path_display = path.display().to_string();
@@ -70,7 +70,7 @@ fn lint_file(path: &Path) -> std::result::Result<(), ()> {
     // 構文エラーは位置付きで報告する
     if let Err(e) = RawJson::parse_jsonc(&content) {
         let start = e.position();
-        // 0 長 span だと下線が出ないため最小 1 バイトに揃える (mikan と同方針)
+        // 0 長 span だと下線が出ないため最小 1 バイトに揃える
         let span = start..start + 1;
         emit_error_with_span(&path_display, &content, &format!("{e}"), span);
         return Err(());

@@ -328,7 +328,7 @@ impl<'a, W: std::fmt::Write> Formatter<'a, W> {
 mod tests {
     use super::*;
 
-    /// 入力 JSONC と整形結果を mikan-fmt と同形式で連結する
+    /// 入力 JSONC と整形結果をスナップショット比較用に連結する
     fn render(input: &str) -> String {
         let output = format_jsonc(input).expect("有効な JSONC は整形できること");
         format!("--- input ---\n{input}--- output ---\n{output}")
