@@ -173,7 +173,12 @@ POST /rpc          → JSON-RPC 2.0
 
 コーデックパラメータの送信は Sora サーバー側の sora.conf 設定 (`signaling_vp9_params` / `signaling_av1_params` / `signaling_h264_params` / `signaling_h265_params`) が有効である必要がある。`b_frame` はさらに `h264_b_frame` / `h265_b_frame` 設定が必要。無効な状態で指定すると Sora サーバーが検証エラーを返す。
 
-`--input-mp4` かつ H.264 / AV1 のとき、上記パラメータのうち CLI / 設定で未指定のフィールドは MP4 の実値（`avcC` / `av1C`）から connect へ自動補完する。明示指定したフィールドは上書きしない。Sora は offerer のため、offer のコーデックパラメータと bitstream を揃えないとクライアント側で video m-line が reject される。
+`--input-mp4` かつ H.264 / AV1 のとき、上記パラメータのうち CLI / 設定で未指定のフィールドは MP4 の実値から connect へ自動補完する。明示指定したフィールドは上書きしない。
+
+- H.264: `profile_level_id`（`avcC` 由来）
+- AV1: `profile` / `level_idx` / `tier`（`av1C` 由来）
+- 前提: Sora 側で `signaling_h264_params` / `signaling_av1_params` が有効であること
+- 理由: Sora は offerer のため、offer のコーデックパラメータと bitstream を揃えないとクライアント側で video m-line が reject される
 
 # 制御
 --duration <SEC>                    実行時間
@@ -252,6 +257,7 @@ POST /rpc          → JSON-RPC 2.0
 - [x] Y4M 動画ファイル読込 (`--input-y4m`)
 - [x] 実デバイスキャプチャ (`--video-input-device`)
 - [x] MP4 パススルー送信 (`--input-mp4`)
+  - H.264 / AV1 では未指定のコーデックパラメータを MP4 実値から connect へ自動補完する (`signaling_h264_params` / `signaling_av1_params` が必要)
 - [ ] 解像度固定モード (`--fixed-resolution`)
 
 ### 音声
@@ -270,6 +276,7 @@ POST /rpc          → JSON-RPC 2.0
 - [x] OpenH264 外部ライブラリ (`--openh264`)
 - [x] コーデック個別エンコーダー指定 (`--vp8-encoder` 等)
 - [x] コーデックパラメータ (`--sora-video-vp9-params` 等)
+  - `--input-mp4` かつ H.264 / AV1 では未指定フィールドを MP4 実値から自動補完する
 - [x] ビデオコーデック能力表示 (`--show-video-codec-capability`)
 
 ### 接続設定
@@ -358,7 +365,7 @@ POST /rpc          → JSON-RPC 2.0
 | 音声ファイル入力 | `--fake-audio-capture` | `--input-wav` |
 | WAV 未指定時のデフォルト音源 | External / GameAudio | Safari ループ (GameAudioManager 非実装のため) |
 | カメラ指定 | `--video-device` | `--video-input-device` |
-| MP4 パススルー | なし | `--input-mp4` |
+| MP4 パススルー | なし | `--input-mp4` (H.264 / AV1 はコーデックパラメータを MP4 実値から自動補完) |
 | MP4 パススルー音声 | なし | `--input-mp4` 内の Opus / AAC をデコードして送信 (AAC は Linux + feature `fdk-aac`・`--fdk-aac-lib` が必要) |
 | 設定ファイル検証 | なし | `zakuro lint <FILE.jsonc>` (負荷試験を起動せず構文・意味検証。`--fix` は無し) |
 | 設定ファイル整形 | なし | `zakuro fmt <FILE.jsonc>` (コメント / 空行 / trailing comma を保持。`--check` で書き戻しなし確認) |

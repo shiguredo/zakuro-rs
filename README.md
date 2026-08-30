@@ -96,7 +96,14 @@ cargo run -- \
 
 ### MP4 パススルーで送信する
 
-`--input-mp4` はエンコード済み映像を再エンコードせずにパススルー送信します。ファイル終端に達するとループ再生します。使用時は `--sora-video-codec-type` と `--sora-video-bit-rate` が必須です。H.264 / AV1 では、CLI で未指定のコーデックパラメータ (`profile_level_id` や `profile` / `level_idx` / `tier`) を MP4 の実値から connect へ自動で載せます（Sora の offer と bitstream を揃えるため。明示指定があればそれを優先します）。自動載せには Sora 側で `signaling_h264_params` / `signaling_av1_params` が有効である必要があります。
+`--input-mp4` はエンコード済み映像を再エンコードせずにパススルー送信します。ファイル終端に達するとループ再生します。使用時は `--sora-video-codec-type` と `--sora-video-bit-rate` が必須です。
+
+H.264 / AV1 のパススルーでは、CLI / 設定で未指定のコーデックパラメータを MP4 の実値から connect へ自動補完します。Sora は offerer のため、offer のパラメータと bitstream を揃えないとクライアント側で video m-line が reject されます。
+
+- H.264: `profile_level_id`（`avcC` 由来）
+- AV1: `profile` / `level_idx` / `tier`（`av1C` 由来）
+- 明示指定したフィールドは上書きしません
+- 自動補完には Sora 側で `signaling_h264_params` / `signaling_av1_params` が有効である必要があります
 
 MP4 内の音声トラックがある場合はデコードして送信します (Opus / AAC、モノラル / ステレオ)。Opus は 20ms パケット、AAC は 1 サンプル = 1 フレームの mp4a を前提とします (通常のエンコード済み MP4 はこの構成です)。音声トラックが無い・未対応コーデックの MP4 は従来どおり映像のみになります。音声送信を有効にしている場合 (デフォルト)、音声トラックが 2 本以上ある MP4 は起動時エラーになります。
 
@@ -281,7 +288,7 @@ reconnect シナリオは接続確立後「切断してすぐ再接続 → 1-5 �
 | `--retry-interval` | リトライ間隔 (秒) |
 | `--video-input-device` | 映像入力デバイス名または ID |
 | `--input-y4m` | Y4M ファイル入力 |
-| `--input-mp4` | MP4 パススルー入力 (映像・音声、ループ再生) |
+| `--input-mp4` | MP4 パススルー入力 (映像・音声、ループ再生)。H.264 / AV1 では未指定のコーデックパラメータを MP4 実値から connect へ自動補完する |
 | `--input-wav` | WAV ファイル音声入力 (PCM 16bit、ループ再生) |
 | `--sandstorm` | 砂嵐映像を生成 |
 | `--resolution` | `QVGA` / `VGA` / `HD` / `FHD` / `4K` / `WxH` |
@@ -290,7 +297,7 @@ reconnect シナリオは接続確立後「切断してすぐ再接続 → 1-5 �
 | `--no-audio-device` | 音声を無効化 |
 | `--sora-video-codec-type` | `vp8` / `vp9` / `av1` / `h264` / `h265` |
 | `--sora-video-bit-rate` | 映像ビットレート (kbps) |
-| `--sora-video-vp9-params` / `--sora-video-av1-params` / `--sora-video-h264-params` / `--sora-video-h265-params` | コーデックパラメータ (JSON) |
+| `--sora-video-vp9-params` / `--sora-video-av1-params` / `--sora-video-h264-params` / `--sora-video-h265-params` | コーデックパラメータ (JSON)。`--input-mp4` 時は未指定フィールドを MP4 実値で自動補完する |
 | `--vp8-encoder` / `--vp9-encoder` / `--av1-encoder` / `--h264-encoder` / `--h265-encoder` | エンコーダー実装指定 |
 | `--show-video-codec-capability` | 利用可能な映像コーデック能力を表示して終了 |
 | `--sora-audio` | 音声の有効 / 無効 (`true` / `false`) |
