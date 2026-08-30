@@ -211,20 +211,24 @@ POST /rpc          → JSON-RPC 2.0
 
 | ライブラリ | バージョン | 用途 |
 |-----------|-----------|------|
-| shiguredo_webrtc | 0.150 | libwebrtc バインディング |
-| sora_sdk | 2026.1.0-canary.13 | Sora Rust SDK |
+| shiguredo_webrtc | 0.152.1-canary.0 | libwebrtc バインディング |
+| sora_sdk | 2026.2.0-canary.0 | Sora Rust SDK |
 | shiguredo_http11 | 2026.6 | HTTP/1.1 サーバー |
-| shiguredo_openh264 | 2026.1 | OpenH264 バインディング |
-| shiguredo_video_device | 2026.1 | クロスプラットフォーム ビデオデバイス |
+| shiguredo_openh264 | 2026.2 | OpenH264 バインディング |
+| shiguredo_video_device | 2026.2 | クロスプラットフォーム ビデオデバイス |
+| shiguredo_mp4 | 2026.4 | MP4 コンテナからの音声トラック demux |
+| shiguredo_opus | 2026.2 | Opus デコード (MP4 音声 → PCM) |
+| shiguredo_fdk_aac | 2026.1 | AAC デコード (Linux 限定、実行時動的ロード) |
 | raden | 2026.2.0-canary.0 | 2D ベクターグラフィックス (フェイク映像生成) |
+| annotate-snippets | 0.12 | CLI 診断メッセージのソース注釈表示 |
 | nojson | 0.3 | JSON / JSONC パース |
 | noargs | 0.4 | CLI 引数パース |
-| aws-lc-rs | 1.17 | 暗号ライブラリ (乱数生成) |
+| aws-lc-rs | 1.18 | 暗号ライブラリ (乱数生成) |
 | jiff | 0.2 | UTC タイムスタンプ整形 (DuckDB ファイル名生成用) |
-| tokio | 1.52 | 非同期ランタイム |
+| tokio | 1.53 | 非同期ランタイム |
 | tokio-stream | 0.1 | Stream ラッパー (ReceiverStream, IntervalStream) |
 | tokio-util | 0.7 | CancellationToken, DelayQueue |
-| duckdb | 1.10504 | DuckDB バインディング (統計記録に利用) |
+| duckdb | 1.10505 | DuckDB バインディング (統計記録に利用) |
 
 ### コア機能
 
@@ -310,6 +314,8 @@ POST /rpc          → JSON-RPC 2.0
 ### その他
 
 - [x] JSONC 設定ファイル (`--config`)
+- [x] 設定ファイル検証サブコマンド (`zakuro lint`)
+- [x] 設定ファイル整形サブコマンド (`zakuro fmt`)
 - [x] NopVideoDecoder (受信映像廃棄)
 - [x] DuckDB ファイルへの統計情報出力 (`--duckdb-output-dir` / `--duckdb-interval` / `--no-duckdb-output`)
 - [x] ログレベル制御 (`--log-level`)
@@ -352,3 +358,5 @@ POST /rpc          → JSON-RPC 2.0
 | カメラ指定 | `--video-device` | `--video-input-device` |
 | MP4 パススルー | なし | `--input-mp4` |
 | MP4 パススルー音声 | なし | `--input-mp4` 内の Opus / AAC をデコードして送信 (AAC は Linux 限定・`--fdk-aac-lib` が必要) |
+| 設定ファイル検証 | なし | `zakuro lint <FILE.jsonc>` (負荷試験を起動せず構文・意味検証) |
+| 設定ファイル整形 | なし | `zakuro fmt <FILE.jsonc>` (コメント / 空行 / trailing comma を保持) |

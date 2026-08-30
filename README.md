@@ -13,7 +13,8 @@ Sora WebRTC SFU の負荷試験ツール `zakuro` の Rust 実装です。
 - Sora への `sendonly` / `recvonly` / `sendrecv` 接続
 - フェイク映像 (Raden デジタル時計)、砂嵐、Y4M 入力、実カメラ入力、MP4 パススルー送信
 - フェイク音声 (BIP / BOP / HUM / ノイズの連続自動生成。旧映像同期ビープは廃止)、WAV ファイル入力 (`--input-wav`)、MP4 内の音声トラック送信 (Opus / AAC、`--input-mp4` 時)
-- 映像 / 音声コーデック指定、OpenH264 エンコード (`--openh264`)
+- 映像 / 音声コーデック指定、OpenH264 エンコード (`--openh264`)、コーデックパラメータ / エンコーダー実装指定
+- `--show-video-codec-capability` による映像コーデック能力表示
 - 受信映像をデコードせず廃棄する NopVideoDecoder
 - DataChannel メッセージング (`--sora-data-channels`、ZAKURO ヘッダ付き自動送信)
 - サイマルキャスト / スポットライト
@@ -265,6 +266,9 @@ reconnect シナリオは接続確立後「切断してすぐ再接続 → 1-5 �
 | `--sora-client-id` | Sora のクライアント ID |
 | `--sora-bundle-id` | Sora のバンドル ID |
 | `--sora-metadata` | connect メッセージのメタデータ (JSON) |
+| `--sora-signaling-notify-metadata` | シグナリング通知メタデータ (JSON) |
+| `--sora-ignore-disconnect-websocket` | WebSocket 切断を無視する (`true` / `false`) |
+| `--sora-disconnect-wait-timeout` | 切断待ちタイムアウト (秒) |
 | `--vcs` | 仮想クライアント数 (`1` - `1000`) |
 | `--vcs-hatch-rate` | 仮想クライアントの起動レート |
 | `--instance-hatch-rate` | Zakuro インスタンスの起動レート (JSONC `instances` 配列と組み合わせて使用) |
@@ -283,6 +287,9 @@ reconnect シナリオは接続確立後「切断してすぐ再接続 → 1-5 �
 | `--no-audio-device` | 音声を無効化 |
 | `--sora-video-codec-type` | `vp8` / `vp9` / `av1` / `h264` / `h265` |
 | `--sora-video-bit-rate` | 映像ビットレート (kbps) |
+| `--sora-video-vp9-params` / `--sora-video-av1-params` / `--sora-video-h264-params` / `--sora-video-h265-params` | コーデックパラメータ (JSON) |
+| `--vp8-encoder` / `--vp9-encoder` / `--av1-encoder` / `--h264-encoder` / `--h265-encoder` | エンコーダー実装指定 |
+| `--show-video-codec-capability` | 利用可能な映像コーデック能力を表示して終了 |
 | `--sora-audio` | 音声の有効 / 無効 (`true` / `false`) |
 | `--sora-audio-codec-type` | 現状は `opus` |
 | `--sora-audio-bit-rate` | 音声ビットレート (kbps) |
@@ -327,7 +334,7 @@ curl -s http://127.0.0.1:8080/rpc \
 レスポンス例:
 
 ```json
-{"jsonrpc":"2.0","result":{"name":"zakuro","version":"2026.1.0"},"id":1}
+{"jsonrpc":"2.0","result":{"name":"zakuro","version":"2026.0.0"},"id":1}
 ```
 
 ## 注意点
@@ -337,4 +344,9 @@ curl -s http://127.0.0.1:8080/rpc \
 - `--sandstorm` は `--input-y4m` / `--video-input-device` / `--input-mp4` と同時指定できません
 - `--input-mp4` は `--video-input-device` / `--input-y4m` / `--sandstorm` / `--input-wav` と同時指定できません
 - `--input-wav` は `--no-audio-device` / `--sora-audio=false` と同時指定できません
+- `--input-mp4` は `--vp8-encoder` / `--vp9-encoder` / `--av1-encoder` / `--h264-encoder` / `--h265-encoder` (エンコーダー実装指定) と同時指定できません
+- エンコーダー実装指定との排他エラーは、実際に指定したキー名ではなく `--vp8-encoder 等` の汎用表記になります
+- `--input-mp4` は `--openh264` と同時指定できません
+- `--no-video-device` と `--video-input-device` / `--input-y4m` / `--sandstorm` / `--input-mp4` は同時指定できません
+- `--video-input-device` は `--input-y4m` / `--sandstorm` / `--input-mp4` / `--no-video-device` と同時指定できません
 - `--openh264` を使う場合は共有ライブラリのパスを指定します (H.264 エンコード用)
