@@ -211,15 +211,15 @@ POST /rpc          → JSON-RPC 2.0
 
 | ライブラリ | バージョン | 用途 |
 |-----------|-----------|------|
-| shiguredo_webrtc | 0.152.1-canary.0 | libwebrtc バインディング |
-| sora_sdk | 2026.2.0-canary.0 | Sora Rust SDK |
+| shiguredo_webrtc | 0.152.1-canary.1 | libwebrtc バインディング |
+| sora_sdk | 2026.2.0-canary.1 | Sora Rust SDK |
 | shiguredo_http11 | 2026.6 | HTTP/1.1 サーバー |
 | shiguredo_openh264 | 2026.2 | OpenH264 バインディング |
-| shiguredo_video_device | 2026.2 | クロスプラットフォーム ビデオデバイス |
-| shiguredo_mp4 | 2026.4 | MP4 コンテナからの音声トラック demux |
+| shiguredo_video_device | 2026.3 | クロスプラットフォーム ビデオデバイス |
+| shiguredo_mp4 | 2026.5 | MP4 コンテナからの音声トラック demux |
 | shiguredo_opus | 2026.2 | Opus デコード (MP4 音声 → PCM) |
 | shiguredo_fdk_aac | 2026.1 | AAC デコード (Linux 限定、実行時動的ロード) |
-| raden | 2026.2.0-canary.0 | 2D ベクターグラフィックス (フェイク映像生成) |
+| raden | 2026.2 | 2D ベクターグラフィックス (フェイク映像生成) |
 | annotate-snippets | 0.12 | CLI 診断メッセージのソース注釈表示 |
 | nojson | 0.3 | JSON / JSONC パース |
 | noargs | 0.4 | CLI 引数パース |

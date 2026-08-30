@@ -31,22 +31,22 @@ noargs = "0.4"
 # JSON パース / 生成
 nojson = "0.3"
 # 2D ベクターグラフィックス (フェイク映像生成)
-raden = "2026.2.0-canary.0"
+raden = "2026.2"
 # HTTP/1.1 サーバー
 shiguredo_http11 = "2026.6"
 # MP4 コンテナからの音声トラックの demux に利用 (映像は sora_sdk 経由。
 # sora_sdk と同じ shiguredo_mp4 バージョンに解決される)
-shiguredo_mp4 = "2026.4"
+shiguredo_mp4 = "2026.5"
 # OpenH264 バインディング (H.264 エンコード)
 shiguredo_openh264 = "2026.2"
 # Opus デコード (MP4 音声を PCM へ変換する際に利用)
 shiguredo_opus = "2026.2"
 # クロスプラットフォーム ビデオデバイス
-shiguredo_video_device = "2026.2"
+shiguredo_video_device = "2026.3"
 # libwebrtc バインディング
-shiguredo_webrtc = "0.152.1-canary.0"
+shiguredo_webrtc = "0.152.1-canary.1"
 # Sora Rust SDK
-sora_sdk = "2026.2.0-canary.0"
+sora_sdk = "2026.2.0-canary.1"
 # tokio Stream ラッパー (ReceiverStream, IntervalStream)
 tokio-stream = "0.1"
 # tokio ユーティリティ (CancellationToken, DelayQueue)

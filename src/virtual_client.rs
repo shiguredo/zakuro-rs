@@ -71,7 +71,7 @@ pub(crate) async fn run(
     // 1 つの video_source を複数 VC で共有すると `video_frame_buffer callback called from multiple threads`
     // の panic に至る。VC ごとに専用の Mp4VideoCapturer を持ち、そのライフタイムを
     // この関数のスコープで受け取ることでフィーダースレッドを VC と同時終了させる。
-    // 参考: sora_sdk 2026.1.0-canary.21 / shiguredo_webrtc 0.150.3。
+    // Mp4SampleReader 自体は instance 内で共有 (Clone) し、ファイル I/O スレッドは 1 本にまとめる。
     mp4_capturer: Option<Mp4VideoCapturer>,
     config: VirtualClientConfig,
     token: CancellationToken,
