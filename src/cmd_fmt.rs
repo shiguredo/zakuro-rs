@@ -32,6 +32,12 @@ pub(crate) fn try_run() -> Result<Option<ExitCode>> {
 
     noargs::HELP_FLAG.take_help(&mut args);
 
+    // CI 向け: 書き戻さず、整形差分があれば exit 1 にする
+    let check = noargs::flag("check")
+        .doc("Check if the file is already formatted without writing")
+        .take(&mut args)
+        .is_present();
+
     let path: PathBuf = noargs::arg("<FILE>")
         .doc("JSONC configuration file to format")
         .example("config.jsonc")
@@ -43,7 +49,7 @@ pub(crate) fn try_run() -> Result<Option<ExitCode>> {
         return Ok(Some(ExitCode::SUCCESS));
     }
 
-    match fmt_file(&path) {
+    match fmt_file(&path, check) {
         Ok(()) => Ok(Some(ExitCode::SUCCESS)),
         Err(()) => Ok(Some(ExitCode::from(1))),
     }
@@ -51,9 +57,10 @@ pub(crate) fn try_run() -> Result<Option<ExitCode>> {
 
 /// 1 ファイルを fmt する
 ///
-/// 成功時は変更があれば書き戻し、無ければ無出力。失敗時は annotate-snippets 形式で
-/// stderr に診断を出して `Err(())` を返す。
-fn fmt_file(path: &Path) -> std::result::Result<(), ()> {
+/// `check` が false のとき: 変更があれば書き戻し、無ければ無出力。
+/// `check` が true のとき: 書き戻さず、差分があれば stderr に報告して `Err(())`。
+/// 失敗時は annotate-snippets 形式で stderr に診断を出して `Err(())` を返す。
+fn fmt_file(path: &Path, check: bool) -> std::result::Result<(), ()> {
     let path_display = path.display().to_string();
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -75,6 +82,11 @@ fn fmt_file(path: &Path) -> std::result::Result<(), ()> {
 
     if formatted == content {
         return Ok(());
+    }
+
+    if check {
+        emit_error_message(&format!("would reformat {path_display}"));
+        return Err(());
     }
 
     if let Err(e) = std::fs::write(path, &formatted) {
@@ -102,7 +114,7 @@ mod tests {
 },
 }"#;
         std::fs::write(&path, input).expect("書き込めること");
-        fmt_file(&path).expect("fmt に成功すること");
+        fmt_file(&path, false).expect("fmt に成功すること");
 
         let output = std::fs::read_to_string(&path).expect("読み込めること");
         assert!(output.contains("// endpoint"), "行コメントが保持されること");
@@ -131,7 +143,7 @@ mod tests {
             .expect("メタデータを取得できること")
             .modified()
             .expect("更新時刻を取得できること");
-        fmt_file(&path).expect("fmt に成功すること");
+        fmt_file(&path, false).expect("fmt に成功すること");
         let after = std::fs::metadata(&path)
             .expect("メタデータを取得できること")
             .modified()
@@ -146,8 +158,42 @@ mod tests {
         let path = dir.path().join("bad.jsonc");
         std::fs::write(&path, "{ broken").expect("書き込めること");
         assert!(
-            fmt_file(&path).is_err(),
+            fmt_file(&path, false).is_err(),
             "構文不正な JSONC は fmt に失敗すること"
         );
+    }
+
+    /// `--check` は差分があってもファイルを書き換えず失敗すること
+    #[test]
+    fn fmt_file_check_fails_without_writing_when_unformatted() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作成できること");
+        let path = dir.path().join("unformatted.jsonc");
+        let input = "{\"vcs\":1}";
+        std::fs::write(&path, input).expect("書き込めること");
+        assert!(
+            fmt_file(&path, true).is_err(),
+            "未整形なら --check は失敗すること"
+        );
+        let after = std::fs::read_to_string(&path).expect("読み込めること");
+        assert_eq!(after, input, "--check ではファイルを書き換えないこと");
+    }
+
+    /// `--check` は整形済みなら成功しファイルを触らないこと
+    #[test]
+    fn fmt_file_check_succeeds_when_already_formatted() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作成できること");
+        let path = dir.path().join("formatted.jsonc");
+        let content = "{\n  \"vcs\": 1\n}\n";
+        std::fs::write(&path, content).expect("書き込めること");
+        let before = std::fs::metadata(&path)
+            .expect("メタデータを取得できること")
+            .modified()
+            .expect("更新時刻を取得できること");
+        fmt_file(&path, true).expect("整形済みなら --check は成功すること");
+        let after = std::fs::metadata(&path)
+            .expect("メタデータを取得できること")
+            .modified()
+            .expect("更新時刻を取得できること");
+        assert_eq!(before, after, "--check 成功時もファイルを書き換えないこと");
     }
 }

@@ -315,7 +315,7 @@ POST /rpc          → JSON-RPC 2.0
 
 - [x] JSONC 設定ファイル (`--config`)
 - [x] 設定ファイル検証サブコマンド (`zakuro lint`。検証のみで `--fix` は無し・今後も予定しない)
-- [x] 設定ファイル整形サブコマンド (`zakuro fmt`)
+- [x] 設定ファイル整形サブコマンド (`zakuro fmt` / `zakuro fmt --check`)
 - [x] NopVideoDecoder (受信映像廃棄)
 - [x] DuckDB ファイルへの統計情報出力 (`--duckdb-output-dir` / `--duckdb-interval` / `--no-duckdb-output`)
 - [x] ログレベル制御 (`--log-level`)
@@ -359,4 +359,4 @@ POST /rpc          → JSON-RPC 2.0
 | MP4 パススルー | なし | `--input-mp4` |
 | MP4 パススルー音声 | なし | `--input-mp4` 内の Opus / AAC をデコードして送信 (AAC は Linux 限定・`--fdk-aac-lib` が必要) |
 | 設定ファイル検証 | なし | `zakuro lint <FILE.jsonc>` (負荷試験を起動せず構文・意味検証。`--fix` は無し) |
-| 設定ファイル整形 | なし | `zakuro fmt <FILE.jsonc>` (コメント / 空行 / trailing comma を保持) |
+| 設定ファイル整形 | なし | `zakuro fmt <FILE.jsonc>` (コメント / 空行 / trailing comma を保持。`--check` で書き戻しなし確認) |
