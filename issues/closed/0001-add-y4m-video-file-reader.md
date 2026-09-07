@@ -2,7 +2,6 @@
 
 Created: 2026-03-24
 Completed: 2026-03-24
-Model: Opus 4.6
 
 ## 概要
 

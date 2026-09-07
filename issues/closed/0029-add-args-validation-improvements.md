@@ -3,7 +3,6 @@
 - Priority: Medium
 - Created: 2026-06-28
 - Completed: 2026-06-28
-- Model: DeepSeek V4 Pro
 - Branch: feature/add-args-validation-improvements
 - Polished: 2026-06-28
 

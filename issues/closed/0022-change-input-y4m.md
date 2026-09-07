@@ -3,7 +3,6 @@
 - Priority: Medium
 - Created: 2026-06-26
 - Completed: 2026-06-26
-- Model: Opus 4.7
 - Branch: feature/change-input-y4m
 - Polished: {YYYY-MM-DD}
 - Reporter: @voluntas
@@ -14,7 +13,7 @@
 
 ## 優先度根拠
 
-- Medium。ユーザー (@voluntas) からの命名改善要望に基づく
+- Medium。利用者からの命名改善要望に基づく
 - 機能的バグではないが、CLI 名称は一度公開すると変更コストが上がるため早期に整理する
 - 既存ユーザーへの影響はあるが、旧名称指定時は noargs のデフォルト未知引数エラーで気付けるため移行コストは低い
 

@@ -3,7 +3,6 @@
 - Priority: Medium
 - Created: 2026-03-27
 - Completed: 2026-07-15
-- Model: Opus 4.6
 - Branch: feature/add-fake-audio-generate
 - Polished: 2026-07-14
 

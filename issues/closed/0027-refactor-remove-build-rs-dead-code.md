@@ -3,7 +3,6 @@
 - Priority: High
 - Created: 2026-06-28
 - Completed: 2026-06-28
-- Model: DeepSeek V4 Pro
 - Branch: feature/refactor-remove-build-rs-dead-code
 - Polished: 2026-06-28
 

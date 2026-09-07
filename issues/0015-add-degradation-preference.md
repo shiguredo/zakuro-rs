@@ -20,8 +20,8 @@
 ### sora-rust-sdk (`sora_sdk` 2026.2.0-canary.0): 未対応
 
 - `SoraConnectionBuilder` に `degradation_preference` の設定口がない
-- `docs/SORA_CPP_SDK.md` / `docs/SUMOMO.md` でも「未実装」
-- sora-rust-sdk 側の open issue `0151-add-degradation-preference.md` で追加予定
+- `shiguredo/sora-rust-sdk` の `docs/SORA_CPP_SDK.md` / `docs/SUMOMO.md` でも「未実装」
+- `shiguredo/sora-rust-sdk` の open issue `issues/0151-add-degradation-preference.md` で追加予定
   - ネゴシエーション後 (set_remote_description 成功後、create_answer 前) に video sender の `RtpParameters` へ `SetParameters` する方針
   - C++ SDK の `SoraSignalingConfig::degradation_preference` と同等 (シグナリングには含めないクライアント側設定)
 

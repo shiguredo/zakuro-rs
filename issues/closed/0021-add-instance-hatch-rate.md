@@ -3,7 +3,6 @@
 - Priority: Medium
 - Created: 2026-06-24
 - Completed: 2026-06-26
-- Model: Opus 4.7
 - Branch: feature/add-instance-hatch-rate
 - Polished: 2026-06-26
 

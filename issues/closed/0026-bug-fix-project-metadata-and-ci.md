@@ -3,7 +3,6 @@
 - Priority: High
 - Created: 2026-06-28
 - Completed: 2026-06-28
-- Model: DeepSeek V4 Pro
 - Branch: feature/fix-project-metadata-and-ci
 - Polished: 2026-06-28
 
