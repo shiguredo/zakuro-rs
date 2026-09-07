@@ -18,7 +18,7 @@ README は外部ユーザーが最初に読む唯一の入口である。現状�
 - ビルドの前提が局所的すぎる
   - DuckDB は `.cargo/config.toml` の `DUCKDB_DOWNLOAD_LIB = "1"` に依存しており、リポジトリを clone せずにビルドする場合に効かないことを説明していない
   - `duckdb = "1.10505"` という版指定が DuckDB 本体のバージョン (1.5.5 相当) をエンコードしたものであることが読み取れない
-  - ビルド時に GitHub Releases へ HTTP ダウンロードしに行く依存 (libwebrtc、Opus、libduckdb) があり、オフラインビルドや企業内プロキシの話をが記載されていない
+  - ビルド時に GitHub Releases へ HTTP ダウンロードしに行く依存 (libwebrtc、Opus、libduckdb) があり、オフラインビルドや企業内プロキシの話が記載されていない
   - 非 Ubuntu の Linux ディストリビューションでは `WEBRTC_C_TARGET` の明示設定が必要になるが記載が無い (上流 build script が ubuntu / raspberry-pi-os 以外で失敗する)
   - Intel Mac は上流の prebuilt アセットが存在せずビルド対象外になる見込みで、対応環境の下限が書かれていない
 - OpenH264 / FDK-AAC は実行時にユーザーが共有ライブラリを用意する設計だが、`README.md` の `## 注意点` に「パスを指定します」とあるだけで、入手元とバージョン要件が書かれていない
