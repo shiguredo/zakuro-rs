@@ -17,12 +17,13 @@
 - `push` には `paths` フィルタがあり、対象は `src/**`、`Cargo.toml`、`Cargo.lock`、`Makefile`、`.github/workflows/ci.yml` の 5 種
 - `branches` / `tags` の絞り込みも無い
 
-これによる具体的影響:
+これによる具体的影響と、組織の既存実装との差分:
 
 1. 外部 PR では fmt / clippy / test のいずれも走らない。fork からの PR に対して維持側が手元でビルド・テストしないと合否を判断できない
 2. `paths` がホワイトリスト方式のため、ビルド再現性に直結する `rust-toolchain.toml` と `.cargo/config.toml` の変更が CI を発火させない。`.cargo/config.toml` は DuckDB の prebuilt ダウンロードを有効化する設定であり、壊れても気づけない
 3. 同様に `testdata/**` の変更も発火しない。`src/mp4_audio.rs`・`src/y4m_reader.rs`・`src/wav_reader.rs` のテストは `testdata/` の実ファイルを読むため、テストフィクスチャの破損が CI を通ってしまう
 4. 同じ組織の公開リポジトリ `shiguredo/hisui` の `ci.yml` は `paths` ではなく `paths-ignore` を使っており、デフォルトで全部流して明らかな対象外だけを除外する設計になっている。zakuro-rs はこの逆になっている
+5. ただし `pull_request` トリガ自体は、組織の既存公開リポジトリ 3 件 (`hisui`、`sora-rust-sdk`、`webrtc-rs`) の `ci.yml` に**どれも存在しない** (実測)。3 件は `push` の `branches` / `branches-ignore` と `paths-ignore` で CI を回しており、作業ブランチをリモートへ push する前提の運用だからである。 zakuro-rs は `CODEBASE.md` の運用で当面 develop に集約されるうえ、外部貢献者は fork したリポジトリから PR を出すため、 `push` トリガだけではチェックが走らない。本作は前例の踏襲ではなく zakuro-rs の運用に合わせた追加になる
 
 ## 設計方針
 
