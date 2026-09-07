@@ -20,7 +20,7 @@
 - `actions/checkout` はコミットハッシュで固定済み (`actions/checkout@3d3c42e5... # v7.0.1`) だが、`shiguredo/github-actions/.github/actions/slack-notify@main` はブランチ追従のミュータブル参照で、同じファイル内で固定方式が不整合になっている
 - `slack_notify` は `secrets.SLACK_WEBHOOK` に依存し、`if: always()` で走る。fork からの PR ではシークレットが空になり、通知 job が红灯を出す可能性がある (PR トリガ追加は `issues/0062`)
 - matrix の `ubuntu-24.04-arm` / `ubuntu-26.04-arm` / `macos-26` がコメントアウトされたまま (`ci.yml` の matrix 内コメント)。放置はコメントアウトされた job 定義という残骸になる
-- 参考: 同じ組織の `shiguredo/hisui` の `ci.yml` は `shiguredo/github-actions/.github/actions/rust-cache@main` を使っており、キャッシュは組織内コンポーネントで実現できる。一方トップレベル `permissions:` と `concurrency:` は `hisui` にも無い (組織慣習ではなく一般則としての提案になる)
+- 参考: 同じ組織の公開リポジトリの `ci.yml` を実測したところ、`shiguredo/sora-rust-sdk` と `shiguredo/webrtc-rs` は**トップレベルに `permissions: contents: read` / `actions: read` を持っている** (hisui には無い)。つまりトップレベル permissions は組織内の前例がある設定であり、 zakuro-rs だけが欠けている。`concurrency:` は 3 件とも持っておらず、こちらは一般則としての提案になる。キャッシュは `hisui` が `shiguredo/github-actions/.github/actions/rust-cache@main` を使っており、組織内コンポーネントで実現できる
 
 ## 設計方針
 
