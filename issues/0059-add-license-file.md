@@ -1,7 +1,7 @@
 # LICENSE ファイルを追加する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-07
 - Branch: feature/add-license-file
 - Polished: {YYYY-MM-DD}
 
@@ -37,3 +37,14 @@ OSS として公開するうえでライセンス本文の同梱は必須条件�
 - `LICENSE` (新規)
 
 `CODEBASE.md` の規約 (バージョン 2026.0.0 の間は develop で開発しブランチを切らない) により develop へ直接コミットする。`Branch:` は名目上の名前であり実ブランチは切らない (`issues/0057` と同じ運用)。
+
+## 解決方法
+
+リポジトリ直下に `LICENSE` を追加した。
+
+- 本文は推測で書かず、組織の公開リポジトリから実ファイルを入手してそのまま採用した。`shiguredo/hisui` と `shiguredo/sora-rust-sdk` の LICENSE は md5 が完全一致 (`2ee41112a44fe7014dce33e26468ba93`) しており、 zakuro-rs の `LICENSE` も同じ md5 である
+- `shiguredo/webrtc-rs` は同一内容で 1 段落の折返しだけが違っていた (176 行 vs 177 行)。法文の内容は同じなので多数派である hisui / sora-rust-sdk 側に揃えた
+- Appendix (Apache License の適用方法の節) と個別の著作権表記行は、組織の実ファイルがいずれも持たないため追加しない (設計方針 3 の「組織の公開リポジトリと同一の表現に揃える」を満たす)
+- LF 改行・ASCII・177 行・末尾改行ありであることを実測で確認した
+- `Cargo.toml` の `license = "Apache-2.0"` は変更していない (宣言と本文が一致した)
+- push 後に `gh api repos/shiguredo/zakuro-rs` の `license.spdx_id` が `Apache-2.0` になることを確認した
