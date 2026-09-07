@@ -17,6 +17,7 @@ zakuro は依存の更新がそのままビルド可能性に直結する構成�
   - `git log --all --author=dependabot` は 2 コミットを返す (`Bump rand from 0.8.5 to 0.8.6` 2026-04-22、`Bump rustls-webpki from 0.103.10 to 0.103.13` 2026-04-24)
   - `origin/dependabot/cargo/rand-0.8.6` と `origin/dependabot/cargo/rustls-webpki-0.103.13` がリモートに残り、いずれも develop に未マージで 1 コミットのまま放置されている
 - つまり設定が組織レベルの既定設定で行われているか、設定が削除されたかどちらかであり、リポジトリを読んでも再現できない状態になっている
+- ただし `gh api` の実測で `security_and_analysis.dependabot_security_updates` が `enabled` であることは確認できた。リポジトリ単位でセキュリティ更新は有効になっている。 version 更新の PR を作成している設定元は仍未特定であり、「組織レベルの既定設定」か「削除された設定」かのどちらかという判断は変わらない (`issues/0077` に関連事実を記録した)
 - Cargo.lock に解決される間接依存は 45 件以上あり (`cargo update` 時の "unchanged dependencies behind latest" 表示より)、うちどれを自動追従させるかの方針が無い
 
 ## 設計方針
