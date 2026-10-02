@@ -1,7 +1,7 @@
 # zakuro-moq で subscribe (購読) の負荷試験をできるようにする
 
 - Created: 2026-10-02
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-02
 - Branch: feature/add-moq-subscribe-load-test
 - Polished: {YYYY-MM-DD}
 
@@ -105,4 +105,6 @@ uni data stream も `accept_receive_stream` で捨てている。
   購読側 10 仮想クライアント (hatch rate 5) を別プロセスで同時に動かし、10 件すべての
   SUBSCRIBE が受理され、各購読者が 300 - 325 object (300,000 - 325,000 バイト) を受信、
   合計 3,124 object・3,124,000 バイトを 10 購読者で受信し、payload 不一致 0 を確認した
+- JSONC の `verify-payload` がフラグとして展開されず `--verify-payload true` になって起動に
+  失敗するバグを実 relay での確認中に検出し、修正と回帰テストを追加した
 - 疎通確認に使った relay のホストはリポジトリに書かない
