@@ -1,7 +1,7 @@
 # MOQT publish の負荷試験 (sora-moq) を追加する
 
 - Created: 2026-10-02
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-02
 - Branch: feature/add-moq-publish-load-test
 - Polished: {YYYY-MM-DD}
 
@@ -136,4 +136,6 @@ C++ 版 zakuro に MOQ 対応は無く、zakuro-rs が最初の MOQ 負荷試験
 issue 0025 で MOQ を独立バイナリ `zakuro-moq` に分離したため、この issue で追加した
 `--sora-moq-*` オプションと MOQ モード、`moq_*` 列は `zakuro` から削除した。
 MOQ の実装は `zakuro-moq` へ移り、内容 (SETUP / PUBLISH / object 送信 / リトライ) は
-そのまま引き継いでいる。
+そのまま引き継いでいる。上の「確認」は MOQ モード時代に実測した記録であり、分離後の
+最終確認は `make ci` (`zakuro` 215 件 + `zakuro-moq` 41 件) と、`zakuro-moq` で複数トラックを
+publish する実 relay 疎通 (issue 0026 の確認を参照) で行っている。
