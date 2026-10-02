@@ -16,6 +16,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::IntervalStream;
 use tokio_util::sync::CancellationToken;
 use tokio_util::time::DelayQueue;
 use zakuro_core::stats::{StatsCollector, StatsEvent};
@@ -91,7 +92,12 @@ async fn async_main() -> Result<()> {
     let stats = StatsCollector::new(total_vcs, instances_count, token.clone());
     let stats_tx = stats.event_tx();
     let objects_sent = Arc::new(AtomicU64::new(0));
-    spawn_object_stats(objects_sent.clone(), token.clone());
+    let receive_counters = moq_client::ReceiveCounters::new();
+    spawn_stats(
+        objects_sent.clone(),
+        receive_counters.clone(),
+        token.clone(),
+    );
 
     // instance-hatch-rate 制御の DelayQueue を構築
     let hatch_start = tokio::time::Instant::now();
@@ -123,8 +129,18 @@ async fn async_main() -> Result<()> {
                 let task_token = token.child_token();
                 let stats_tx = stats_tx.clone();
                 let objects_sent = objects_sent.clone();
+                let receive_counters = receive_counters.clone();
                 instances.spawn(async move {
-                    let result = run_instance(index as u32, common, instance, task_token, stats_tx, objects_sent).await;
+                    let result = run_instance(
+                        index as u32,
+                        common,
+                        instance,
+                        task_token,
+                        stats_tx,
+                        objects_sent,
+                        receive_counters,
+                    )
+                    .await;
                     (index, result)
                 });
             }
@@ -141,9 +157,13 @@ async fn async_main() -> Result<()> {
     }
     token.cancel();
 
+    let (received_objects, received_bytes, mismatched) = receive_counters.snapshot();
     tracing::info!(
-        "zakuro-moq: all instances finished (objects-sent={})",
+        "zakuro-moq: all instances finished (objects-sent={} objects-received={} bytes-received={} payload-mismatches={})",
         objects_sent.load(Ordering::Relaxed),
+        received_objects,
+        received_bytes,
+        mismatched,
     );
     Ok(())
 }
@@ -158,11 +178,12 @@ async fn run_instance(
     token: CancellationToken,
     stats_tx: mpsc::Sender<StatsEvent>,
     objects_sent: Arc<AtomicU64>,
+    receive_counters: moq_client::ReceiveCounters,
 ) -> Result<()> {
     let endpoint = moq_client::MoqEndpoint::parse(&instance.url)?;
     let track_names: Vec<String> = instance.tracks.iter().map(|t| t.name.clone()).collect();
     tracing::info!(
-        "Zakuro instance {} (MOQ): vcs={} vcs-hatch-rate={} duration={:?} repeat-interval={:?} namespace={} tracks=[{}]",
+        "Zakuro instance {} (MOQ): vcs={} vcs-hatch-rate={} duration={:?} repeat-interval={:?} namespace={} tracks=[{}] subscribe-tracks=[{}] verify-payload={}",
         instance_id,
         instance.vcs,
         instance.vcs_hatch_rate,
@@ -170,6 +191,8 @@ async fn run_instance(
         instance.repeat_interval,
         instance.namespace,
         track_names.join(", "),
+        instance.subscribe_tracks.join(", "),
+        instance.verify_payload,
     );
 
     // object の payload は最大サイズで 1 つだけ作り、トラック・仮想クライアント間で共有する。
@@ -193,6 +216,8 @@ async fn run_instance(
         },
         namespace: instance.namespace.clone(),
         tracks: instance.tracks.clone(),
+        subscribe_tracks: instance.subscribe_tracks.clone(),
+        verify_payload: instance.verify_payload,
         payload: payload.into(),
         duration: instance.duration,
         repeat_interval: instance.repeat_interval,
@@ -229,8 +254,11 @@ async fn run_instance(
                     context.clone(),
                     config.clone(),
                     token.child_token(),
-                    stats_tx.clone(),
-                    objects_sent.clone(),
+                    moq_client::VcStats {
+                        events: stats_tx.clone(),
+                        objects_sent: objects_sent.clone(),
+                        receive: receive_counters.clone(),
+                    },
                 ));
             }
         }
@@ -244,26 +272,39 @@ async fn run_instance(
     Ok(())
 }
 
-/// object 送信数の集計を定期的にログへ出す
-fn spawn_object_stats(objects_sent: Arc<AtomicU64>, token: CancellationToken) {
+/// object の送受信数の集計を定期的にログへ出す
+fn spawn_stats(
+    objects_sent: Arc<AtomicU64>,
+    receive_counters: moq_client::ReceiveCounters,
+    token: CancellationToken,
+) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(OBJECT_STATS_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut previous = 0u64;
+        let interval = tokio::time::interval(OBJECT_STATS_INTERVAL);
+        let mut ticks = IntervalStream::new(interval);
+        let mut previous_sent = 0u64;
+        let mut previous_received = 0u64;
         loop {
             tokio::select! {
                 biased;
                 _ = token.cancelled() => break,
-                _ = interval.tick() => {
-                    let current = objects_sent.load(Ordering::Relaxed);
-                    let recent = (current.saturating_sub(previous)) as f64
+                _ = ticks.next() => {
+                    let sent = objects_sent.load(Ordering::Relaxed);
+                    let (received, bytes, mismatched) = receive_counters.snapshot();
+                    let sent_rate = (sent.saturating_sub(previous_sent)) as f64
+                        / OBJECT_STATS_INTERVAL.as_secs_f64();
+                    let received_rate = (received.saturating_sub(previous_received)) as f64
                         / OBJECT_STATS_INTERVAL.as_secs_f64();
                     tracing::info!(
-                        "[stats] objects-sent={} recent-rate={:.1}/s",
-                        current,
-                        recent,
+                        "[stats] objects-sent={} send-rate={:.1}/s objects-received={} recv-rate={:.1}/s bytes-received={} payload-mismatches={}",
+                        sent,
+                        sent_rate,
+                        received,
+                        received_rate,
+                        bytes,
+                        mismatched,
                     );
-                    previous = current;
+                    previous_sent = sent;
+                    previous_received = received;
                 }
             }
         }

@@ -81,6 +81,10 @@ pub(crate) struct InstanceArgs {
     pub(crate) namespace: String,
     /// publish するトラック (1 仮想クライアントが全トラックを publish する)
     pub(crate) tracks: Vec<TrackSpec>,
+    /// subscribe するトラック名 (Full Track Name は `<名前>-<instance>-<vc>`)
+    pub(crate) subscribe_tracks: Vec<String>,
+    /// 受信 payload が zakuro-moq の publisher のパターンと一致するかを検査する
+    pub(crate) verify_payload: bool,
     /// relay の CA 証明書 (PEM)
     pub(crate) ca_cert: Option<String>,
     /// 仮想クライアント数
@@ -113,7 +117,7 @@ fn is_common_key(key: &str) -> bool {
 
 /// 値を伴わない bool フラグのキー (CLI argv 分割で次のトークンを値として取らない)
 fn is_flag(key: &str) -> bool {
-    matches!(key, "insecure")
+    matches!(key, "insecure" | "verify-payload")
 }
 
 /// 引数を解釈する
@@ -359,14 +363,22 @@ fn parse_instance_args(
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?
         .unwrap_or_else(|| "zakuro".to_string());
 
-    let tracks_arg: String = noargs::opt("tracks")
+    let tracks_arg: Option<String> = noargs::opt("tracks")
         .doc("Tracks to publish (name[:rate[:size]], comma separated, default: video)")
         .example("video:30:1000,audio:50:200")
         .take(&mut args)
-        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?
-        .unwrap_or_else(|| {
-            format!("{DEFAULT_TRACK_NAME}:{DEFAULT_OBJECT_RATE}:{DEFAULT_OBJECT_SIZE}")
-        });
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let subscribe_tracks_arg: Option<String> = noargs::opt("subscribe-tracks")
+        .doc("Track names to subscribe (comma separated)")
+        .example("video,audio")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let verify_payload = noargs::flag("verify-payload")
+        .doc("Verify that received payloads match the zakuro-moq publisher pattern")
+        .take(&mut args)
+        .is_present();
 
     let ca_cert: Option<String> = noargs::opt("ca-cert")
         .doc("CA certificate (PEM) of the relay (default: WebPKI root store)")
@@ -413,7 +425,9 @@ fn parse_instance_args(
     let instance = validate_instance_args(
         &url,
         &namespace,
-        &tracks_arg,
+        tracks_arg.as_deref(),
+        subscribe_tracks_arg.as_deref(),
+        verify_payload,
         ca_cert.clone(),
         vcs,
         vcs_hatch_rate,
@@ -430,7 +444,9 @@ fn parse_instance_args(
 fn validate_instance_args(
     url: &str,
     namespace: &str,
-    tracks_arg: &str,
+    tracks_arg: Option<&str>,
+    subscribe_tracks_arg: Option<&str>,
+    verify_payload: bool,
     ca_cert: Option<String>,
     vcs: u32,
     vcs_hatch_rate: f64,
@@ -459,7 +475,14 @@ fn validate_instance_args(
         .into());
     }
 
-    let tracks = parse_tracks(tracks_arg)?;
+    // publish するトラック。`--subscribe-tracks` を指定したときは既定値の `video` を
+    // 使わない (購読専用で起動したのに publish を始めるのを避ける)
+    let tracks = match (tracks_arg, subscribe_tracks_arg) {
+        (Some(value), _) => parse_tracks(value)?,
+        (None, None) => parse_tracks(DEFAULT_TRACK_NAME)?,
+        (None, Some(_)) => Vec::new(),
+    };
+    let subscribe_tracks = parse_subscribe_tracks(subscribe_tracks_arg)?;
 
     if vcs == 0 || vcs > 1000 {
         return Err(ErrorMessage::new("--vcs は 1 から 1000 の範囲で指定してください").into());
@@ -498,6 +521,8 @@ fn validate_instance_args(
         url: url.to_string(),
         namespace: namespace.to_string(),
         tracks,
+        subscribe_tracks,
+        verify_payload,
         ca_cert,
         vcs,
         vcs_hatch_rate,
@@ -581,6 +606,42 @@ fn parse_tracks(value: &str) -> Result<Vec<TrackSpec>> {
     Ok(tracks)
 }
 
+/// `--subscribe-tracks` の値を解釈する
+///
+/// 形式はトラック名のカンマ区切り。Full Track Name は publish と同じく
+/// `<名前>-<instance>-<vc>` とする。
+fn parse_subscribe_tracks(value: Option<&str>) -> Result<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if value.trim().is_empty() {
+        return Err(ErrorMessage::new("--subscribe-tracks に空文字列は指定できません").into());
+    }
+    let mut tracks = Vec::new();
+    for entry in value.split(',') {
+        let name = entry.trim();
+        if name.is_empty() {
+            return Err(
+                ErrorMessage::new(format!("--subscribe-tracks の要素が空です: {value}")).into(),
+            );
+        }
+        if name.len() + TRACK_NAME_SUFFIX_BUDGET > MAX_TRACK_NAME_LENGTH {
+            return Err(ErrorMessage::new(format!(
+                "--subscribe-tracks のトラック名は {MAX_TRACK_NAME_LENGTH} バイト以下にしてください (仮想クライアント識別子の suffix を含む): {name}"
+            ))
+            .into());
+        }
+        if tracks.iter().any(|t: &String| t == name) {
+            return Err(ErrorMessage::new(format!(
+                "--subscribe-tracks に同名のトラックがあります: {name}"
+            ))
+            .into());
+        }
+        tracks.push(name.to_string());
+    }
+    Ok(tracks)
+}
+
 /// CLI 引数を共通 / インスタンス用に分割する
 ///
 /// `is_common_key()` で振り分け、次のトークンを値として取るかどうかは `is_flag()` で判定する。
@@ -660,6 +721,10 @@ fn parse_jsonc_config(content: &str) -> Result<JsoncConfig> {
             push_tracks(value, &mut template_argv)?;
             continue;
         }
+        if key == "subscribe-tracks" {
+            push_subscribe_tracks(value, &mut template_argv)?;
+            continue;
+        }
         push_kv(&key, value, &mut template_argv)?;
     }
 
@@ -716,6 +781,10 @@ fn expand_instances(value: RawJsonValue<'_, '_>, template: &[String]) -> Result<
             }
             if key == "tracks" {
                 push_tracks(value, &mut argv)?;
+                continue;
+            }
+            if key == "subscribe-tracks" {
+                push_subscribe_tracks(value, &mut argv)?;
                 continue;
             }
             push_kv(&key, value, &mut argv)?;
@@ -779,6 +848,27 @@ fn push_tracks(value: RawJsonValue<'_, '_>, argv: &mut Vec<String>) -> Result<()
     }
     argv.push("--tracks".to_string());
     argv.push(specs.join(","));
+    Ok(())
+}
+
+/// `subscribe-tracks` 配列を `--subscribe-tracks a,b` へ変換する
+fn push_subscribe_tracks(value: RawJsonValue<'_, '_>, argv: &mut Vec<String>) -> Result<()> {
+    if value.kind() != JsonValueKind::Array {
+        return Err(ErrorMessage::new("'subscribe-tracks' は JSON 配列で指定してください").into());
+    }
+    let mut names: Vec<String> = Vec::new();
+    for (i, element) in value
+        .to_array()
+        .map_err(|e| ErrorMessage::new(format!("subscribe-tracks のパースに失敗しました: {e}")))?
+        .enumerate()
+    {
+        let name: String = element.try_into().map_err(|_| {
+            ErrorMessage::new(format!("subscribe-tracks[{i}] は文字列で指定してください"))
+        })?;
+        names.push(name);
+    }
+    argv.push("--subscribe-tracks".to_string());
+    argv.push(names.join(","));
     Ok(())
 }
 
@@ -867,7 +957,9 @@ mod tests {
             validate_instance_args(
                 "moqt://relay.example.com:4433",
                 "zakuro",
-                "video",
+                Some("video"),
+                None,
+                false,
                 None,
                 1,
                 vcs_hatch_rate,
@@ -902,6 +994,86 @@ mod tests {
         );
         // 妥当な値は通る
         assert!(validate(10.0, Some(60.0), Some(1.0), 60.0).is_ok());
+    }
+
+    /// `--subscribe-tracks` を解釈できること
+    #[test]
+    fn parse_subscribe_tracks_reads_names() {
+        let tracks = parse_subscribe_tracks(Some("video,audio")).expect("解釈に成功すること");
+        assert_eq!(tracks, vec!["video".to_string(), "audio".to_string()]);
+        assert!(
+            parse_subscribe_tracks(None)
+                .expect("未指定も成功すること")
+                .is_empty()
+        );
+    }
+
+    /// `--subscribe-tracks` の不正な値は拒否すること
+    #[test]
+    fn parse_subscribe_tracks_rejects_invalid_entries() {
+        assert!(parse_subscribe_tracks(Some("")).is_err());
+        assert!(parse_subscribe_tracks(Some("video,,audio")).is_err());
+        assert!(parse_subscribe_tracks(Some("video,video")).is_err());
+    }
+
+    /// JSONC の真偽値フラグが値なしのオプションとして展開されること
+    ///
+    /// `--verify-payload` は noargs の flag であり値を取らないため、`true` を値として
+    /// 積むと「unexpected argument」で起動に失敗する。
+    #[test]
+    fn jsonc_boolean_flags_have_no_value() {
+        let content = r#"{
+            "url": "moqt://relay.example.com:4433",
+            "subscribe-tracks": ["video"],
+            "verify-payload": true,
+            "insecure": true
+        }"#;
+        let config = parse_jsonc_config(content).expect("パースに成功すること");
+        let argv = &config.instance_argvs[0];
+        assert!(argv.iter().any(|s| s == "--verify-payload"));
+        assert!(
+            !argv.iter().any(|s| s == "true"),
+            "フラグに値が積まれている: {argv:?}"
+        );
+
+        // false の場合はフラグ自体を積まない
+        let content = r#"{
+            "url": "moqt://relay.example.com:4433",
+            "subscribe-tracks": ["video"],
+            "verify-payload": false
+        }"#;
+        let config = parse_jsonc_config(content).expect("パースに成功すること");
+        assert!(
+            !config.instance_argvs[0]
+                .iter()
+                .any(|s| s == "--verify-payload")
+        );
+    }
+
+    /// JSONC の subscribe-tracks 配列が `--subscribe-tracks` へ変換されること
+    #[test]
+    fn jsonc_subscribe_tracks_array_is_flattened() {
+        let content = r#"{
+            "url": "moqt://relay.example.com:4433",
+            "subscribe-tracks": ["video", "audio"]
+        }"#;
+        let config = parse_jsonc_config(content).expect("パースに成功すること");
+        let argv = &config.instance_argvs[0];
+        let pos = argv
+            .iter()
+            .position(|s| s == "--subscribe-tracks")
+            .expect("--subscribe-tracks があること");
+        assert_eq!(argv[pos + 1], "video,audio");
+    }
+
+    /// JSONC の subscribe-tracks は文字列の配列でなければならないこと
+    #[test]
+    fn jsonc_subscribe_tracks_rejects_non_string() {
+        let content = r#"{
+            "url": "moqt://relay.example.com:4433",
+            "subscribe-tracks": [1, 2]
+        }"#;
+        assert!(parse_jsonc_config(content).is_err());
     }
 
     /// JSONC のトラック設定が型不正なら拒否すること

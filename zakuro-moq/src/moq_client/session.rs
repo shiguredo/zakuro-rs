@@ -31,8 +31,10 @@ use shiguredo_moqt::parameter::{
 };
 use shiguredo_moqt::session::core::Session;
 use shiguredo_moqt::session::types::{
-    DataStreamId, RequestKind, RequestStreamEnd, SendRequestError, SessionEvent, Transport,
+    DataStreamId, RequestKind, RequestStreamEnd, SendRequestError, SessionEvent,
+    TrackDataAcceptance, Transport,
 };
+use shiguredo_moqt::stream::decoder::{DecodedSubgroupObject, SubgroupStreamDecoder};
 use shiguredo_moqt::stream::encode_control_stream_setup;
 use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode, SubgroupObject};
 use shiguredo_moqt::track_properties::TrackProperties;
@@ -109,6 +111,84 @@ pub(crate) struct SessionConfig<'a> {
     pub(crate) path: &'a str,
     /// object の payload (最大サイズで 1 つ作り、トラック間で共有する)
     pub(crate) payload: Arc<[u8]>,
+    /// subscribe するトラックの Full Track Name (空なら購読しない)
+    pub(crate) subscribe_tracks: &'a [String],
+    /// 受信 payload が zakuro-moq の publisher のパターンと一致するかを検査する
+    pub(crate) verify_payload: bool,
+}
+
+/// subscribe 中のトラックの状態
+struct SubscriptionState {
+    /// Full Track Name
+    name: String,
+    /// SUBSCRIBE の Request ID (送信後に設定する)
+    request_id: Option<u64>,
+    /// SUBSCRIBE_OK を受信したか
+    accepted: bool,
+    /// SUBSCRIBE_OK で確定した Track Alias (受信 object の帰属表示に使う)
+    track_alias: Option<u64>,
+    /// 受信した object 数
+    received_objects: u64,
+    /// 受信した payload の合計バイト数
+    received_bytes: u64,
+    /// payload のパターン検査に失敗した数 (`--verify-payload` 指定時のみ)
+    mismatched_payloads: u64,
+}
+
+impl SubscriptionState {
+    /// 購読状態を作る
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            request_id: None,
+            accepted: false,
+            track_alias: None,
+            received_objects: 0,
+            received_bytes: 0,
+            mismatched_payloads: 0,
+        }
+    }
+}
+
+/// data stream 読みタスクからメインタスクへ渡すメッセージ
+enum DataMessage {
+    /// uni stream の種別が判明した
+    StreamType {
+        /// 対象 stream の DataStreamId
+        stream_id: DataStreamId,
+        /// stream type の varint 値
+        stream_type: u64,
+    },
+    /// SUBGROUP_HEADER をデコードした
+    Header {
+        /// 対象 stream の DataStreamId
+        stream_id: DataStreamId,
+        /// デコードしたヘッダ
+        header: Box<SubgroupHeader>,
+    },
+    /// SUBGROUP_OBJECT を 1 つ受け取った
+    Object {
+        /// 対象 stream の DataStreamId
+        stream_id: DataStreamId,
+        /// デコードした object
+        object: Box<DecodedSubgroupObject>,
+        /// payload の長さ (バイト)
+        payload_length: u64,
+        /// payload が期待するパターンと一致したか (`--verify-payload` 指定時のみ検査)
+        payload_ok: bool,
+    },
+    /// stream が終端した
+    Closed {
+        /// 対象 stream の DataStreamId
+        stream_id: DataStreamId,
+    },
+    /// 読み込みに失敗した (stream は破棄する)
+    Failed {
+        /// 対象 stream の DataStreamId
+        stream_id: DataStreamId,
+        /// 失敗の理由
+        reason: String,
+    },
 }
 
 /// ストリーム読みタスクからメインタスクへ渡すメッセージ
@@ -486,6 +566,7 @@ pub(crate) async fn run(
     token: &CancellationToken,
     established_notify: Option<tokio::sync::oneshot::Sender<()>>,
     objects_sent: Arc<AtomicU64>,
+    receive_counters: ReceiveCounters,
 ) -> Result<()> {
     let mut connection_handle = connection.handle();
     // Forward State 0 の間は object を送らないため、無通信で idle timeout に達しないよう
@@ -543,7 +624,7 @@ pub(crate) async fn run(
         .recv_control_stream_type(peer_stream_type)
         .map_err(|e| ErrorMessage::new(format!("制御ストリーム種別の通知に失敗しました: {e:?}")))?;
     recv_control_messages(&mut session, &mut control_decoder)?;
-    drain_events(&mut session, &mut state, None, &request_tx, token).await?;
+    drain_events(&mut session, &mut state, None, None, &request_tx, token).await?;
 
     // トラックごとの publisher を作る (Track Alias は 1 から順に払い出す)
     let now = tokio::time::Instant::now();
@@ -553,6 +634,18 @@ pub(crate) async fn run(
         .enumerate()
         .map(|(i, track)| Publisher::new(track.clone(), i as u64 + 1, now))
         .collect();
+
+    // 購読するトラック (Full Track Name は呼び出し側で解決済み)
+    let mut subscriptions: Vec<SubscriptionState> = config
+        .subscribe_tracks
+        .iter()
+        .map(|name| SubscriptionState::new(name.clone()))
+        .collect();
+
+    // 受信した uni data stream はストリームごとのタスクで読み、ここで受ける
+    let (data_tx, mut data_rx) = mpsc::channel::<DataMessage>(256);
+    // 受信中の stream がどの Track Alias のものか (object の帰属判定に使う)
+    let mut stream_aliases: HashMap<DataStreamId, u64> = HashMap::new();
 
     let mut control_buf = vec![0u8; READ_BUFFER_SIZE];
     let mut tick_timer = tokio::time::interval(TICK_INTERVAL);
@@ -581,7 +674,15 @@ pub(crate) async fn run(
             _ = tick_timer.tick() => {
                 let now_ms = start.elapsed().as_millis() as u64;
                 session.tick(now_ms);
-                drain_events(&mut session, &mut state, Some(&mut publishers), &request_tx, token).await?;
+                drain_events(
+                    &mut session,
+                    &mut state,
+                    Some(&mut publishers),
+                    Some(&mut subscriptions),
+                    &request_tx,
+                    token,
+                )
+                .await?;
             }
             read = peer_control.read(&mut control_buf), if !state.control_closed => {
                 let size = read.map_err(|e| ErrorMessage::new(format!("制御ストリームの読み込みに失敗しました: {e}")))?;
@@ -596,7 +697,15 @@ pub(crate) async fn run(
                     control_decoder.push(&control_buf[..size]);
                     recv_control_messages(&mut session, &mut control_decoder)?;
                 }
-                drain_events(&mut session, &mut state, Some(&mut publishers), &request_tx, token).await?;
+                drain_events(
+                    &mut session,
+                    &mut state,
+                    Some(&mut publishers),
+                    Some(&mut subscriptions),
+                    &request_tx,
+                    token,
+                )
+                .await?;
             }
             maybe = request_rx.recv() => {
                 match maybe {
@@ -616,7 +725,15 @@ pub(crate) async fn run(
                     }
                     None => break,
                 }
-                drain_events(&mut session, &mut state, Some(&mut publishers), &request_tx, token).await?;
+                drain_events(
+                    &mut session,
+                    &mut state,
+                    Some(&mut publishers),
+                    Some(&mut subscriptions),
+                    &request_tx,
+                    token,
+                )
+                .await?;
             }
             _ = sleep_until_optional(next_deadline) => {
                 let now = tokio::time::Instant::now();
@@ -628,11 +745,71 @@ pub(crate) async fn run(
                     }
                 }
             }
+            maybe = data_rx.recv() => {
+                let Some(message) = maybe else { break };
+                match message {
+                    DataMessage::StreamType { stream_id, stream_type } => {
+                        session
+                            .recv_data_stream_type(stream_id, stream_type)
+                            .map_err(|e| ErrorMessage::new(format!("data stream 種別の登録に失敗しました: {e:?}")))?;
+                    }
+                    DataMessage::Header { stream_id, header } => {
+                        match session.recv_subgroup_header(stream_id, &header) {
+                            Ok(_) => {
+                                // 受信 object の帰属 (どのトラックか) を判定するために覚えておく
+                                stream_aliases.insert(stream_id, header.track_alias);
+                            }
+                            // 未知の Track Alias は relay 側の都合 (購読前の残留など) で起こり得る。
+                            // セッションは閉じずにこの stream を捨てる
+                            Err(e) => {
+                                tracing::warn!(
+                                    "MOQT: SUBGROUP_HEADER rejected (track_alias={}): {e:?}",
+                                    header.track_alias,
+                                );
+                                let _ = session.recv_data_stream_stop_sending(stream_id);
+                            }
+                        }
+                    }
+                    DataMessage::Object { stream_id, object, payload_length, payload_ok } => {
+                        match session.recv_subgroup_object(stream_id, &object) {
+                            Ok(acceptance) => {
+                                if matches!(acceptance, TrackDataAcceptance::Accepted) {
+                                    let alias = stream_aliases.get(&stream_id).copied();
+                                    record_received_object(
+                                        &mut subscriptions,
+                                        alias,
+                                        payload_length,
+                                        payload_ok,
+                                        &receive_counters,
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("MOQT: SUBGROUP_OBJECT rejected: {e:?}");
+                            }
+                        }
+                    }
+                    DataMessage::Closed { stream_id } => {
+                        stream_aliases.remove(&stream_id);
+                        let _ = session.recv_data_stream_closed(stream_id, RequestStreamEnd::Fin);
+                    }
+                    DataMessage::Failed { stream_id, reason } => {
+                        tracing::warn!("MOQT: data stream read failed: stream_id={stream_id:?} {reason}");
+                        stream_aliases.remove(&stream_id);
+                        let _ = session.recv_data_stream_closed(stream_id, RequestStreamEnd::Fin);
+                    }
+                }
+            }
             accepted = recv_acceptor.accept_receive_stream() => {
                 match accepted {
                     Ok(Some(stream)) => {
-                        // publisher 専用のクライアントは uni data stream を受け取らない
-                        drop(stream);
+                        // 購読しているトラックの object は uni data stream で届く
+                        let tx = data_tx.clone();
+                        let reader_token = token.child_token();
+                        let verify_payload = config.verify_payload;
+                        tokio::spawn(async move {
+                            run_data_reader(stream, tx, reader_token, verify_payload).await;
+                        });
                     }
                     Ok(None) => break,
                     Err(e) => return Err(ErrorMessage::new(format!("uni stream の受信に失敗しました: {e}")).into()),
@@ -651,12 +828,17 @@ pub(crate) async fn run(
             _ = progress_timer.tick() => {
                 let sent: u64 = publishers.iter().map(|p| p.sent_objects).sum();
                 let accepted_count = publishers.iter().filter(|p| p.accepted).count();
+                let received: u64 = subscriptions.iter().map(|s| s.received_objects).sum();
+                let subscribe_accepted = subscriptions.iter().filter(|s| s.accepted).count();
                 tracing::info!(
-                    "MOQT publish progress: tracks={}/{} sent-objects={} forwarding={}",
+                    "MOQT progress: publish={}/{} sent-objects={} forwarding={} subscribe={}/{} received-objects={}",
                     accepted_count,
                     publishers.len(),
                     sent,
                     publishers.iter().filter(|p| p.forward).count(),
+                    subscribe_accepted,
+                    subscriptions.len(),
+                    received,
                 );
             }
         }
@@ -701,6 +883,48 @@ pub(crate) async fn run(
                     &mut session,
                     &mut state,
                     Some(&mut publishers),
+                    Some(&mut subscriptions),
+                    &request_tx,
+                    token,
+                )
+                .await?;
+            }
+
+            // 購読するトラックの SUBSCRIBE を送る
+            let mut subscribed = false;
+            for subscription in subscriptions.iter_mut() {
+                if subscription.request_id.is_some() {
+                    continue;
+                }
+                // SUBSCRIBE_OK が返らないままセッションが残らないよう、応答待ちタイムアウトを
+                // 設定する (PUBLISH と同じ扱い)
+                session.set_control_message_timeout_ms(Some(PUBLISH_ACCEPT_TIMEOUT_MS));
+                let request_id = session
+                    .send_subscribe(
+                        TrackNamespace::new(vec![config.namespace.as_bytes().to_vec()]).map_err(
+                            |e| ErrorMessage::new(format!("Track Namespace が不正です: {e:?}")),
+                        )?,
+                        subscription.name.as_bytes().to_vec(),
+                        MessageParameters::new(),
+                    )
+                    .map_err(|e| {
+                        ErrorMessage::new(format!("SUBSCRIBE の送信に失敗しました: {e:?}"))
+                    })?;
+                tracing::info!(
+                    "MOQT subscribe sent: track={} request_id={}",
+                    subscription.name,
+                    request_id,
+                );
+                subscription.request_id = Some(request_id);
+                subscription.accepted = false;
+                subscribed = true;
+            }
+            if subscribed {
+                drain_events(
+                    &mut session,
+                    &mut state,
+                    Some(&mut publishers),
+                    Some(&mut subscriptions),
                     &request_tx,
                     token,
                 )
@@ -718,12 +942,20 @@ pub(crate) async fn run(
     // 終了処理: 送信結果を先に記録してから、FIN で開いている stream を閉じ GOAWAY を送る
     let sent_total: u64 = publishers.iter().map(|p| p.sent_objects).sum();
     let accepted_count = publishers.iter().filter(|p| p.accepted).count();
+    let received_total: u64 = subscriptions.iter().map(|s| s.received_objects).sum();
+    let received_bytes: u64 = subscriptions.iter().map(|s| s.received_bytes).sum();
+    let mismatched: u64 = subscriptions.iter().map(|s| s.mismatched_payloads).sum();
     tracing::info!(
-        "MOQT publish finished: tracks={}/{} sent-objects={} forwarding={}",
+        "MOQT finished: publish={}/{} sent-objects={} forwarding={} subscribe={}/{} received-objects={} received-bytes={} payload-mismatches={}",
         accepted_count,
         publishers.len(),
         sent_total,
         publishers.iter().filter(|p| p.forward).count(),
+        subscriptions.iter().filter(|s| s.accepted).count(),
+        subscriptions.len(),
+        received_total,
+        received_bytes,
+        mismatched,
     );
     for publisher in publishers.iter_mut() {
         publisher.close_stream(&mut session);
@@ -733,6 +965,7 @@ pub(crate) async fn run(
         &mut session,
         &mut state,
         Some(&mut publishers),
+        Some(&mut subscriptions),
         &request_tx,
         token,
     )
@@ -742,6 +975,7 @@ pub(crate) async fn run(
         &mut session,
         &mut state,
         Some(&mut publishers),
+        Some(&mut subscriptions),
         &request_tx,
         token,
     )
@@ -810,6 +1044,278 @@ async fn run_request_reader(
             }
         }
     }
+}
+
+/// 仮想クライアントをまたいで集計する受信カウンタ
+#[derive(Clone, Default)]
+pub(crate) struct ReceiveCounters {
+    /// 受信した object 数
+    pub(crate) objects: Arc<AtomicU64>,
+    /// 受信した payload の合計バイト数
+    pub(crate) bytes: Arc<AtomicU64>,
+    /// payload のパターン検査に失敗した数
+    pub(crate) mismatched_payloads: Arc<AtomicU64>,
+}
+
+impl ReceiveCounters {
+    /// カウンタを作る
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// 受信した object を記録する
+    fn record(&self, payload_length: u64, payload_ok: bool) {
+        self.objects.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(payload_length, Ordering::Relaxed);
+        if !payload_ok {
+            self.mismatched_payloads.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// 現在の集計値を返す
+    pub(crate) fn snapshot(&self) -> (u64, u64, u64) {
+        (
+            self.objects.load(Ordering::Relaxed),
+            self.bytes.load(Ordering::Relaxed),
+            self.mismatched_payloads.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// 受信した object を購読状態へ記録する
+///
+/// Track Alias が購読に対応しない場合 (購読を終了した直後など) はグローバルな
+/// カウンタだけを進める。
+fn record_received_object(
+    subscriptions: &mut [SubscriptionState],
+    track_alias: Option<u64>,
+    payload_length: u64,
+    payload_ok: bool,
+    counters: &ReceiveCounters,
+) {
+    if let Some(alias) = track_alias
+        && let Some(subscription) = subscriptions
+            .iter_mut()
+            .find(|s| s.track_alias == Some(alias))
+    {
+        subscription.received_objects += 1;
+        subscription.received_bytes += payload_length;
+        if !payload_ok {
+            subscription.mismatched_payloads += 1;
+        }
+    }
+    counters.record(payload_length, payload_ok);
+}
+
+/// uni data stream を読み、デコードした内容をメインタスクへ送るタスク
+///
+/// `Session` は `&mut self` を要求するため複数 stream を同時に扱えない。デコードだけを
+/// このタスクで行い、`Session` への通知はメインタスクが行う。
+async fn run_data_reader(
+    mut stream: ReceiveStream,
+    tx: mpsc::Sender<DataMessage>,
+    token: CancellationToken,
+    verify_payload: bool,
+) {
+    let stream_id = DataStreamId(stream.id());
+    let mut buf = vec![0u8; READ_BUFFER_SIZE];
+
+    // 先頭の stream type varint を読む。読み込んだバイトは SubgroupStreamDecoder にも
+    // そのまま渡す必要があるため、生バイトを蓄積しておく
+    let mut raw: Vec<u8> = Vec::new();
+    let mut type_decoder = MessageDecoder::new();
+    let stream_type = loop {
+        match type_decoder.try_decode_varint() {
+            Ok(Some(stream_type)) => break stream_type,
+            Ok(None) => {}
+            Err(e) => {
+                let _ = tx
+                    .send(DataMessage::Failed {
+                        stream_id,
+                        reason: format!("stream type のデコードに失敗しました: {e:?}"),
+                    })
+                    .await;
+                return;
+            }
+        }
+        match read_chunk(&mut stream, &mut buf, &token).await {
+            Ok(Some(size)) => {
+                raw.extend_from_slice(&buf[..size]);
+                type_decoder.push(&buf[..size]);
+            }
+            Ok(None) => {
+                let _ = tx.send(DataMessage::Closed { stream_id }).await;
+                return;
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(DataMessage::Failed {
+                        stream_id,
+                        reason: format!("読み込みに失敗しました: {e}"),
+                    })
+                    .await;
+                return;
+            }
+        }
+    };
+    if tx
+        .send(DataMessage::StreamType {
+            stream_id,
+            stream_type,
+        })
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&raw);
+    raw.clear();
+
+    // SUBGROUP_HEADER をデコードする
+    let header = loop {
+        match decoder.try_decode_header() {
+            Ok(Some(header)) => break header,
+            Ok(None) => {}
+            Err(e) => {
+                let _ = tx
+                    .send(DataMessage::Failed {
+                        stream_id,
+                        reason: format!("SUBGROUP_HEADER のデコードに失敗しました: {e:?}"),
+                    })
+                    .await;
+                return;
+            }
+        }
+        match read_chunk(&mut stream, &mut buf, &token).await {
+            Ok(Some(size)) => decoder.push(&buf[..size]),
+            Ok(None) => {
+                let _ = tx.send(DataMessage::Closed { stream_id }).await;
+                return;
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(DataMessage::Failed {
+                        stream_id,
+                        reason: format!("読み込みに失敗しました: {e}"),
+                    })
+                    .await;
+                return;
+            }
+        }
+    };
+    if tx
+        .send(DataMessage::Header {
+            stream_id,
+            header: Box::new(header),
+        })
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    // SUBGROUP_OBJECT を順にデコードする
+    loop {
+        let object = match decoder.try_decode_object() {
+            Ok(Some(object)) => object,
+            Ok(None) => match read_chunk(&mut stream, &mut buf, &token).await {
+                Ok(Some(size)) => {
+                    decoder.push(&buf[..size]);
+                    continue;
+                }
+                Ok(None) => {
+                    let _ = tx.send(DataMessage::Closed { stream_id }).await;
+                    return;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(DataMessage::Failed {
+                            stream_id,
+                            reason: format!("読み込みに失敗しました: {e}"),
+                        })
+                        .await;
+                    return;
+                }
+            },
+            Err(e) => {
+                let _ = tx
+                    .send(DataMessage::Failed {
+                        stream_id,
+                        reason: format!("SUBGROUP_OBJECT のデコードに失敗しました: {e:?}"),
+                    })
+                    .await;
+                return;
+            }
+        };
+
+        // payload を読み出す (データが揃うまで読み込みを続ける)
+        let payload = loop {
+            if let Some(payload) = decoder.try_read_payload() {
+                break payload;
+            }
+            match read_chunk(&mut stream, &mut buf, &token).await {
+                Ok(Some(size)) => decoder.push(&buf[..size]),
+                Ok(None) => {
+                    let _ = tx.send(DataMessage::Closed { stream_id }).await;
+                    return;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(DataMessage::Failed {
+                            stream_id,
+                            reason: format!("読み込みに失敗しました: {e}"),
+                        })
+                        .await;
+                    return;
+                }
+            }
+        };
+
+        let payload_length = payload.len() as u64;
+        // zakuro-moq の publisher は payload を `位置 % 251` のパターンで埋める。
+        // 検査するのは `--verify-payload` 指定時だけにする (実メディアを配信する relay に
+        // 接続したときに誤検知しないため)
+        let payload_ok = !verify_payload || payload_matches_pattern(&payload);
+        if tx
+            .send(DataMessage::Object {
+                stream_id,
+                object: Box::new(object),
+                payload_length,
+                payload_ok,
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// 受信 payload が zakuro-moq の publisher のパターン (`位置 % 251`) と一致するか
+fn payload_matches_pattern(payload: &[u8]) -> bool {
+    payload
+        .iter()
+        .enumerate()
+        .all(|(i, byte)| *byte == (i % 251) as u8)
+}
+
+/// stream から 1 チャンク読む (キャンセル時は `Ok(None)`)
+async fn read_chunk(
+    stream: &mut ReceiveStream,
+    buf: &mut [u8],
+    token: &CancellationToken,
+) -> std::io::Result<Option<usize>> {
+    let size = tokio::select! {
+        biased;
+        _ = token.cancelled() => return Ok(None),
+        read = stream.read(buf) => read?,
+    };
+    if size == 0 {
+        return Ok(None);
+    }
+    Ok(Some(size))
 }
 
 /// `Option<Instant>` まで待つ future
@@ -961,6 +1467,7 @@ async fn drain_events(
     session: &mut Session,
     state: &mut SessionState,
     mut publishers: Option<&mut Vec<Publisher>>,
+    mut subscriptions: Option<&mut Vec<SubscriptionState>>,
     request_tx: &mpsc::Sender<RequestMessage>,
     token: &CancellationToken,
 ) -> Result<()> {
@@ -1041,6 +1548,29 @@ async fn drain_events(
                 request_kind,
                 ..
             } => {
+                // SUBSCRIBE_OK は Track Alias が確定するため、受信した object の帰属判定に
+                // 使えるよう購読状態へ記録する
+                if request_kind == RequestKind::Subscribe {
+                    let alias = session
+                        .subscription(request_id)
+                        .and_then(|subscription| subscription.track_alias);
+                    if let Some(subscriptions) = subscriptions.as_deref_mut() {
+                        for subscription in subscriptions.iter_mut() {
+                            if subscription.request_id == Some(request_id) && !subscription.accepted
+                            {
+                                subscription.accepted = true;
+                                subscription.track_alias = alias;
+                                tracing::info!(
+                                    "MOQT subscribe accepted: track={} request_id={} track_alias={:?}",
+                                    subscription.name,
+                                    request_id,
+                                    alias,
+                                );
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if request_kind != RequestKind::Publish {
                     continue;
                 }
@@ -1122,8 +1652,19 @@ async fn drain_events(
                 reason,
                 ..
             } => {
+                // PUBLISH / SUBSCRIBE のどちらが拒否されたか分かるようにする
+                // (relay は購読者のいないトラックへの PUBLISH や、publisher のいないトラックへの
+                // SUBSCRIBE を REQUEST_ERROR で拒否する)
+                let kind = if subscriptions
+                    .as_deref()
+                    .is_some_and(|subs| subs.iter().any(|s| s.request_id == Some(request_id)))
+                {
+                    "subscribe"
+                } else {
+                    "publish"
+                };
                 state.closed_reason = Some(format!(
-                    "PUBLISH rejected: request_id={request_id} error_code={error_code:#x} reason={reason:?}"
+                    "{kind} rejected: request_id={request_id} error_code={error_code:#x} reason={reason:?}"
                 ));
             }
             SessionEvent::RequestTerminated {
@@ -1156,6 +1697,29 @@ async fn drain_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 受信 payload のパターン検査が publisher の埋め方と一致すること
+    #[test]
+    fn payload_pattern_check_accepts_publisher_payload() {
+        // publisher は `位置 % 251` で埋める
+        let payload: Vec<u8> = (0..1000).map(|i| (i % 251) as u8).collect();
+        assert!(payload_matches_pattern(&payload));
+
+        // 251 をまたぐ位置でも検査できること
+        let long: Vec<u8> = (0..600).map(|i| (i % 251) as u8).collect();
+        assert!(payload_matches_pattern(&long));
+    }
+
+    /// 受信 payload が壊れていれば検出できること
+    #[test]
+    fn payload_pattern_check_detects_mismatch() {
+        let mut payload: Vec<u8> = (0..100).map(|i| (i % 251) as u8).collect();
+        payload[99] = 0;
+        assert!(!payload_matches_pattern(&payload));
+
+        // 空 payload は不一致ではない
+        assert!(payload_matches_pattern(&[]));
+    }
 
     /// 最初の object は絶対 ID を Delta として送ること
     #[test]
@@ -1191,6 +1755,8 @@ mod tests {
             authority: "relay.example.com:4433",
             path: "/",
             payload: vec![0u8; 1000].into(),
+            subscribe_tracks: &[],
+            verify_payload: false,
         };
         let options = build_setup_options(&config);
         assert_eq!(options.path(), Some(b"/".as_slice()), "PATH が載っていない");

@@ -100,9 +100,9 @@ cargo run -- --help           # cargo 経由で実行する
 
 | 環境 | ビルド | テスト | 確認経路 |
 |---|---|---|---|
-| ubuntu-24.04 (x86_64) | 確認済み | 258 件成功 | CI |
-| ubuntu-26.04 (x86_64) | 確認済み | 258 件成功 | CI |
-| macOS (Apple Silicon) | 確認済み | 256 件成功 | 開発マシン |
+| ubuntu-24.04 (x86_64) | 確認済み | 264 件成功 | CI |
+| ubuntu-26.04 (x86_64) | 確認済み | 264 件成功 | CI |
+| macOS (Apple Silicon) | 確認済み | 262 件成功 | 開発マシン |
 | ubuntu (arm64) | 未確認 | 未確認 | CI に job なし |
 | Windows | 未確認 | 未確認 | CI に job なし |
 | Intel Mac | 不可 | 不可 | prebuilt なし |
@@ -236,9 +236,48 @@ TLS は既定で WebPKI のルート証明書を使って検証します。relay
 `--ca-cert <PEM>`、検証をスキップする場合は `--insecure` を使います。
 
 MOQT では、購読者がいないトラックの送信を止めるよう relay から `REQUEST_UPDATE`
-(FORWARD=0) が届くことがあります。zakuro-moq はこれに従うため、object を流し続けるには
-そのトラックを購読するクライアントが必要です。送信状況は 5 秒ごとに
-`[stats] objects-sent=... recent-rate=.../s` としてログに出ます。
+(FORWARD=0) が届くことがあります。zakuro-moq はこれに従います (FORWARD はトラック単位で
+扱います)。送受信の状況は 5 秒ごとに
+`[stats] objects-sent=... send-rate=.../s objects-received=... recv-rate=.../s bytes-received=... payload-mismatches=...`
+としてログに出ます。
+
+### 購読する (`--subscribe-tracks`)
+
+`--subscribe-tracks` を指定すると、そのトラックを購読して object を受信します。
+Full Track Name は publish と同じく `<トラック名>-<インスタンス>-<仮想クライアント>` なので、
+publish 側と subscribe 側で同じ `--vcs` を指定すると 1 対 1 で対応します。
+
+```bash
+# 配信側
+cargo run -p zakuro-moq -- --url moqt://relay.example.com:4433 --namespace zakuro \
+  --tracks video:30:1000,audio:50:200 --vcs 10
+
+# 視聴側 (別プロセス)
+cargo run -p zakuro-moq -- --url moqt://relay.example.com:4433 --namespace zakuro \
+  --subscribe-tracks video,audio --vcs 10
+```
+
+`--subscribe-tracks` を指定して `--tracks` を省略した場合は publish しません
+(購読専用で起動できます)。両方を指定すると 1 つの仮想クライアントが publish と subscribe を
+同時に行います。
+
+トラック名に `{instance}` / `{vc}` を書くと仮想クライアントの値で置換します。プレースホルダを
+書かない場合は publish と同じ `<名前>-<インスタンス>-<仮想クライアント>` になります。
+1 つの publisher に対して複数の購読者をぶら下げる場合は `{vc}` を固定します。
+
+```bash
+# 配信側 (1 仮想クライアント = 1 トラック video-0-0)
+cargo run -p zakuro-moq -- --url moqt://relay.example.com:4433 --namespace zakuro \
+  --tracks video:30:1000 --vcs 1
+
+# 視聴側 (10 仮想クライアントが同じ video-0-0 を購読する)
+cargo run -p zakuro-moq -- --url moqt://relay.example.com:4433 --namespace zakuro \
+  --subscribe-tracks 'video-{instance}-0' --vcs 10 --vcs-hatch-rate 5
+```
+
+`--verify-payload` を付けると、受信した payload が zakuro-moq の publisher が送る
+パターン (`位置 % 251`) と一致するかを検査し、不一致数をログに出します。実メディアを配信する
+relay へ接続する場合は誤検知になるため既定では無効です。
 
 ### 主なオプション (`zakuro-moq`)
 
@@ -246,7 +285,9 @@ MOQT では、購読者がいないトラックの送信を止めるよう relay
 | --- | --- |
 | `--url` | MOQ relay の URL (`moqt://host:port`)。必須 |
 | `--namespace` | Track Namespace (デフォルト: `zakuro`) |
-| `--tracks` | publish するトラック (`名前[:レート[:サイズ]]` のカンマ区切り、デフォルト: `video`) |
+| `--tracks` | publish するトラック (`名前[:レート[:サイズ]]` のカンマ区切り、デフォルト: `video`。`--subscribe-tracks` 指定時は publish しない) |
+| `--subscribe-tracks` | 購読するトラック名のカンマ区切り。`{instance}` / `{vc}` を書くと置換し、書かなければ `<名前>-<インスタンス>-<仮想クライアント>` になる |
+| `--verify-payload` | 受信 payload が zakuro-moq の publisher のパターンと一致するかを検査する |
 | `--ca-cert` | relay の CA 証明書 (PEM、未指定なら WebPKI のルート証明書) |
 | `--vcs` | 仮想クライアント数 (1-1000、デフォルト: 1) |
 | `--vcs-hatch-rate` | 仮想クライアントの起動レート (毎秒、デフォルト: 1.0) |
@@ -272,7 +313,8 @@ MOQT では、購読者がいないトラックの送信を止めるよう relay
   ],
   "vcs": 50,
   "vcs-hatch-rate": 10,
-  "duration": 60
+  "duration": 60,
+  "subscribe-tracks": ["video", "audio"]
 }
 ```
 
