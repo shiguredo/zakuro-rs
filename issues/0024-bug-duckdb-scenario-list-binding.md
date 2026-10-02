@@ -1,7 +1,7 @@
 # zakuro_scenario の sora_signaling_urls が List バインド非対応で INSERT に失敗する
 
 - Created: 2026-10-02
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-02
 - Branch: feature/fix-duckdb-scenario-list-binding
 - Polished: {YYYY-MM-DD}
 
@@ -55,8 +55,9 @@ DuckDB 統計出力の `zakuro_scenario` テーブルに 1 行も書き込まれ
 
 ### 確認
 
-- 単体テスト 2 件を追加した
-  - 複数 URL が配列として保存されること
-  - 空配列 (MOQ モード) と MOQ 設定が保存されること
+- 単体テストを追加した
+  - `insert_zakuro_scenario_stores_signaling_urls`: 複数 URL と空配列の両方で 1 行入ること
+  - `insert_zakuro_scenario_accepts_empty_signaling_urls`: 空配列でも INSERT が成功すること
 - 実機の DuckDB ファイルで `SELECT ... FROM zakuro_scenario` が 1 行返ることを確認した
-  (MOQ モード 2 仮想クライアントで実行し、`sora_signaling_urls` が `[]`、`moq_namespace` などが入る)
+- 分離後 (`zakuro/src/duckdb_stats/rows.rs`) も `make ci` で上記テストを含めて通ることを
+  確認した
