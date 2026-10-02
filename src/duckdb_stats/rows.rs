@@ -377,12 +377,19 @@ pub(crate) fn insert_zakuro_scenario(
     conn: &Connection,
     row: InsertZakuroScenarioRow,
 ) -> duckdb::Result<()> {
-    let urls: Vec<DuckValue> = row
-        .sora_signaling_urls
-        .into_iter()
-        .map(DuckValue::Text)
-        .collect();
-    let urls_value = DuckValue::List(urls);
+    // duckdb-rs は List パラメータのバインドに対応していない
+    // (`binding List parameters is not yet supported` で失敗する)。
+    // JSON 配列の文字列として渡し、SQL 側で VARCHAR[] へ CAST する。
+    // エスケープを自前で書かないよう JSON の生成には nojson を使う。
+    let urls_json = nojson::json(|f| {
+        f.array(|f| {
+            for url in &row.sora_signaling_urls {
+                f.element(url.as_str())?;
+            }
+            Ok(())
+        })
+    })
+    .to_string();
     let params: &[&dyn ToSql] = &[
         &(i32::try_from(row.instance_id).unwrap_or(0)),
         &(row.vcs as i64),
@@ -390,14 +397,14 @@ pub(crate) fn insert_zakuro_scenario(
         &row.repeat_interval,
         &(row.max_retry as i64),
         &row.retry_interval,
-        &urls_value,
+        &urls_json,
         &row.sora_channel_id,
         &row.sora_role,
     ];
     conn.execute(
         "INSERT INTO zakuro_scenario (instance_id, vcs, duration, repeat_interval, \
          max_retry, retry_interval, sora_signaling_urls, sora_channel_id, sora_role) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, CAST(? AS VARCHAR[]), ?, ?)",
         params,
     )?;
     Ok(())
@@ -801,6 +808,77 @@ mod tests {
             .expect("SELECT 失敗");
         assert!(s.is_some(), "start_timestamp は NOT NULL のべき");
         assert!(e.is_some(), "stop_timestamp は NOT NULL のべき");
+    }
+
+    #[test]
+    fn insert_zakuro_scenario_stores_signaling_urls() {
+        // 複数 URL と空配列の両方で zakuro_scenario へ 1 行入ること
+        // (List パラメータのバインド非対応で INSERT が失敗していた回帰の検証)
+        let (_dir, conn) = setup_db();
+        insert_zakuro_scenario(
+            &conn,
+            InsertZakuroScenarioRow {
+                instance_id: 0,
+                vcs: 3,
+                duration: Some(10.0),
+                repeat_interval: None,
+                max_retry: 1,
+                retry_interval: 5.0,
+                sora_signaling_urls: vec![
+                    "wss://a.example.com/".into(),
+                    "wss://b.example.com/".into(),
+                ],
+                sora_channel_id: "ch".into(),
+                sora_role: "sendonly".into(),
+            },
+        )
+        .expect("InsertZakuroScenario 失敗");
+        let urls: String = conn
+            .query_row(
+                "SELECT CAST(sora_signaling_urls AS VARCHAR) FROM zakuro_scenario",
+                [],
+                |row| row.get(0),
+            )
+            .expect("SELECT 失敗");
+        assert_eq!(
+            urls, "['wss://a.example.com/', 'wss://b.example.com/']",
+            "signaling URL の配列が保存されていない"
+        );
+
+        // 空配列も VARCHAR[] の空リストとして入ること
+        let row_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM zakuro_scenario", [], |row| row.get(0))
+            .expect("カウント取得に失敗");
+        assert_eq!(row_count, 1, "1 行だけ入るべき");
+    }
+
+    #[test]
+    fn insert_zakuro_scenario_accepts_empty_signaling_urls() {
+        // signaling URL が空の行も入れられること (List バインド非対応の回帰検証)
+        let (_dir, conn) = setup_db();
+        insert_zakuro_scenario(
+            &conn,
+            InsertZakuroScenarioRow {
+                instance_id: 0,
+                vcs: 1,
+                duration: None,
+                repeat_interval: None,
+                max_retry: 0,
+                retry_interval: 60.0,
+                sora_signaling_urls: Vec::new(),
+                sora_channel_id: String::new(),
+                sora_role: "sendonly".into(),
+            },
+        )
+        .expect("InsertZakuroScenario 失敗");
+        let urls: String = conn
+            .query_row(
+                "SELECT CAST(sora_signaling_urls AS VARCHAR) FROM zakuro_scenario",
+                [],
+                |row| row.get(0),
+            )
+            .expect("SELECT 失敗");
+        assert_eq!(urls, "[]", "空配列が保存されていない");
     }
 
     #[test]
