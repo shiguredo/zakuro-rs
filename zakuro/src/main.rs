@@ -7,14 +7,12 @@ mod duckdb_stats;
 mod error;
 mod fake_audio_capturer;
 mod fake_video_capturer;
-mod http_server;
-mod json_rpc;
 mod jsonc_fmt;
+mod log_bridge;
 mod mp4_audio;
 mod nop_video_decoder;
 mod openh264_video_codec;
 mod scenario;
-mod stats;
 mod video_codec_capability;
 mod video_device_capturer;
 mod virtual_client;
@@ -41,9 +39,9 @@ use crate::args::{CommonArgs, InstanceArgs};
 use crate::duckdb_stats::WriteCommand;
 use crate::error::{ErrorMessage, Result};
 use crate::fake_video_capturer::{FakeVideoCapturer, FakeVideoCapturerConfig};
-use crate::stats::{StatsCollector, StatsEvent};
 use crate::video_device_capturer::{VideoDeviceCapturer, VideoDeviceCapturerConfig};
 use crate::virtual_client::VirtualClientConfig;
+use zakuro_core::stats::{StatsCollector, StatsEvent};
 
 /// デバイス名または ID からデバイス ID を解決する
 ///
@@ -392,6 +390,9 @@ async fn async_main() -> Result<()> {
         log_config.set_log_timestamp(true);
         log_config.set_log_thread(true);
         let _ = log::initialize_logging(log_config);
+        // 共有クレート (zakuro-core) は log ファサードを使うため、その出力先も同じ
+        // libwebrtc のログ出力へ向ける
+        log_bridge::install(log_bridge::max_level_for(early_log_level));
     }
 
     let (common, instance_args_vec, config_path) = args::parse_args()?;
@@ -528,10 +529,13 @@ async fn async_main() -> Result<()> {
 
     // HTTP サーバーの起動 (両方ある場合のみ、Ctrl+C ハンドラ起動と DelayQueue 構築の間)
     if let (Some(host), Some(port)) = (&common.http_host, common.http_port) {
-        let server = http_server::HttpServer::bind(host, port, token.clone())
+        let server = zakuro_core::http_server::HttpServer::bind(host, port, token.clone())
             .await
             .map_err(|e| ErrorMessage::new(format!("HTTP server bind failed: {e}")))?;
-        let handler = http_server::DefaultHandler;
+        let handler = zakuro_core::http_server::DefaultHandler::new(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        );
         tokio::spawn(async move {
             server.run(handler).await;
         });

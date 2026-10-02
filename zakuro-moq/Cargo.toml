@@ -1,0 +1,72 @@
+[package]
+name = "zakuro-moq"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "MOQ (Media over QUIC Transport) load testing tool Zakuro"
+readme = "../README.md"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "zakuro-moq"
+path = "src/main.rs"
+
+[dependencies]
+# ログのファサード (共有クレート zakuro-core も使う)
+log = "0.4"
+# CLI 引数パース
+noargs = "0.4"
+# JSON パース / 生成
+nojson = "0.3"
+# TLS (s2n-quic の rustls provider で MOQ relay へ接続する際に利用)
+rustls = "0.23"
+# tokio Stream ラッパー (ReceiverStream)
+tokio-stream = "0.1"
+# tokio ユーティリティ (CancellationToken, DelayQueue)
+tokio-util = { version = "0.7", features = ["time"] }
+# ログ出力 (log ファサードの記録も tracing-log 経由で取り込む)
+tracing = "0.1"
+tracing-log = "0.2"
+# ログのフォーマット / レベル制御
+tracing-subscriber = "0.3"
+# WebPKI のルート証明書 (MOQ relay へ接続する際の既定の信頼ストア)
+webpki-roots = "1"
+# 負荷試験ツール共通の基盤 (統計 / HTTP サーバー / JSON-RPC)
+zakuro-core = { path = "../zakuro-core" }
+
+# 複数キーを持つ依存はインラインテーブルではなくテーブルセクションで記述する。
+# tombi は行長超過のインラインテーブルを複数行に展開するが、複数行インラインテーブルは
+# TOML 1.1 の機能であり cargo がマニフェストを解析できない場合がある。
+
+# QUIC クライアント。datagram endpoint を有効にして max_datagram_frame_size を広告する:
+# MOQT は object を datagram でも運ぶため (draft-ietf-moq-transport-21)
+[dependencies.s2n-quic]
+version = "1.88"
+default-features = false
+features = [
+  "provider-address-token-default",
+  "provider-tls-rustls",
+  "unstable-provider-datagram",
+]
+
+# Media over QUIC Transport (MOQT) の Sans I/O プロトコル実装。
+# crates.io には未公開のため git 依存とし、再現性のため rev を固定する
+[dependencies.shiguredo_moqt]
+git = "https://github.com/shiguredo/moqt-rs"
+rev = "056cf19a75ce22e28b2638c21fdff9df52096b28"
+
+# 非同期ランタイム
+[dependencies.tokio]
+version = "1.53"
+features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+]

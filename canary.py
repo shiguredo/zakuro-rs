@@ -4,22 +4,27 @@ import subprocess
 from typing import Optional
 
 
-# ファイルを読み込み、バージョンを更新
+# ファイルを読み込み、バージョンを更新する
+#
+# バージョンはルート Cargo.toml の [workspace.package] にあり、zakuro / zakuro-core /
+# zakuro-moq の 3 クレートが version.workspace = true で継承している。
 def update_version(file_path: str, dry_run: bool) -> Optional[str]:
     with open(file_path, "r", encoding="utf-8") as f:
         content: str = f.read()
 
-    # [package] セクション内のバージョンのみを取得
+    # [workspace.package] セクション内のバージョンのみを取得
     package_section_match = re.search(
-        r'\[package\].*?version\s*=\s*"([\d\.\w-]+)"', content, re.DOTALL
+        r'\[workspace\.package\].*?version\s*=\s*"([\d\.\w-]+)"', content, re.DOTALL
     )
     if not package_section_match:
-        raise ValueError("Version not found in [package] section of Cargo.toml")
+        raise ValueError(
+            "Version not found in [workspace.package] section of Cargo.toml"
+        )
 
     current_version: str = package_section_match.group(1)
 
-    # [package] セクションの開始位置を見つける
-    package_start = content.find("[package]")
+    # [workspace.package] セクションの開始位置を見つける
+    package_start = content.find("[workspace.package]")
     # 次のセクション ([dependencies] など) の開始位置を見つける
     next_section = re.search(r"\n\[(?!package)", content[package_start:])
     if next_section:
@@ -46,17 +51,21 @@ def update_version(file_path: str, dry_run: bool) -> Optional[str]:
         )
 
     if count == 0:
-        raise ValueError("Version not found or incorrect format in [package] section")
+        raise ValueError(
+            "Version not found or incorrect format in [workspace.package] section"
+        )
 
-    # 元のコンテンツの [package] セクション部分を更新後の内容に置き換える
+    # 元のコンテンツの [workspace.package] セクション部分を更新後の内容に置き換える
     if next_section:
         new_content = content[:package_start] + updated_package + content[package_end:]
     else:
         new_content = content[:package_start] + updated_package
 
-    # 新しいバージョンを確認 ([package] セクションから)
+    # 新しいバージョンを確認 ([workspace.package] セクションから)
     new_package_version_match = re.search(
-        r'\[package\].*?version\s*=\s*"([\d\.\w-]+)"', new_content, re.DOTALL
+        r'\[workspace\.package\].*?version\s*=\s*"([\d\.\w-]+)"',
+        new_content,
+        re.DOTALL,
     )
     if not new_package_version_match:
         raise ValueError("Failed to extract the new version after the update.")
@@ -80,18 +89,28 @@ def update_version(file_path: str, dry_run: bool) -> Optional[str]:
     else:
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(new_content)
-        print(f"Version updated in Cargo.toml to {new_version}")
+        print(f"Version updated in [workspace.package] to {new_version}")
 
     return new_version
 
 
-# cargo update zakuro を実行する (バージョン bump 後に Cargo.lock の自クレート版を同期する)
+# 自クレートの Cargo.lock を同期する (バージョン bump 後に実行する)
 def run_cargo_update(dry_run: bool) -> None:
+    command = [
+        "cargo",
+        "update",
+        "-p",
+        "zakuro",
+        "-p",
+        "zakuro-core",
+        "-p",
+        "zakuro-moq",
+    ]
     if dry_run:
-        print("Dry-run: Would run 'cargo update zakuro'")
+        print(f"Dry-run: Would run '{' '.join(command)}'")
     else:
-        subprocess.run(["cargo", "update", "zakuro"], check=True)
-        print("cargo update zakuro executed")
+        subprocess.run(command, check=True)
+        print("cargo update zakuro zakuro-core zakuro-moq executed")
 
 
 # git コミット、タグ、プッシュを実行

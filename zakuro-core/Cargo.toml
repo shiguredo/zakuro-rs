@@ -1,0 +1,32 @@
+[package]
+name = "zakuro-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Shared infrastructure for zakuro load testing tools"
+publish = false
+
+[dependencies]
+# ログのファサード (出力先は各バイナリが決める)
+log = "0.4"
+# JSON-RPC の JSON パース / 生成
+nojson = "0.3"
+# HTTP/1.1 サーバー
+shiguredo_http11 = "2026.6"
+# tokio Stream ラッパー (ReceiverStream, IntervalStream)
+tokio-stream = "0.1"
+# tokio ユーティリティ (CancellationToken)
+tokio-util = { version = "0.7", features = ["time"] }
+
+# 非同期ランタイム
+[dependencies.tokio]
+version = "1.53"
+features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+]

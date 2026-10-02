@@ -15,7 +15,7 @@ use crate::duckdb_stats::{
     ConnectionIds, DuckDBClient, InsertConnectionRow, WriteCommand, dispatch_stats, parse_offer_ids,
 };
 use crate::scenario::{Scenario, ScenarioEnd, ScenarioPlayer};
-use crate::stats::StatsEvent;
+use zakuro_core::stats::StatsEvent;
 
 #[derive(Clone)]
 pub(crate) struct VirtualClientConfig {

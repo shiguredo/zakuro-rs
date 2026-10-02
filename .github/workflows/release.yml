@@ -77,7 +77,7 @@ jobs:
           os: ${{ matrix.os }}
           toolchain: stable
       - name: Build
-        run: cargo build --release --locked --features fdk-aac
+        run: cargo build --release --locked --workspace --features fdk-aac
       - name: Package
         env:
           VERSION: ${{ needs.github-release.outputs.version }}
@@ -88,6 +88,8 @@ jobs:
           NAME="zakuro-${VERSION}-${PLATFORM}-${ARCH}"
           mkdir -p "dist/${NAME}"
           cp target/release/zakuro "dist/${NAME}/"
+          # MOQ 版は別バイナリ (libwebrtc も DuckDB も使わない) で、同じアーカイブに含める
+          cp target/release/zakuro-moq "dist/${NAME}/"
           # DuckDB の共有ライブラリは実行ファイルと同じディレクトリへ同梱する
           # (build.rs が埋め込む @executable_path / $ORIGIN で解決される)
           LIBDUCKDB=$(find target \( -name 'libduckdb.dylib' -o -name 'libduckdb.so' \) -print -quit)

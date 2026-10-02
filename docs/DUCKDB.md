@@ -42,6 +42,10 @@ zakuro-rs は WebRTC の統計情報を DuckDB データベースファイルに
 `zakuro` テーブルは 1 行レコード前提のため `instance_id` 列を持ちません。
 `zakuro_scenario` は `instance_id` を 1 列目に持ちます。
 
+`zakuro_scenario` は Sora 版 (`zakuro`) だけが書き、`sora_*` 列には Sora への接続設定が入ります
+(接続しないインスタンスでは `sora_signaling_urls` が空配列になります)。
+MOQ 版 (`zakuro-moq`) は DuckDB 出力を持ちません。
+
 ## シーケンスとインデックス
 
 各 stats テーブルの `pk` 列用に 8 個のシーケンスが作成されます。また、`connection_id` での検索と `(channel_id, connection_id, timestamp)` での複合検索用に 9 個のインデックスが作成されます。

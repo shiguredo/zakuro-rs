@@ -1,22 +1,28 @@
+//! ヘルスチェックと JSON-RPC を提供する HTTP/1.1 サーバー
+//!
+//! `GET /.ok` はヘルスチェック、`POST /rpc` は JSON-RPC 2.0 のエンドポイントである。
+
 use shiguredo_http11::{RequestDecoder, Response};
-use shiguredo_webrtc::{rtc_log_info, rtc_log_warning};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// HTTP リクエストのルーティング結果
-#[allow(dead_code)]
-pub(crate) struct HttpRequest {
-    pub(crate) method: String,
-    pub(crate) uri: String,
-    pub(crate) body: Vec<u8>,
+pub struct HttpRequest {
+    /// HTTP メソッド (`GET` / `POST` など)
+    pub method: String,
+    /// リクエスト URI
+    pub uri: String,
+    /// リクエストボディ
+    pub body: Vec<u8>,
 }
 
 /// HTTP リクエストハンドラ
 ///
 /// ルーティングとレスポンス生成を担当するトレイト。
 /// JSON-RPC やヘルスチェックなどのエンドポイントはこのトレイトを実装する。
-pub(crate) trait HttpHandler: Send + Sync + 'static {
+pub trait HttpHandler: Send + Sync + 'static {
+    /// リクエストを処理してレスポンスを返す
     fn handle(&self, request: &HttpRequest) -> Response;
 }
 
@@ -24,7 +30,23 @@ pub(crate) trait HttpHandler: Send + Sync + 'static {
 ///
 /// ヘルスチェックと JSON-RPC エンドポイントを提供する。
 #[derive(Clone)]
-pub(crate) struct DefaultHandler;
+pub struct DefaultHandler {
+    /// JSON-RPC の GetVersion が返すサービス名
+    name: &'static str,
+    /// JSON-RPC の GetVersion が返すバージョン
+    version: &'static str,
+}
+
+impl DefaultHandler {
+    /// サービス名とバージョンを指定してハンドラを作る
+    ///
+    /// `name` / `version` は JSON-RPC の `GetVersion` の応答に使う。クレート定数の
+    /// `env!("CARGO_PKG_NAME")` はビルドしたクレートの値を返すため、共有クレート側では
+    /// 使えず、バイナリから渡す必要がある。
+    pub fn new(name: &'static str, version: &'static str) -> Self {
+        Self { name, version }
+    }
+}
 
 impl HttpHandler for DefaultHandler {
     fn handle(&self, request: &HttpRequest) -> Response {
@@ -37,7 +59,7 @@ impl HttpHandler for DefaultHandler {
                 .header("Connection", "close")
                 .expect("static header should not fail"),
             // JSON-RPC 2.0
-            ("POST", "/rpc") => crate::json_rpc::handle_rpc(request),
+            ("POST", "/rpc") => crate::json_rpc::handle_rpc(request, self.name, self.version),
             _ => Response::new(404, "Not Found")
                 .expect("static response 404 should not fail")
                 .header("Content-Length", "0")
@@ -49,31 +71,27 @@ impl HttpHandler for DefaultHandler {
 }
 
 /// HTTP サーバー
-pub(crate) struct HttpServer {
+pub struct HttpServer {
     listener: TcpListener,
     token: CancellationToken,
 }
 
 impl HttpServer {
     /// HTTP サーバーを起動する
-    pub(crate) async fn bind(
-        host: &str,
-        port: u16,
-        token: CancellationToken,
-    ) -> std::io::Result<Self> {
+    pub async fn bind(host: &str, port: u16, token: CancellationToken) -> std::io::Result<Self> {
         let addr = format!("{host}:{port}");
         let listener = TcpListener::bind(&addr).await?;
-        rtc_log_info!("HTTP server listening on {}", addr);
+        log::info!("HTTP server listening on {}", addr);
         Ok(Self { listener, token })
     }
 
     /// 接続を受け付けてリクエストを処理するループ
-    pub(crate) async fn run(self, handler: impl HttpHandler + Clone) {
+    pub async fn run(self, handler: impl HttpHandler + Clone) {
         loop {
             tokio::select! {
                 biased;
                 _ = self.token.cancelled() => {
-                    rtc_log_info!("HTTP server shutting down");
+                    log::info!("HTTP server shutting down");
                     break;
                 }
                 result = self.listener.accept() => {
@@ -83,12 +101,12 @@ impl HttpServer {
                             let token = self.token.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = handle_connection(stream, &handler, token).await {
-                                    rtc_log_warning!("HTTP connection error from {}: {}", addr, e);
+                                    log::warn!("HTTP connection error from {}: {}", addr, e);
                                 }
                             });
                         }
                         Err(e) => {
-                            rtc_log_warning!("HTTP accept error: {}", e);
+                            log::warn!("HTTP accept error: {}", e);
                         }
                     }
                 }

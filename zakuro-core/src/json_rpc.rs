@@ -1,3 +1,7 @@
+//! JSON-RPC 2.0 の最小実装
+//!
+//! 現在は `GetVersion` のみを提供する。
+
 use nojson::{JsonValueKind, RawJson};
 use shiguredo_http11::Response;
 
@@ -8,7 +12,10 @@ const PARSE_ERROR: i64 = -32700;
 const METHOD_NOT_FOUND: i64 = -32601;
 
 /// JSON-RPC 2.0 リクエストを処理して HTTP レスポンスを返す
-pub(crate) fn handle_rpc(request: &HttpRequest) -> Response {
+///
+/// `name` / `version` は `GetVersion` の応答に使う。共有クレートでは
+/// `env!("CARGO_PKG_NAME")` が自分のクレート名になるため、呼び出し元から渡す。
+pub fn handle_rpc(request: &HttpRequest, name: &str, version: &str) -> Response {
     let body = match std::str::from_utf8(&request.body) {
         Ok(s) => s,
         Err(_) => return rpc_error_response(PARSE_ERROR, "Parse error", "null"),
@@ -63,11 +70,7 @@ pub(crate) fn handle_rpc(request: &HttpRequest) -> Response {
     // メソッドディスパッチ
     match method.as_str() {
         "GetVersion" => {
-            let result = format!(
-                r#"{{"name":"{}","version":"{}"}}"#,
-                env!("CARGO_PKG_NAME"),
-                env!("CARGO_PKG_VERSION"),
-            );
+            let result = format!(r#"{{"name":"{name}","version":"{version}"}}"#);
             rpc_success_response(&id_json, &result)
         }
         _ => rpc_error_response(METHOD_NOT_FOUND, "Method not found", &id_json),

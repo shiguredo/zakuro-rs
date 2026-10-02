@@ -1,39 +1,64 @@
+//! 仮想クライアントの接続状態の集計
+//!
+//! 仮想クライアントが送る [`StatsEvent`] を集約し、[`StatsSnapshot`] として保持する。
+//! 集計結果は 5 秒ごとにログへ出す。
+
 use std::time::Duration;
 
-use shiguredo_webrtc::{rtc_log_info, rtc_log_warning};
 use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
-pub(crate) enum StatsEvent {
+/// 仮想クライアントから集計側へ送る状態変化
+#[derive(Debug, Clone, Copy)]
+pub enum StatsEvent {
+    /// 接続した (MOQ はセッション確立、Sora はシグナリング完了)
     Connected {
+        /// インスタンス番号
         instance_id: u32,
+        /// 仮想クライアント番号
         vc_id: u32,
     },
+    /// 切断した
     Disconnected {
+        /// インスタンス番号
         instance_id: u32,
+        /// 仮想クライアント番号
         vc_id: u32,
     },
+    /// 再接続を待っている
     Retrying {
+        /// インスタンス番号
         instance_id: u32,
+        /// 仮想クライアント番号
         vc_id: u32,
+        /// 通算のリトライ回数
         retry_count: u32,
     },
+    /// 再試行せずに終了した
     Stopped {
+        /// インスタンス番号
         instance_id: u32,
+        /// 仮想クライアント番号
         vc_id: u32,
     },
 }
 
-#[derive(Clone)]
-pub(crate) struct StatsSnapshot {
-    pub(crate) total: u32,
-    pub(crate) instances: u32,
-    pub(crate) connected: u32,
-    pub(crate) retrying: u32,
-    pub(crate) stopped: u32,
+/// 集計時点の仮想クライアントの状態
+#[derive(Debug, Clone)]
+pub struct StatsSnapshot {
+    /// 起動予定の仮想クライアント総数
+    pub total: u32,
+    /// インスタンス数
+    pub instances: u32,
+    /// 接続中の仮想クライアント数
+    pub connected: u32,
+    /// 再接続待ちの仮想クライアント数
+    pub retrying: u32,
+    /// 終了した仮想クライアント数
+    pub stopped: u32,
 }
 
 impl StatsSnapshot {
@@ -50,14 +75,14 @@ impl StatsSnapshot {
     fn apply(&mut self, event: StatsEvent) {
         match event {
             StatsEvent::Connected { instance_id, vc_id } => {
-                rtc_log_info!("[i{}/vc-{}][stats] connected", instance_id, vc_id);
+                log::info!("[i{}/vc-{}][stats] connected", instance_id, vc_id);
                 self.connected += 1;
                 if self.retrying > 0 {
                     self.retrying -= 1;
                 }
             }
             StatsEvent::Disconnected { instance_id, vc_id } => {
-                rtc_log_info!("[i{}/vc-{}][stats] disconnected", instance_id, vc_id);
+                log::info!("[i{}/vc-{}][stats] disconnected", instance_id, vc_id);
                 if self.connected > 0 {
                     self.connected -= 1;
                 }
@@ -67,7 +92,7 @@ impl StatsSnapshot {
                 vc_id,
                 retry_count,
             } => {
-                rtc_log_warning!(
+                log::warn!(
                     "[i{}/vc-{}][stats] retrying ({})",
                     instance_id,
                     vc_id,
@@ -76,7 +101,7 @@ impl StatsSnapshot {
                 self.retrying += 1;
             }
             StatsEvent::Stopped { instance_id, vc_id } => {
-                rtc_log_info!("[i{}/vc-{}][stats] stopped", instance_id, vc_id);
+                log::info!("[i{}/vc-{}][stats] stopped", instance_id, vc_id);
                 self.stopped += 1;
                 if self.retrying > 0 {
                     self.retrying -= 1;
@@ -86,13 +111,20 @@ impl StatsSnapshot {
     }
 }
 
-pub(crate) struct StatsCollector {
+/// 仮想クライアントの状態変化を集約する
+///
+/// `new` を呼ぶと集約タスクと定期レポートタスクを起動する。`token` がキャンセルされると
+/// 両タスクは終了する。
+pub struct StatsCollector {
+    /// 仮想クライアントが状態変化を送るチャネル
     event_tx: mpsc::Sender<StatsEvent>,
+    /// 集約タスクが生きている間だけ保持する (`new` の戻り値で受信側を保持する)
     _snapshot_rx: watch::Receiver<StatsSnapshot>,
 }
 
 impl StatsCollector {
-    pub(crate) fn new(total: u32, instances: u32, token: CancellationToken) -> Self {
+    /// 集約タスクとレポータータスクを起動する
+    pub fn new(total: u32, instances: u32, token: CancellationToken) -> Self {
         let (event_tx, event_rx) = mpsc::channel(256);
         let (snapshot_tx, snapshot_rx) = watch::channel(StatsSnapshot::initial(total, instances));
 
@@ -111,7 +143,8 @@ impl StatsCollector {
         }
     }
 
-    pub(crate) fn event_tx(&self) -> mpsc::Sender<StatsEvent> {
+    /// 仮想クライアントが状態変化を送るためのチャネルを返す
+    pub fn event_tx(&self) -> mpsc::Sender<StatsEvent> {
         self.event_tx.clone()
     }
 
@@ -147,7 +180,7 @@ impl StatsCollector {
                 _ = token.cancelled() => break,
                 _ = ticks.next() => {
                     let snap = snapshot_rx.borrow().clone();
-                    rtc_log_info!(
+                    log::info!(
                         "[stats] instances={} total={} connected={} retrying={} stopped={}",
                         snap.instances,
                         snap.total,

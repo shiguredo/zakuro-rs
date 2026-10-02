@@ -34,8 +34,9 @@ fmt:
 # cargo 経由の実行はライブラリ探索パスが注入されるため、rpath の欠落を検出できない。
 # debug ビルドを使い、CI の実行時間を増やさない。
 smoke:
-	cargo build --locked --features fdk-aac
+	cargo build --locked --workspace --features fdk-aac
 	./target/debug/zakuro --help
+	./target/debug/zakuro-moq --help
 
 # ビルド成果物を削除する
 clean:

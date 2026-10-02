@@ -722,7 +722,7 @@ fn expand_instances(value: RawJsonValue<'_, '_>, template: &[String]) -> Result<
             }
             // `instances[i]` 内に `sora-*` のフラットキーを書かれると `sora` Object 形式と
             // 衝突するためサイレント上書きにせずエラーにする
-            if key.starts_with("sora-") {
+            if key != "sora" && key.starts_with("sora-") {
                 return Err(ErrorMessage::new(format!(
                     "'{key}' must be nested under 'sora' object inside instances[{i}]"
                 ))
@@ -1108,7 +1108,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         .take(&mut args)
         .then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
-    let role: String = noargs::opt("sora-role")
+    let role_arg: String = noargs::opt("sora-role")
         .doc("Sora role (sendonly, recvonly, sendrecv)")
         .example("sendonly")
         .take(&mut args)
@@ -1389,7 +1389,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
 
     let help = args.finish()?.unwrap_or_default();
 
-    let role = Role::parse(&role)?;
+    let role = Role::parse(&role_arg)?;
 
     // help_mode のときは早期 return: バリデーションは skip し、戻り値の InstanceArgs はダミー値とする
     // (呼び出し側はヘルプテキストのみを参照する想定)
@@ -3512,6 +3512,25 @@ mod tests {
                 .windows(2)
                 .any(|w| w[0] == "--sora-video-vp9-params" && w[1].contains("profile_id")),
             "instance 側に params が振り分けられていない"
+        );
+    }
+
+    #[test]
+    fn sora_mode_still_requires_signaling_url() {
+        let argv = to_argv(&["--sora-channel-id", "ch", "--sora-role", "sendonly"]);
+        let err =
+            parse_instance_args("zakuro", argv).expect_err("必須引数の欠落を許容してはならない");
+        assert!(
+            err.to_string().contains("--sora-signaling-url"),
+            "エラーメッセージが期待と異なる: {err}"
+        );
+
+        let argv = to_argv(&["--sora-signaling-url", "wss://example.com/"]);
+        let err =
+            parse_instance_args("zakuro", argv).expect_err("必須引数の欠落を許容してはならない");
+        assert!(
+            err.to_string().contains("--sora-channel-id"),
+            "エラーメッセージが期待と異なる: {err}"
         );
     }
 }

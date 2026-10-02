@@ -15,11 +15,21 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 
 ## Recording Composition Tool Zakuro について
 
-Sora WebRTC SFU の負荷試験ツール `zakuro` の Rust 実装です。仮想クライアントを複数起動し、フェイク映像・実デバイス映像・ Y4M・ MP4 パススルー・ WAV 音声を使って Sora へ接続できます。HTTP ヘルスチェック・ JSON-RPC・ DuckDB 統計出力も提供します。
+負荷試験ツール `zakuro` の Rust 実装です。次の 2 つのバイナリを 1 つのリポジトリで管理しています。
+
+| バイナリ | ディレクトリ | 対象 | 主な依存 |
+|---|---|---|---|
+| `zakuro` | `zakuro/` | Sora WebRTC SFU | libwebrtc (Sora Rust SDK)・DuckDB |
+| `zakuro-moq` | `zakuro-moq/` | Sora の Media over QUIC 実装 (sora-moq) のリレー | s2n-quic・moqt-rs (`shiguredo_moqt`) |
+
+両者で共有する基盤 (統計・HTTP サーバー・JSON-RPC) は `zakuro-core/` に置いています。
+
+`zakuro` は仮想クライアントを複数起動し、フェイク映像・実デバイス映像・ Y4M・ MP4 パススルー・ WAV 音声を使って Sora へ接続できます。HTTP ヘルスチェック・ JSON-RPC・ DuckDB 統計出力も提供します。
+`zakuro-moq` は仮想クライアントごとに QUIC 接続を 1 本確立し、複数のトラックへ MOQT で object を送り続けます。libwebrtc も DuckDB も使いません。
 
 C++ 版との対応表・実装状況は `docs/ZAKURO.md`、DuckDB のスキーマは `docs/DUCKDB.md` を参照してください。
 
-## 主な機能
+## 主な機能 (`zakuro`)
 
 - 複数の Zakuro インスタンス / 仮想クライアントを段階的に起動
 - Sora への `sendonly` / `recvonly` / `sendrecv` 接続
@@ -90,9 +100,9 @@ cargo run -- --help           # cargo 経由で実行する
 
 | 環境 | ビルド | テスト | 確認経路 |
 |---|---|---|---|
-| ubuntu-24.04 (x86_64) | 確認済み | 212 件成功 | CI |
-| ubuntu-26.04 (x86_64) | 確認済み | 212 件成功 | CI |
-| macOS (Apple Silicon) | 確認済み | 210 件成功 | 開発マシン |
+| ubuntu-24.04 (x86_64) | 確認済み | 258 件成功 | CI |
+| ubuntu-26.04 (x86_64) | 確認済み | 258 件成功 | CI |
+| macOS (Apple Silicon) | 確認済み | 256 件成功 | 開発マシン |
 | ubuntu (arm64) | 未確認 | 未確認 | CI に job なし |
 | Windows | 未確認 | 未確認 | CI に job なし |
 | Intel Mac | 不可 | 不可 | prebuilt なし |
@@ -205,6 +215,70 @@ cargo run -- \
 
 `zakuro lint <FILE.jsonc>` は設定ファイルを検証し、`zakuro fmt <FILE.jsonc>` は整形します (`--check` で書き戻さず確認)。
 
+## MOQ 版 (`zakuro-moq`)
+
+Sora の Media over QUIC 実装 (sora-moq) のリレーに対する publish 負荷試験を行います。
+1 仮想クライアント = 1 QUIC 接続 = 1 MOQT セッションで、指定した複数トラックを同時に
+publish します。Track Name は `<トラック名>-<インスタンス>-<仮想クライアント>` として
+仮想クライアントごとに一意化します。
+
+```bash
+cargo run -p zakuro-moq -- \
+  --url moqt://relay.example.com:4433 \
+  --namespace zakuro \
+  --tracks video:30:1000,audio:50:200 \
+  --vcs 50 \
+  --vcs-hatch-rate 10 \
+  --duration 60
+```
+
+TLS は既定で WebPKI のルート証明書を使って検証します。relay の CA 証明書を指定する場合は
+`--ca-cert <PEM>`、検証をスキップする場合は `--insecure` を使います。
+
+MOQT では、購読者がいないトラックの送信を止めるよう relay から `REQUEST_UPDATE`
+(FORWARD=0) が届くことがあります。zakuro-moq はこれに従うため、object を流し続けるには
+そのトラックを購読するクライアントが必要です。送信状況は 5 秒ごとに
+`[stats] objects-sent=... recent-rate=.../s` としてログに出ます。
+
+### 主なオプション (`zakuro-moq`)
+
+| オプション | 説明 |
+| --- | --- |
+| `--url` | MOQ relay の URL (`moqt://host:port`)。必須 |
+| `--namespace` | Track Namespace (デフォルト: `zakuro`) |
+| `--tracks` | publish するトラック (`名前[:レート[:サイズ]]` のカンマ区切り、デフォルト: `video`) |
+| `--ca-cert` | relay の CA 証明書 (PEM、未指定なら WebPKI のルート証明書) |
+| `--vcs` | 仮想クライアント数 (1-1000、デフォルト: 1) |
+| `--vcs-hatch-rate` | 仮想クライアントの起動レート (毎秒、デフォルト: 1.0) |
+| `--duration` | 接続維持秒数 (未指定なら無制限) |
+| `--repeat-interval` | `--duration` 経過後の再接続間隔 (秒) |
+| `--max-retry` / `--retry-interval` | 接続失敗時のリトライ回数と間隔 (デフォルト: 0 / 60.0) |
+| `--insecure` | TLS 証明書の検証をスキップ |
+| `--log-level` | ログレベル (`verbose` / `info` / `warning` / `error` / `none`、デフォルト: `info`) |
+| `--http-host` / `--http-port` | HTTP API (`GET /.ok` / `POST /rpc`) を有効化 |
+| `--config` | JSONC 設定ファイル |
+| `--instance-hatch-rate` | インスタンスの起動レート (毎秒、デフォルト: 1.0) |
+
+### JSONC 設定ファイル (`zakuro-moq`)
+
+```jsonc
+{
+  "instance-hatch-rate": 1.0,
+  "url": "moqt://relay.example.com:4433",
+  "namespace": "zakuro",
+  "tracks": [
+    { "name": "video", "object-rate": 30, "object-size": 1000 },
+    { "name": "audio", "object-rate": 50, "object-size": 200 }
+  ],
+  "vcs": 50,
+  "vcs-hatch-rate": 10,
+  "duration": 60
+}
+```
+
+`instances` 配列で複数のインスタンスを起動できます (最上位のキーはテンプレートとして
+各インスタンスへ継承されます)。`zakuro-moq lint` / `zakuro-moq fmt` はありません。
+
 ## シナリオ
 
 シナリオは仮想クライアントが接続確立後に切断・再接続などを順次実行する機能です。CLI では `--scenario reconnect`、JSONC では `"scenario": "reconnect"` と指定します (現状 `reconnect` のみ)。
@@ -298,6 +372,7 @@ curl -s http://127.0.0.1:8080/rpc \
 - `--input-mp4` は `--openh264` と同時指定できません
 - `--no-video-device` と `--video-input-device` / `--input-y4m` / `--sandstorm` / `--input-mp4` は同時指定できません
 - `--video-input-device` は `--input-y4m` / `--sandstorm` / `--input-mp4` / `--no-video-device` と同時指定できません
+- Sora モードでは `--sora-signaling-url` / `--sora-channel-id` / `--sora-role` が必須です
 
 ## リリース
 
