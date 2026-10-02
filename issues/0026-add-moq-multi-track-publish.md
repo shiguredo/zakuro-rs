@@ -1,7 +1,7 @@
 # zakuro-moq で複数トラックを publish できるようにする
 
 - Created: 2026-10-02
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-02
 - Branch: feature/add-moq-multi-track-publish
 - Polished: {YYYY-MM-DD}
 
