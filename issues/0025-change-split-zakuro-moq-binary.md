@@ -1,7 +1,7 @@
 # zakuro-moq を独立バイナリとして分離する
 
 - Created: 2026-10-02
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-02
 - Branch: feature/change-split-zakuro-moq-binary
 - Polished: {YYYY-MM-DD}
 
