@@ -8,7 +8,7 @@ members = ["zakuro", "zakuro-core", "zakuro-moq"]
 [workspace.package]
 version = "2026.0.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.99"
 homepage = "https://github.com/shiguredo/zakuro-rs"
 repository = "https://github.com/shiguredo/zakuro-rs"
 license = "Apache-2.0"
