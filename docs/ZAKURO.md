@@ -218,7 +218,7 @@ POST /rpc          → JSON-RPC 2.0
 
 | ライブラリ | バージョン | 用途 |
 |-----------|-----------|------|
-| shiguredo_webrtc | 0.152.1-canary.1 | libwebrtc バインディング |
+| shiguredo_webrtc | 0.154 | libwebrtc バインディング |
 | sora_sdk | 2026.2.0-canary.1 | Sora Rust SDK |
 | shiguredo_http11 | 2026.6 | HTTP/1.1 サーバー |
 | shiguredo_openh264 | 2026.2 | OpenH264 バインディング |

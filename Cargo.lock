@@ -2190,18 +2190,6 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_webrtc"
-version = "0.152.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2a7bbb8d5dcdfd95c4845a4e5a317d6089fee532d063564e665043514b703af"
-dependencies = [
- "bindgen",
- "nojson",
- "shiguredo_cmake",
- "shiguredo_toml",
-]
-
-[[package]]
-name = "shiguredo_webrtc"
 version = "0.154.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92687af511b74b09bd8c967fc6108df605815e06ae12f441ad8addc88f68df7a"
@@ -2317,7 +2305,7 @@ dependencies = [
  "shiguredo_http11",
  "shiguredo_mp4",
  "shiguredo_openh264",
- "shiguredo_webrtc 0.154.0",
+ "shiguredo_webrtc",
  "shiguredo_websocket",
  "tokio",
  "tokio-rustls",
@@ -2402,7 +2390,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",
@@ -3024,7 +3012,7 @@ dependencies = [
  "shiguredo_openh264",
  "shiguredo_opus",
  "shiguredo_video_device",
- "shiguredo_webrtc 0.152.1",
+ "shiguredo_webrtc",
  "sora_sdk",
  "tempfile",
  "tokio",
