@@ -1,7 +1,7 @@
 # shiguredo_webrtc を 0.154 に揃えて zakuro のビルドを直す
 
 - Created: 2026-10-04
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-04
 - Branch: feature/update-shiguredo-webrtc
 - Polished: {YYYY-MM-DD}
 
@@ -48,3 +48,18 @@
 - `Cargo.lock`
 - `THIRD_PARTY_LICENSES.md`
 - `docs/ZAKURO.md`
+
+## 解決方法
+
+- `zakuro/Cargo.toml` の `shiguredo_webrtc` を `0.154` に上げ、`sora_sdk` が要求する
+  `~0.154` と同じ crate バージョンに統一した。`cargo update -p shiguredo_webrtc@0.152.1
+  --precise 0.154.0` で `Cargo.lock` を再生成し、`shiguredo_webrtc` を 0.154.0 の
+  1 バージョンにした
+- 0.152.1-canary.1 → 0.154.0 の API 差分 (`VideoEncoderFactoryHandler` /
+  `VideoDecoderFactoryHandler` のデフォルト実装削除、`SdpVideoFormat` の `from_raw` /
+  `to_raw` の公開化など) は、zakuro 側が明示実装済みのためソースコード変更は不要だった
+- `THIRD_PARTY_LICENSES.md` を `scripts/generate_third_party_licenses.py` で再生成した
+  (rustup コミットの `Cargo.lock` 更新時に再生成されていなかったドリフトも解消)
+- `docs/ZAKURO.md` の依存ライブラリ表のバージョンを 0.154 に更新した
+- 検証: `cargo build -p zakuro --features fdk-aac` が通り、`make ci` が exit 0。
+  テストは 215 件 + zakuro-moq 50 件がすべて成功した
