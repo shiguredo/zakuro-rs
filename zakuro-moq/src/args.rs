@@ -26,7 +26,7 @@ const MAX_OBJECT_SIZE: usize = 1024 * 1024;
 
 /// Full Track Name の最大バイト長
 ///
-/// draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure) が Track Namespace と
+/// draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure) が Track Namespace と
 /// Full Track Name の合計を 4096 バイト以下と定めている。
 const MAX_TRACK_NAME_LENGTH: usize = 4096;
 
@@ -461,7 +461,7 @@ fn validate_instance_args(
         return Err(ErrorMessage::new("--namespace に空文字列は指定できません").into());
     }
     // `.` と `.session` は publish できない予約名前空間
-    // (draft-ietf-moq-transport-21 §6.5 (Session-Level Tracks and Namespaces))
+    // (draft-ietf-moq-transport-22 §6.5 (Session-Level Tracks and Namespaces))
     if namespace == "." || namespace == ".session" {
         return Err(ErrorMessage::new(format!(
             "--namespace に予約名前空間 '{namespace}' は指定できません"

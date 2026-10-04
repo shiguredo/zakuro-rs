@@ -8,7 +8,7 @@
 //! タスクで読み、デコードしたメッセージをチャネルでメインタスクへ渡す (`Session` は
 //! `&mut self` を要求するため、複数ストリームを select! で直接読むことができない)。
 //!
-//! 対応する仕様は draft-ietf-moq-transport-21 (MOQT) と draft-ietf-moq-loc-04 (LOC) である。
+//! 対応する仕様は draft-ietf-moq-transport-22 (MOQT) と draft-ietf-moq-loc-04 (LOC) である。
 //! 節番号は将来の draft 改訂で変わる可能性がある。
 
 use std::collections::HashMap;
@@ -46,7 +46,7 @@ use crate::error::{ErrorMessage, Result};
 
 /// SETUP Option の MOQT_IMPLEMENTATION に載せる実装名
 ///
-/// draft-ietf-moq-transport-21 §9.1.5 (MOQT IMPLEMENTATION) は実装名とバージョンに
+/// draft-ietf-moq-transport-22 §9.1.5 (MOQT IMPLEMENTATION) は実装名とバージョンに
 /// 限ることを SHOULD としているため、クレートのバージョンを付ける。
 const MOQT_IMPLEMENTATION_NAME: &[u8] =
     concat!("zakuro-moq/", env!("CARGO_PKG_VERSION")).as_bytes();
@@ -244,8 +244,8 @@ struct Publisher {
     accepted: bool,
     /// Forward State (1 のときだけ object を送る)
     ///
-    /// draft-ietf-moq-transport-21 §3.1 (Subscriptions): "The publisher does not send Objects
-    /// if the Forward State is 0, and does send them if the Forward State is 1."
+    /// draft-ietf-moq-transport-22 §3.1.1 (Pausing Subscriptions): "The publisher does
+    /// not send Objects on a paused subscription, and does send them when it is not paused."
     /// FORWARD は request (トラック) 単位の値であるため、トラックごとに保持する。
     forward: bool,
     /// 次に object を送る時刻
@@ -401,7 +401,7 @@ impl Publisher {
         })?;
 
         // Session への登録はワイヤへ書く前に行う。フィルタ不通過の場合はワイヤへ出さない
-        // (draft-ietf-moq-transport-21 §3.3.3 (Combining Filters))
+        // (draft-ietf-moq-transport-22 §3.3.3 (Combining Filters))
         if let Err(e) = session.send_subgroup_object(stream_id, object_id, Some(&properties_bytes))
         {
             if matches!(e, SendRequestError::LocalFilterMismatch) {
@@ -495,7 +495,7 @@ impl Publisher {
             },
         );
         // reset された Subgroup を再オープンすると Session が拒否することがある
-        // (draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams))。次の Group へ
+        // (draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams))。次の Group へ
         // 進めて、新しい Subgroup として送り直す
         self.group_id += 1;
         self.object_id = 0;
@@ -506,7 +506,7 @@ impl Publisher {
     ///
     /// peer が STOP_SENDING を送ると s2n-quic は送信側を reset 状態にし、以降の書き込みは
     /// 失敗する。公開 API から STOP_SENDING の受信を直接観測できないため、書き込み失敗を
-    /// stream の終端とみなして Session へ通知し (draft-ietf-moq-transport-21 §11.3.2)、
+    /// stream の終端とみなして Session へ通知し (draft-ietf-moq-transport-22 §11.3.2)、
     /// 次の Group を新しい stream で送り直す。
     fn on_stream_write_failure(
         &mut self,
@@ -538,7 +538,7 @@ impl Publisher {
 
 /// SUBGROUP_OBJECT に載せる Object ID Delta を求める
 ///
-/// draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header): 最初の Object は絶対 ID を送り、
+/// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header): 最初の Object は絶対 ID を送り、
 /// 以降は直前の Object ID との差から 1 を引いた Delta を送る。受信側は「直前の Object ID +
 /// Delta + 1」で絶対 ID を復元するため、フィルタで送らなかった Object があっても Delta が
 /// その分を吸収する (直前 ID は実際に送った Object のものだけを渡すこと)。
@@ -687,8 +687,8 @@ pub(crate) async fn run(
             read = peer_control.read(&mut control_buf), if !state.control_closed => {
                 let size = read.map_err(|e| ErrorMessage::new(format!("制御ストリームの読み込みに失敗しました: {e}")))?;
                 if size == 0 {
-                    // draft-ietf-moq-transport-21 §6.4.1: 制御ストリームはセッション中に
-                    // 閉じてはならない
+                    // draft-ietf-moq-transport-22 §6.3 (Session initialization): control stream は
+                    // セッション中に閉じてはならない
                     state.control_closed = true;
                     session
                         .recv_control_stream_closed(RequestStreamEnd::Fin)
@@ -1345,7 +1345,7 @@ fn take_setup_message(session: &mut Session) -> Result<ControlMessage> {
 /// SETUP Options を構築する
 ///
 /// PATH (0x01) と AUTHORITY (0x05) は native QUIC のときだけ載せる
-/// (draft-ietf-moq-transport-21 §9.1.1 / §9.1.2: WebTransport では MUST NOT)。
+/// (draft-ietf-moq-transport-22 §9.1.1 / §9.1.2: WebTransport では MUST NOT)。
 fn build_setup_options(config: &SessionConfig<'_>) -> SetupOptions {
     let mut options = SetupOptions::new();
     options.push(SetupOption {
@@ -1475,7 +1475,10 @@ async fn drain_events(
         match event {
             SessionEvent::SendControl(message) => {
                 // SETUP は初期化時に送り終えているため、ここへ来るのは GOAWAY であり、
-                // stream type を前置しない (draft-ietf-moq-transport-21 §6.4.1)
+                // stream type は stream の先頭に 1 回だけ前置する
+                // (draft-ietf-moq-transport-22 §6.4.1 (Unidirectional Streams))。
+                // SETUP 送信時に前置済みのため、続く GOAWAY には前置しない
+                // (draft-ietf-moq-transport-22 §9.2 (GOAWAY): GOAWAY は control stream 上で送る)
                 let bytes = message.encode().map_err(|e| {
                     ErrorMessage::new(format!("制御メッセージのエンコードに失敗しました: {e:?}"))
                 })?;
@@ -1593,7 +1596,7 @@ async fn drain_events(
                 request_id,
                 parameters,
             } => {
-                // draft-ietf-moq-transport-21 §9.5 (REQUEST_UPDATE): 受信側は REQUEST_OK または
+                // draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE): 受信側は REQUEST_OK または
                 // REQUEST_ERROR を 1 通返す MUST。FORWARD の反映は session 層が済ませている
                 // FORWARD は request (トラック) 単位の値であるため、該当トラックだけに適用する。
                 // セッション全体で 1 つ持つと、購読者のいないトラックへの FORWARD=0 で

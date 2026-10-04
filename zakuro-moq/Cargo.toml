@@ -42,7 +42,7 @@ zakuro-core = { path = "../zakuro-core" }
 # TOML 1.1 の機能であり cargo がマニフェストを解析できない場合がある。
 
 # QUIC クライアント。datagram endpoint を有効にして max_datagram_frame_size を広告する:
-# MOQT は object を datagram でも運ぶため (draft-ietf-moq-transport-21)
+# MOQT は object を datagram でも運ぶため (draft-ietf-moq-transport-22)
 [dependencies.s2n-quic]
 version = "1.88"
 default-features = false
@@ -56,7 +56,7 @@ features = [
 # crates.io には未公開のため git 依存とし、再現性のため rev を固定する
 [dependencies.shiguredo_moqt]
 git = "https://github.com/shiguredo/moqt-rs"
-rev = "056cf19a75ce22e28b2638c21fdff9df52096b28"
+rev = "641ebb115e2552049ac2110332b98b36ae986790"
 
 # 非同期ランタイム
 [dependencies.tokio]

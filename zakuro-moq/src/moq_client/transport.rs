@@ -16,14 +16,14 @@ use crate::error::{ErrorMessage, Result};
 
 /// QUIC 直接接続の ALPN プロトコル識別子
 ///
-/// draft-ietf-moq-transport-21 §6.2 (Session establishment) が定める MOQT の
+/// draft-ietf-moq-transport-22 §6.2 (Session establishment) が定める MOQT の
 /// プロトコル識別子。WebTransport 経路は `h3` / `h2` を使うが、zakuro は QUIC 直接接続のみ使う。
 /// この値は draft 由来であり将来の draft 改訂で変わる可能性がある。
-const ALPN: &[u8] = b"moqt-21";
+const ALPN: &[u8] = b"moqt-22";
 
 /// MOQT URI でポートを省略したときに使う既定ポート
 ///
-/// draft-ietf-moq-transport-21 §6.1.2 (Dereferencing a MOQT URI):
+/// draft-ietf-moq-transport-22 §6.1.2 (Dereferencing a MOQT URI):
 /// "If the port is omitted in the URI, a default port of 443 is used."
 const DEFAULT_PORT: u16 = 443;
 
@@ -54,7 +54,7 @@ pub(crate) struct MoqEndpoint {
     pub(crate) port: u16,
     /// SETUP の AUTHORITY に載せる URL の authority 部
     ///
-    /// draft-ietf-moq-transport-21 §9.1.1 (AUTHORITY): "When connecting to a server using a
+    /// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY): "When connecting to a server using a
     /// URI with the "moqt" scheme, the client MUST set the AUTHORITY option to the authority
     /// portion of the URI." に従い、URL に書かれた authority をそのまま使う。
     pub(crate) authority: String,
@@ -77,7 +77,8 @@ impl MoqEndpoint {
         })?;
 
         // フラグメントは MOQT の接続に使わないため取り除く
-        // (draft-ietf-moq-transport-21 §6.1.1: フラグメントは URI の一部として送信しない)
+        // (draft-ietf-moq-transport-22 §6.1.1 (Fragment Identifiers): フラグメントは
+        // 送信せず、接続後にクライアントがローカルで処理する)
         let rest = rest.split('#').next().unwrap_or(rest);
 
         // authority は最初の `/` または `?` まで、それ以降は path
