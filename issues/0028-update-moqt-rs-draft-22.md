@@ -1,7 +1,7 @@
 # moqt-rs を draft-22 対応の最新に追従させる
 
 - Created: 2026-10-04
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-04
 - Branch: feature/update-moqt-rs-draft-22
 - Polished: {YYYY-MM-DD}
 
@@ -49,3 +49,18 @@ draft-ietf-moq-transport-22 に追従し、QUIC の ALPN プロトコル識別�
 - `zakuro-moq/src/args.rs`
 - `zakuro-moq/src/moq_client/transport.rs`
 - `zakuro-moq/src/moq_client/session.rs`
+
+## 解決方法
+
+- `zakuro-moq/Cargo.toml` の rev を `641ebb115e2552049ac2110332b98b36ae986790`
+  (draft-22 対応の develop 最新) に更新し、`cargo update -p shiguredo_moqt` で
+  `Cargo.lock` を再生成した
+- `zakuro-moq/src/moq_client/transport.rs` の `ALPN` を `moqt-22` に変更した
+- 仕様参照を一次資料 draft-ietf-moq-transport-22 と突合して同期した。節番号が
+  変わっていた 2 件は移動先に合わせた
+  - Forward State の「paused subscription では Object を送らない」は
+    §3.1 (Subscriptions) → §3.1.1 (Pausing Subscriptions)
+  - 制御ストリームをセッション中に閉じてはならない規則は §6.4.1 → §6.3
+- 検証: `make ci` (fmt / clippy / test / smoke) が exit 0。テストは 215 件 +
+  zakuro-moq 50 件がすべて成功した
+  - issue 0029 の webrtc 修正と同時に検証した (0029 を先にコミットしている)
