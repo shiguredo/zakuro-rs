@@ -1,0 +1,145 @@
+# GitHub Actions による E2E テスト
+#
+# - secrets.TEST_MOQT_URI に設定した relay へ zakuro-moq を接続し、publish と
+#   subscribe の往復、受信 payload の一致を検証する
+# - secrets.TEST_MOQT_URI は moqt:// URL を指定する。未設定の場合 (fork からの PR や
+#   未共有の環境) はテストを実行せずスキップする
+# - runner は ubuntu-24.04 を使う。zakuro-moq の依存 (zakuro-core を含む) は macOS
+#   専用依存を持たず Linux でビルドできる (ubuntu-slim には Rust が無い)
+# - 公開ログに relay のホストやトークンを残さないよう、接続先 (host / authority) と
+#   fragment、名前解決したアドレスは ::add-mask:: でマスクする
+
+name: E2E Test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - "develop"
+    paths-ignore:
+      - "**.md"
+      # issues/ は markdown と SEQUENCE (拡張子無し) のみで、E2E に無影響
+      - "issues/**"
+  push:
+    branches:
+      - "develop"
+      - "feature/**"
+    paths-ignore:
+      - "**.md"
+      - "issues/**"
+
+# 同じブランチへの連続した push で古い実行をキャンセルし、ランナーを占有しない
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  moq-e2e:
+    name: MOQ E2E Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TEST_MOQT_URI: ${{ secrets.TEST_MOQT_URI }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Skip when TEST_MOQT_URI is not set
+        if: env.TEST_MOQT_URI == ''
+        run: echo "TEST_MOQT_URI is not set; skipping the MOQ E2E test"
+
+      - name: Update the Rust toolchain
+        if: env.TEST_MOQT_URI != ''
+        run: rustup update stable
+
+      # ~/.cargo 配下をキャッシュする組織製 action (ci.yml と同じ使い方)
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        if: env.TEST_MOQT_URI != ''
+        with:
+          os: ubuntu-24.04
+          toolchain: stable
+
+      - name: Build zakuro-moq
+        if: env.TEST_MOQT_URI != ''
+        run: cargo build --locked -p zakuro-moq
+
+      - name: Verify publish and subscribe round trip
+        if: env.TEST_MOQT_URI != ''
+        run: |
+          set -euo pipefail
+
+          # 接続先の host / authority と fragment をマスクする。secrets 全体は GitHub が
+          # 自動でマスクするが、ログには host や authority 単体で現れることがある
+          authority="${TEST_MOQT_URI#*://}"
+          authority="${authority%%/*}"
+          authority="${authority%%[?#]*}"
+          if [ "${authority#\[}" != "$authority" ]; then
+            # IPv6 リテラルは `[...]` の中身を host とする
+            host="${authority#[}"
+            host="${host%%]*}"
+          else
+            host="${authority%%:*}"
+          fi
+          echo "::add-mask::$host"
+          echo "::add-mask::$authority"
+          if [ "${TEST_MOQT_URI#*#}" != "$TEST_MOQT_URI" ]; then
+            echo "::add-mask::${TEST_MOQT_URI#*#}"
+          fi
+
+          # 実行ごとにユニークな namespace を使い、他の実行や手動確認と衝突させない
+          namespace="zakuro-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          log="moq-e2e.log"
+
+          # 1 仮想クライアントで video を publish しながら同じトラックを subscribe し、
+          # 受信 payload が publisher のパターンと一致することを検査する。--duration 経過で
+          # graceful に終了するため終了コードは判定に使わず、最終サマリ行で判定する
+          # (timeout は停止しない場合の保険)
+          timeout 120 ./target/debug/zakuro-moq \
+            --url "$TEST_MOQT_URI" \
+            --namespace "$namespace" \
+            --tracks video:30:1000 \
+            --subscribe-tracks video \
+            --verify-payload \
+            --vcs 1 \
+            --duration 30 \
+            --log-level info \
+            > "$log" 2>&1 || true
+
+          # 失敗時のログに出る名前解決したアドレスもマスクする
+          resolved="$(grep -oE "to [0-9A-Fa-f:.]+" "$log" 2>/dev/null | cut -d" " -f2 | sort -u || true)"
+          if [ -n "$resolved" ]; then
+            for addr in $resolved; do
+              echo "::add-mask::$addr"
+            done
+          fi
+
+          cat "$log"
+
+          # 最終サマリ行から publish / subscribe の受理数、送受信数、payload 不一致数を取る
+          summary="$(grep -oE "MOQT finished:.*" "$log" | tail -1 || true)"
+          if [ -z "$summary" ]; then
+            echo "::error::the MOQ E2E test did not finish"
+            exit 1
+          fi
+
+          for pattern in "publish=1/1" "subscribe=1/1" "payload-mismatches=0"; do
+            if ! printf '%s' "$summary" | grep -qE "$pattern"; then
+              echo "::error::the summary does not contain '$pattern'"
+              exit 1
+            fi
+          done
+
+          sent="$(printf '%s' "$summary" | grep -oE "sent-objects=[0-9]+" | cut -d= -f2)"
+          received="$(printf '%s' "$summary" | grep -oE "received-objects=[0-9]+" | cut -d= -f2)"
+          if [ -z "$sent" ] || [ -z "$received" ]; then
+            echo "::error::failed to parse the summary: $summary"
+            exit 1
+          fi
+          if [ "$sent" -lt 1 ] || [ "$received" -lt 1 ]; then
+            echo "::error::no object was sent or received"
+            exit 1
+          fi
+
+          echo "MOQ E2E test passed (sent=$sent received=$received)"
