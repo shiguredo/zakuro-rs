@@ -1,7 +1,7 @@
 # zakuro-moq の publish / subscribe E2E テストを CI に追加する
 
 - Created: 2026-10-04
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-04
 - Branch: feature/test-add-moq-e2e
 - Polished: {YYYY-MM-DD}
 
@@ -53,3 +53,22 @@
 - `TEST_MOQT_URI` が zakuro-rs から参照できるよう登録されていること。2026-10-04 に
   リポジトリ secret として登録済み (未登録の環境ではテストはスキップされるだけで
   失敗しない)
+
+## 解決方法
+
+- `.github/workflows/e2e-test.yml` を追加した。`secrets.TEST_MOQT_URI` 未設定時は
+  ビルドと検証のステップをスキップし、設定時のみ `ubuntu-24.04` で `zakuro-moq` を
+  ビルドして E2E を実行する
+- E2E は 1 仮想クライアントで `video` トラックを publish しながら同じトラックを
+  subscribe し、`--verify-payload` で受信 payload を検査する。`--duration 30` で
+  graceful に終了させ、最終サマリ行の `publish=1/1` / `subscribe=1/1` /
+  `payload-mismatches=0` と送受信数 (> 0) で判定する
+- Track Namespace は `zakuro-e2e-<run_id>-<run_attempt>` として実行ごとにユニークにした
+- ログへは relay の host / authority / fragment と名前解決したアドレスを `::add-mask::`
+  でマスクする (moqt-rs の E2E と同じ方針)
+- 2026-10-04 にリポジトリ secret `TEST_MOQT_URI` を登録した (値はリポジトリに書かない)
+- 検証: 実 relay に対して手元で `publish=1/1` / `subscribe=1/1` /
+  `payload-mismatches=0` を確認した。GitHub Actions の E2E Test でも
+  `publish=1/1 sent-objects=896 subscribe=1/1 received-objects=891
+  payload-mismatches=0` で成功し、ログに host が残らないことも確認した
+- `actionlint` (1.7.12) が追加したワークフローを通過することを確認した
