@@ -1,7 +1,7 @@
 # CI の MSRV job を rust-version 1.99 に追随させる
 
 - Created: 2026-10-04
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-04
 - Branch: feature/fix-ci-msrv-job-rust-version
 - Polished: {YYYY-MM-DD}
 
@@ -32,3 +32,13 @@ develop の CI で MSRV job が失敗し続けている。検証に使うツー�
 
 - `.github/workflows/ci.yml`
 - `README.md`
+
+## 解決方法
+
+- `.github/workflows/ci.yml` の msrv job を 1.99 に追随させた (`name` / `rustup
+  toolchain install` / rust-cache の `toolchain` / `cargo +<version> build` の 4 箇所)
+- `README.md` の必要環境の表記も 1.99 に更新した
+- 検証: 手元の `cargo +1.99 build --locked -p zakuro-moq` が成功し、GitHub Actions の
+  CI でも MSRV (1.99) job が成功した
+- 再発防止として、`Cargo.toml` の `rust-version` を更新するときは msrv job の 4 箇所と
+  `README.md` を同時に更新する
