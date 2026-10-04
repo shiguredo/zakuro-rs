@@ -37,8 +37,6 @@ hooks = [
   { id = "detect-private-key" },
   # 改行コードの混在を防ぐ
   { id = "mixed-line-ending" },
-  # リンク切れのシンボリックリンクを検出する (CLAUDE.md は AGENTS.md へのリンク)
-  { id = "check-symlinks" },
   # シンボリックリンクだったファイルが実体ファイルとしてコミットされるのを検出する
   { id = "destroyed-symlinks" },
   # shebang 付きスクリプトに実行権限があるか確認する
@@ -48,7 +46,8 @@ hooks = [
   #   - check-json: 追跡中の JSON 系は `.markdownlint.jsonc` だけで jsonc 型に分類され、
   #     `prek run check-json --all-files` は常に Skipped になる
   #   - check-executables-have-shebangs: 実行権限を持つ追跡ファイルが 0 件のため常に Skipped になる
-  # どちらも該当するファイル種別が増えた時点で追加する
+  #   - check-symlinks: 追跡中のシンボリックリンクが 0 件のため常に Skipped になる
+  # いずれも該当するファイル種別が増えた時点で追加する
 ]
 
 # tombi: TOML のフォーマッタ・リンタ。`shiguredo-rust` の規約でフックすることが求められている
