@@ -45,7 +45,7 @@ C++ 版との対応表・実装状況は `docs/ZAKURO.md`、DuckDB のスキー�
 
 ## 必要環境
 
-- Rust toolchain (`Cargo.toml` の `rust-version` は 1.98)
+- Rust toolchain (`Cargo.toml` の `rust-version` は 1.99)
 - `rustfmt` と `clippy`
 - ビルド時に GitHub Releases へのネットワークアクセス
 - Linux: `libpulse-dev` と `libx11-dev` (AAC デコードを使う場合は `libfdk-aac-dev` も)

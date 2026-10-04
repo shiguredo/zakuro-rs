@@ -73,7 +73,7 @@ jobs:
   # rust-toolchain.toml は stable の浮動参照のままにし、この job だけ正確な
   # バージョンを使う (開発者の作業環境に影響させないため)。
   msrv:
-    name: MSRV (1.98)
+    name: MSRV (1.99)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -81,17 +81,17 @@ jobs:
       DUCKDB_DOWNLOAD_LIB: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: rustup toolchain install 1.98 --profile minimal
+      - run: rustup toolchain install 1.99 --profile minimal
       - uses: shiguredo/github-actions/.github/actions/rust-cache@main
         with:
           os: ubuntu-24.04
-          toolchain: "1.98"
+          toolchain: "1.99"
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libpulse-dev libx11-dev libfdk-aac-dev libclang-dev
       - name: Build with MSRV
-        run: cargo +1.98 build --locked --workspace --features fdk-aac
+        run: cargo +1.99 build --locked --workspace --features fdk-aac
 
   slack_notify:
     needs: [ci, msrv]
