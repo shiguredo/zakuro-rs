@@ -1,7 +1,7 @@
 # ログ抑制パターンを --log-suppress で指定できるようにする
 
 - Created: 2026-10-05
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-05
 - Branch: feature/add-log-suppress-option
 - Polished: {YYYY-MM-DD}
 
@@ -51,3 +51,27 @@ libwebrtc や sora-rust-sdk が出す大量のログのうち、負荷試験の�
 - `cargo fmt --all -- --check` / `cargo clippy --locked --workspace --all-targets
   --features fdk-aac -- -D warnings` / `cargo test --locked --workspace --features fdk-aac`
   が通ること
+
+## 解決方法
+
+- `log_filter` に抑制パターンを受け取る仕組みを追加した。指定した文字列を部分文字列として
+  扱い、ログのメッセージ本体または発生元ファイル名に一致した行を出力しない
+- CLI `--log-suppress <SUBSTRING>[,<SUBSTRING>...]` と JSONC 最上位の
+  `"log-suppress": ["...", ...]` を追加した。優先順位は既存の後勝ち規則と同じく CLI が
+  JSONC に勝つ。空要素は全メッセージに一致してログを全消ししてしまうため起動エラーにする
+- dummy ADM の抑制はコード組み込みのまま残し、`--log-suppress` の指定を追加の抑制として扱う
+- ログ初期化は引数パースより前に走るため、`--log-level` と同じく CLI / JSONC を覗き見る
+  経路 (`peek_log_config`) で読む。JSONC の配列はカンマ結合して `--log-suppress` の値へ
+  変換する (既存の `sora.signaling-url` と同じ扱いで、変換処理を共通ヘルパーへ切り出した)
+- 指定した抑制パターンは DuckDB の config_json (`log_suppress`) に残し、負荷試験の設定を
+  後から追えるようにした
+- README に `--log-suppress` の説明と例を追記した
+- 検証 (ホスト): `--duration 60` の試験に
+  `--log-suppress "Failed to lookup send time for packet,packet_buffer.cc"` を指定したところ、
+  メッセージ指定の `transport_feedback_adapter.cc` とファイル名指定の `packet_buffer.cc` が
+  どちらも 0 件になり、他のログ 99,988 行と `[stats]` 332 件は従来どおり出力された
+- 検証 (ホスト): 抑制を指定しない同一設定・同一バイナリのサイクルでは
+  `transport_feedback_adapter.cc` 8,226 行、`packet_buffer.cc` 10,482 行が出ていた (7.9 分時点)
+- 検証 (ローカル): `cargo fmt --all -- --check` / `cargo clippy --locked --workspace
+  --all-targets --features fdk-aac -- -D warnings` / `cargo test --locked --workspace
+  --features fdk-aac` が通る
