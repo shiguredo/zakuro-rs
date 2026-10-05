@@ -1,7 +1,7 @@
 # dummy ADM 由来の playout delay エラーログを抑制する
 
 - Created: 2026-10-05
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-05
 - Branch: feature/fix-suppress-dummy-playout-delay-log
 - Polished: {YYYY-MM-DD}
 
@@ -60,3 +60,23 @@
 - `cargo fmt --all -- --check` / `cargo clippy --locked --workspace --all-targets
   --features fdk-aac -- -D warnings` / `cargo test --locked --workspace --features fdk-aac`
   が通ること
+
+## 解決方法
+
+- libwebrtc の LogSink を登録する `log_filter` モジュールを追加し、dummy ADM 由来の
+  `failed to retrieve the playout delay` をメッセージの完全一致で破棄する
+- libwebrtc の `LogMessage::~LogMessage()` は stderr への直接出力と sink への配信を
+  別経路で行うため、ログ初期化で `set_log_to_stderr(false)` を設定し、sink が
+  `default_log_line()` で抑制対象以外の全行を stderr へ再出力する
+- sink の min severity は LS_INFO 固定で `--log-level` の絞り込みが効かない。このため
+  sink ハンドラ側でも同じ最低重大度で絞り込み、`warning` / `error` / `none` の指定どおりに
+  出力する
+- `--log-level=verbose` の verbose ログは sink に届かないため出力されない。この制約を
+  README に記載した
+- 検証 (ホスト): 同一設定・`--duration 60` の試験で該当メッセージ 0 件、`[stats]` 332 件、
+  他の libwebrtc のログ 93,884 件を確認した。修正前の同一設定のサイクルでは
+  6,100,856 / 6,354,455 行 (96.0 %) が該当メッセージだった
+- 検証 (ホスト): release ビルドを置き換えた後の実サイクルでも該当メッセージ 0 件
+- 検証 (ローカル): `cargo fmt --all -- --check` / `cargo clippy --locked --workspace
+  --all-targets --features fdk-aac -- -D warnings` / `cargo test --locked --workspace
+  --features fdk-aac` が通る
