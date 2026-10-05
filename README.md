@@ -383,6 +383,9 @@ reconnect シナリオは「切断してすぐ再接続 → 1-5 秒のランダ�
 | `--duckdb-interval` | DuckDB への統計書き込み間隔 (秒、デフォルト: 1.0) |
 | `--no-duckdb-output` | DuckDB への統計情報出力を無効化 |
 
+`--log-level` に `verbose` を指定できますが、libwebrtc のログ sink の min severity が
+LS_INFO 固定であるため、verbose ログは出力されません。
+
 すべてのオプションは `--help` でも確認できます。
 
 ## HTTP API

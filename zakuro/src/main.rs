@@ -9,6 +9,7 @@ mod fake_audio_capturer;
 mod fake_video_capturer;
 mod jsonc_fmt;
 mod log_bridge;
+mod log_filter;
 mod mp4_audio;
 mod nop_video_decoder;
 mod openh264_video_codec;
@@ -389,6 +390,13 @@ async fn async_main() -> Result<()> {
         log_config.set_debug_severity(early_log_level);
         log_config.set_log_timestamp(true);
         log_config.set_log_thread(true);
+        // stderr への直接出力は sink ではフィルタできない (libwebrtc の
+        // `LogMessage::~LogMessage()` は stderr への出力と sink への配信を別経路で行う)。
+        // そのため stderr への直接出力を止め、sink 側で再出力する。目的は dummy ADM が
+        // 出す無害な "failed to retrieve the playout delay" の抑制であり、詳細と制約は
+        // log_filter.rs のモジュールコメントを参照すること
+        log_config.set_log_to_stderr(false);
+        log_config.add_sink(log_filter::build_sink(early_log_level));
         let _ = log::initialize_logging(log_config);
         // 共有クレート (zakuro-core) は log ファサードを使うため、その出力先も同じ
         // libwebrtc のログ出力へ向ける
