@@ -546,6 +546,18 @@ fn common_json(c: &crate::args::CommonArgs) -> impl DisplayJson + '_ {
             f.member("no_duckdb_output", c.no_duckdb_output)?;
             // CLI / JSONC と同形の小文字文字列で出力する (Debug の PascalCase は使わない)
             f.member("log_level", severity_as_str(c.log_level))?;
+            // 抑制パターンは配列で出力する (未指定なら空配列)
+            f.member(
+                "log_suppress",
+                nojson::json(|f| {
+                    f.array(|f| {
+                        for pattern in &c.log_suppress {
+                            f.element(pattern.as_str())?;
+                        }
+                        Ok(())
+                    })
+                }),
+            )?;
             Ok(())
         })
     })
@@ -850,6 +862,7 @@ mod tests {
             duckdb_interval: 1.0,
             no_duckdb_output: false,
             log_level: log::Severity::Info,
+            log_suppress: Vec::new(),
             fdk_aac_lib: None,
         };
         let inst = InstanceArgs {
@@ -936,6 +949,7 @@ mod tests {
             duckdb_interval: 1.0,
             no_duckdb_output: false,
             log_level: log::Severity::Info,
+            log_suppress: Vec::new(),
             fdk_aac_lib: None,
         };
         let inst = InstanceArgs {
@@ -1009,6 +1023,91 @@ mod tests {
             !json.contains(r#""log_level":"Info""#),
             "log_level に Debug 形式 (PascalCase) を使ってはならない"
         );
+        // 抑制パターンは未指定でも空配列として出力される
+        assert!(
+            json.contains(r#""log_suppress":[]"#),
+            "log_suppress は空配列として含まれるべき: {json}"
+        );
+    }
+
+    #[test]
+    fn build_config_json_includes_log_suppress_patterns() {
+        // --log-suppress の指定が配列で config_json に含まれる
+        use crate::args::{CommonArgs, InstanceArgs};
+        use sora_sdk::Role;
+        let common = CommonArgs {
+            instance_hatch_rate: 1.0,
+            http_host: None,
+            http_port: None,
+            openh264: None,
+            insecure: false,
+            client_cert: None,
+            client_key: None,
+            duckdb_output_dir: ".".into(),
+            duckdb_interval: 1.0,
+            no_duckdb_output: false,
+            log_level: log::Severity::Info,
+            log_suppress: vec![
+                "Failed to lookup send time for packet".to_string(),
+                "packet_buffer.cc".to_string(),
+            ],
+            fdk_aac_lib: None,
+        };
+        let inst = InstanceArgs {
+            signaling_urls: vec!["wss://example.com/".to_string()],
+            channel_id: "ch".to_string(),
+            role: Role::SendOnly,
+            client_id: None,
+            bundle_id: None,
+            metadata: None,
+            signaling_notify_metadata: None,
+            vcs: 1,
+            vcs_hatch_rate: 1.0,
+            duration: None,
+            repeat_interval: None,
+            max_retry: 0,
+            retry_interval: 60.0,
+            no_video_device: false,
+            no_audio_device: false,
+            video_input_device: None,
+            resolution: (640, 480),
+            framerate: 30,
+            sandstorm: false,
+            input_y4m: None,
+            input_mp4: None,
+            input_wav: None,
+            video_codec_type: None,
+            video_bit_rate: None,
+            sora_video_vp9_params: None,
+            sora_video_av1_params: None,
+            sora_video_h264_params: None,
+            sora_video_h265_params: None,
+            vp8_encoder: None,
+            vp9_encoder: None,
+            av1_encoder: None,
+            h264_encoder: None,
+            h265_encoder: None,
+            audio: true,
+            audio_codec_type: None,
+            audio_bit_rate: None,
+            data_channels: None,
+            data_channel_signaling: None,
+            ignore_disconnect_websocket: None,
+            disconnect_wait_timeout: None,
+            simulcast: None,
+            simulcast_request_rid: None,
+            spotlight: None,
+            spotlight_focus_rid: None,
+            spotlight_unfocus_rid: None,
+            scenario: None,
+        };
+        let json = build_config_json(&common, &[inst]);
+        assert!(
+            json.contains(
+                r#""log_suppress":["Failed to lookup send time for packet","packet_buffer.cc"]"#
+            ),
+            "log_suppress が指定順の配列で含まれるべき: {json}"
+        );
     }
 
     #[test]
@@ -1028,6 +1127,7 @@ mod tests {
             duckdb_interval: 1.0,
             no_duckdb_output: false,
             log_level: log::Severity::Info,
+            log_suppress: Vec::new(),
             fdk_aac_lib: None,
         };
         let inst = InstanceArgs {
@@ -1110,6 +1210,7 @@ mod tests {
             duckdb_interval: 1.0,
             no_duckdb_output: false,
             log_level: log::Severity::Warning,
+            log_suppress: Vec::new(),
             fdk_aac_lib: None,
         };
         let inst = InstanceArgs {

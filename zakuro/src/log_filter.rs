@@ -1,18 +1,29 @@
-//! libwebrtc の dummy ADM が出力する無害なエラーログを抑制する LogSink
+//! libwebrtc / sora-rust-sdk のログを抑制する LogSink
 //!
-//! libwebrtc の `AudioDeviceModuleImpl::PlayoutDelay()` (`modules/audio_device/
-//! audio_device_impl.cc`) は、下位の音声デバイスが playout delay を返せないと
-//! LS_ERROR で "failed to retrieve the playout delay" を出力する。zakuro は受信音声を
-//! 再生しないため受信側インスタンスを `AdmConfig::NoAudioDevice` で動かしており、
-//! sora-sdk はこのとき dummy ADM (`AudioDeviceModuleAudioLayer::Dummy`) を作る。
-//! dummy ADM の `PlayoutDelay()` は常に -1 を返す実装なので、受信音声チャネルを持つ
-//! VC ごとにこのエラーログが出続ける。値そのものは zakuro では使われないため無害。
+//! 抑制する対象は次の 2 つ。
 //!
-//! `--log-level` では消せない (LS_ERROR のため error 指定でも残る) ので、libwebrtc の
-//! LogSink でメッセージ単位に捨てる。ただし stderr への直接出力は sink とは別経路
-//! (`rtc_base/logging.cc` の `LogMessage::~LogMessage()`) のため、`set_log_to_stderr(false)`
-//! で止めた上で、この sink が抑制対象以外の全行を `default_log_line()` で再出力する。
-//! 呼び出し側の設定は main.rs のログ初期化ブロックを参照すること。
+//! 1. dummy ADM が出す無害なエラーログ `failed to retrieve the playout delay`
+//!
+//!    libwebrtc の `AudioDeviceModuleImpl::PlayoutDelay()` (`modules/audio_device/
+//!    audio_device_impl.cc`) は、下位の音声デバイスが playout delay を返せないと
+//!    LS_ERROR でこのメッセージを出力する。zakuro は受信音声を再生しないため受信側
+//!    インスタンスを `AdmConfig::NoAudioDevice` で動かしており、sora-sdk はこのとき
+//!    dummy ADM (`AudioDeviceModuleAudioLayer::Dummy`) を作る。dummy ADM の
+//!    `PlayoutDelay()` は常に -1 を返す実装なので、受信音声チャネルを持つ VC ごとに
+//!    このエラーログが出続ける。値そのものは zakuro では使われないため無害であり、
+//!    このメッセージはコード組み込みで常に抑制する
+//!
+//! 2. `--log-suppress` / JSONC `"log-suppress"` で運用者が指定した文字列に一致するログ
+//!
+//!    メッセージ本体または発生元ファイル名の部分一致で判定する。抑制するかどうかは
+//!    運用者の判断であり、既定では何も指定されない
+//!
+//! `--log-level` では消せない (dummy ADM のメッセージは LS_ERROR のため error 指定でも
+//! 残り、運用者指定の対象は INFO 以上に混在する) ので、libwebrtc の LogSink で行単位に
+//! 捨てる。ただし stderr への直接出力は sink とは別経路 (`rtc_base/logging.cc` の
+//! `LogMessage::~LogMessage()`) のため、`set_log_to_stderr(false)` で止めた上で、この sink が
+//! 抑制対象以外の全行を `default_log_line()` で再出力する。呼び出し側の設定は main.rs の
+//! ログ初期化ブロックを参照すること。
 //!
 //! この構成の制約:
 //!
@@ -31,14 +42,24 @@ use shiguredo_webrtc::log::{LogLineRef, LogSink, LogSinkHandler, Severity};
 /// `LogLineRef::message()` は末尾に改行を含むため、比較時は trim する。
 const DUMMY_PLAYOUT_DELAY_MESSAGE: &str = "failed to retrieve the playout delay";
 
-/// 抑制対象のログかどうかを判定する
+/// dummy ADM 由来の無害なログかどうかを判定する
 ///
 /// メッセージの完全一致で判定する。このメッセージを出せるのは dummy ADM だけであり、
 /// zakuro で dummy ADM が使われるのは `AdmConfig::NoAudioDevice` のインスタンスだけの
 /// ため、起動引数による切り替えは不要。将来 `AdmConfig::UseBuiltIn` (実デバイス) を
 /// 使う構成にした場合は、実障害による同メッセージまで隠さないようここを見直すこと。
-fn is_suppressed(message: &str) -> bool {
+fn is_dummy_playout_delay(message: &str) -> bool {
     message.trim_end() == DUMMY_PLAYOUT_DELAY_MESSAGE
+}
+
+/// `--log-suppress` で指定された文字列のいずれかを含むかどうかを判定する
+///
+/// 部分一致で判定する。ファイル名 (`transport_feedback_adapter.cc` など) を指定すると、
+/// そのファイルから出るログをまとめて抑制できる。
+fn matches_suppress_patterns(text: &str, patterns: &[String]) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| text.contains(pattern.as_str()))
 }
 
 /// `--log-level` で指定した最低重大度を満たすかどうかを判定する
@@ -55,21 +76,29 @@ fn meets_min_severity(severity: Severity, min_severity: Severity) -> bool {
 
 /// 抑制対象以外を stderr へ再出力する sink ハンドラ
 ///
-/// ログ初期化前に生成して以降は書き換えない `min_severity` だけを持ち、可変状態は
-/// 持たない。sink は複数のスレッドから呼ばれ得るため、判定は毎回この値だけから行う。
-struct SuppressDummyAudioLog {
+/// ログ初期化前に生成して以降は書き換えない設定だけを持ち、可変状態は持たない。
+/// sink は複数のスレッドから呼ばれ得るため、判定は毎回この設定だけから行う。
+struct SuppressingLogHandler {
     /// `--log-level` で指定された最低重大度
     min_severity: Severity,
+    /// `--log-suppress` で指定された部分文字列
+    suppress_patterns: Vec<String>,
 }
 
-impl LogSinkHandler for SuppressDummyAudioLog {
+impl LogSinkHandler for SuppressingLogHandler {
     fn on_log_message(&mut self, line: LogLineRef<'_>) {
         if !meets_min_severity(line.severity(), self.min_severity) {
             return;
         }
-        // 抑制対象は `default_log_line()` を呼ぶ前に落とす。この行は全ログの大半を
-        // 占めるため、整形と stderr への書き込みを省くことがそのまま負荷削減になる
-        if is_suppressed(line.message()) {
+        // 抑制対象は `default_log_line()` を呼ぶ前に落とす。dummy ADM のメッセージは
+        // 全ログの大半を占めるため、整形と stderr への書き込みを省くことがそのまま
+        // 負荷削減になる
+        if is_dummy_playout_delay(line.message()) {
+            return;
+        }
+        if matches_suppress_patterns(line.message(), &self.suppress_patterns)
+            || matches_suppress_patterns(line.filename(), &self.suppress_patterns)
+        {
             return;
         }
         let Ok(text) = line.default_log_line() else {
@@ -86,8 +115,13 @@ impl LogSinkHandler for SuppressDummyAudioLog {
 ///
 /// `min_severity` には `set_min_severity` / `set_debug_severity` へ渡すのと同じ値を
 /// 渡すこと。片方だけ変えると、`--log-level` の指定と sink の再出力の絞り込みがずれる。
-pub(crate) fn build_sink(min_severity: Severity) -> LogSink {
-    LogSink::new_with_handler(Box::new(SuppressDummyAudioLog { min_severity }))
+/// `suppress_patterns` は `--log-suppress` / JSONC `"log-suppress"` の値で、空なら
+/// dummy ADM の組み込み抑制だけが有効になる。
+pub(crate) fn build_sink(min_severity: Severity, suppress_patterns: &[String]) -> LogSink {
+    LogSink::new_with_handler(Box::new(SuppressingLogHandler {
+        min_severity,
+        suppress_patterns: suppress_patterns.to_vec(),
+    }))
 }
 
 #[cfg(test)]
@@ -99,11 +133,11 @@ mod tests {
     fn suppresses_dummy_playout_delay_message() {
         // 実際は末尾に改行付きで届くため、改行あり / なしの両方で一致すること
         assert!(
-            is_suppressed("failed to retrieve the playout delay\n"),
+            is_dummy_playout_delay("failed to retrieve the playout delay\n"),
             "末尾改行付きの dummy ADM のメッセージは抑制対象であるべき"
         );
         assert!(
-            is_suppressed("failed to retrieve the playout delay"),
+            is_dummy_playout_delay("failed to retrieve the playout delay"),
             "末尾改行なしでも抑制対象であるべき"
         );
     }
@@ -112,16 +146,75 @@ mod tests {
     #[test]
     fn keeps_other_messages() {
         assert!(
-            !is_suppressed("failed to retrieve the playout delay from the real device\n"),
+            !is_dummy_playout_delay("failed to retrieve the playout delay from the real device\n"),
             "前方一致で別のメッセージを巻き込んではならない"
         );
         assert!(
-            !is_suppressed("some other error\n"),
+            !is_dummy_playout_delay("some other error\n"),
             "無関係なメッセージは抑制対象ではない"
         );
         assert!(
-            !is_suppressed("failed to retrieve the playout delay: retry\n"),
+            !is_dummy_playout_delay("failed to retrieve the playout delay: retry\n"),
             "後方一致で別のメッセージを巻き込んではならない"
+        );
+    }
+
+    /// `--log-suppress` の指定がメッセージの部分一致で効くこと
+    #[test]
+    fn suppresses_messages_matching_patterns() {
+        let patterns = vec![
+            "Failed to lookup send time for packet".to_string(),
+            "Packet buffer fully flushed.".to_string(),
+        ];
+        assert!(
+            matches_suppress_patterns(
+                "Failed to lookup send time for packet with 1234. Send time history too small\n",
+                &patterns
+            ),
+            "メッセージの途中に含まれる指定でも抑制されるべき"
+        );
+        assert!(
+            matches_suppress_patterns("Packet buffer fully flushed.\n", &patterns),
+            "メッセージ全体の指定でも抑制されるべき"
+        );
+        assert!(
+            !matches_suppress_patterns("Packet received on SSRC: 1234\n", &patterns),
+            "指定に一致しないメッセージは抑制してはならない"
+        );
+    }
+
+    /// `--log-suppress` の指定がファイル名の部分一致でも効くこと
+    #[test]
+    fn suppresses_messages_matching_filename_pattern() {
+        // ファイル名全体を指定した場合
+        let full = vec!["transport_feedback_adapter.cc".to_string()];
+        assert!(
+            matches_suppress_patterns("transport_feedback_adapter.cc", &full),
+            "ファイル名の指定で抑制されるべき"
+        );
+        assert!(
+            !matches_suppress_patterns("packet_buffer.cc", &full),
+            "別のファイル名は抑制してはならない"
+        );
+        // ファイル名の一部を指定した場合
+        let partial = vec!["transport_feedback_adapter".to_string()];
+        assert!(
+            matches_suppress_patterns("transport_feedback_adapter.cc", &partial),
+            "ファイル名に部分一致する指定でも抑制されるべき"
+        );
+    }
+
+    /// 抑制パターンが空なら何も抑制しないこと
+    #[test]
+    fn keeps_all_messages_without_patterns() {
+        let patterns: Vec<String> = Vec::new();
+        assert!(
+            !matches_suppress_patterns("Packet buffer fully flushed.\n", &patterns),
+            "パターン未指定では何も抑制してはならない"
+        );
+        assert!(
+            !matches_suppress_patterns("packet_buffer.cc", &patterns),
+            "パターン未指定ではファイル名でも抑制してはならない"
         );
     }
 

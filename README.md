@@ -215,6 +215,8 @@ cargo run -- \
 
 `zakuro lint <FILE.jsonc>` は設定ファイルを検証し、`zakuro fmt <FILE.jsonc>` は整形します (`--check` で書き戻さず確認)。
 
+最上位の `"log-suppress"` は文字列の配列でも指定できます (`--log-suppress` の値に変換されます)。
+
 ## MOQ 版 (`zakuro-moq`)
 
 Sora の Media over QUIC 実装 (sora-moq) のリレーに対する publish 負荷試験を行います。
@@ -379,9 +381,22 @@ reconnect シナリオは「切断してすぐ再接続 → 1-5 秒のランダ�
 | `--client-cert`, `--client-key` | mTLS 設定 (PEM、両方必須) |
 | `--insecure` | TLS 証明書検証をスキップ |
 | `--log-level` | `verbose` / `info` / `warning` / `error` / `none` (デフォルト: `info`) |
+| `--log-suppress` | 抑制するログの部分文字列 (カンマ区切り、メッセージ本体または発生元ファイル名に部分一致) |
 | `--duckdb-output-dir` | DuckDB ファイルの出力ディレクトリ |
 | `--duckdb-interval` | DuckDB への統計書き込み間隔 (秒、デフォルト: 1.0) |
 | `--no-duckdb-output` | DuckDB への統計情報出力を無効化 |
+
+`--log-suppress` は指定した文字列を部分文字列として扱い、ログのメッセージ本体または
+発生元ファイル名 (`transport_feedback_adapter.cc` など) に一致した行を出力しません。
+既定では何も抑制しません。
+
+```bash
+# メッセージで指定する (カンマ区切りで複数指定できる)
+zakuro --config zakuro.jsonc --log-suppress "Failed to lookup send time for packet,Packet buffer fully flushed."
+
+# 発生元のファイル名で指定する
+zakuro --config zakuro.jsonc --log-suppress transport_feedback_adapter.cc
+```
 
 `--log-level` に `verbose` を指定できますが、libwebrtc のログ sink の min severity が
 LS_INFO 固定であるため、verbose ログは出力されません。

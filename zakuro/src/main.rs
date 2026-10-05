@@ -381,26 +381,30 @@ fn run_load_test() -> Result<()> {
 
 async fn async_main() -> Result<()> {
     // libwebrtc のログ初期化は最初のログ出力前に 1 回だけ有効。
-    // パース中の rtc_log_* より前に CLI / JSONC から --log-level を覗き見て適用する。
+    // パース中の rtc_log_* より前に CLI / JSONC から --log-level / --log-suppress を
+    // 覗き見て適用する。
     // (旧 API の log_to_debug / enable_timestamps / enable_threads は削除された)
     {
-        let early_log_level = args::peek_log_level();
+        let early_log_config = args::peek_log_config();
         let mut log_config = log::LoggingConfig::new();
-        log_config.set_min_severity(early_log_level);
-        log_config.set_debug_severity(early_log_level);
+        log_config.set_min_severity(early_log_config.level);
+        log_config.set_debug_severity(early_log_config.level);
         log_config.set_log_timestamp(true);
         log_config.set_log_thread(true);
         // stderr への直接出力は sink ではフィルタできない (libwebrtc の
         // `LogMessage::~LogMessage()` は stderr への出力と sink への配信を別経路で行う)。
         // そのため stderr への直接出力を止め、sink 側で再出力する。目的は dummy ADM が
-        // 出す無害な "failed to retrieve the playout delay" の抑制であり、詳細と制約は
-        // log_filter.rs のモジュールコメントを参照すること
+        // 出す無害な "failed to retrieve the playout delay" と `--log-suppress` で指定された
+        // ログの抑制であり、詳細と制約は log_filter.rs のモジュールコメントを参照すること
         log_config.set_log_to_stderr(false);
-        log_config.add_sink(log_filter::build_sink(early_log_level));
+        log_config.add_sink(log_filter::build_sink(
+            early_log_config.level,
+            &early_log_config.suppress,
+        ));
         let _ = log::initialize_logging(log_config);
         // 共有クレート (zakuro-core) は log ファサードを使うため、その出力先も同じ
         // libwebrtc のログ出力へ向ける
-        log_bridge::install(log_bridge::max_level_for(early_log_level));
+        log_bridge::install(log_bridge::max_level_for(early_log_config.level));
     }
 
     let (common, instance_args_vec, config_path) = args::parse_args()?;

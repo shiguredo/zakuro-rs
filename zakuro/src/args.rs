@@ -26,6 +26,10 @@ pub(crate) struct CommonArgs {
     pub(crate) no_duckdb_output: bool,
     /// libwebrtc のデバッグログ閾値 (`--log-level`, デフォルト: Info)
     pub(crate) log_level: log::Severity,
+    /// 抑制するログの部分文字列 (`--log-suppress`、カンマ区切り)
+    ///
+    /// メッセージ本体または発生元ファイル名に部分一致した行を出力しない。
+    pub(crate) log_suppress: Vec<String>,
     /// FDK AAC 共有ライブラリのパス (`--fdk-aac-lib`、feature `fdk-aac` の Linux ビルドで
     /// MP4 の AAC 音声をデコードするときに使用)
     pub(crate) fdk_aac_lib: Option<String>,
@@ -113,6 +117,7 @@ fn is_common_key(key: &str) -> bool {
             | "duckdb-interval"
             | "no-duckdb-output"
             | "log-level"
+            | "log-suppress"
             | "fdk-aac-lib"
             | "show-video-codec-capability"
     )
@@ -503,6 +508,70 @@ fn push_kv(key: &str, value: RawJsonValue<'_, '_>, argv: &mut Vec<String>) -> Re
     Ok(())
 }
 
+/// 文字列または文字列配列をカンマ結合した 1 つの文字列にする
+///
+/// `--log-suppress` / `--sora-signaling-url` のように `split(',')` で受ける
+/// オプション用。`label` はエラーメッセージに使う設定キー名。空の配列は要素が 1 つも
+/// 無い指定ミスなのでエラーにする (空の文字列は `split(',')` の結果が空要素 1 つになり、
+/// 本パース側で弾かれる)。
+fn comma_join_string_value(value: RawJsonValue<'_, '_>, label: &str) -> Result<String> {
+    match value.kind() {
+        JsonValueKind::String => {
+            let s: String = value
+                .try_into()
+                .map_err(|e: nojson::JsonParseError| ErrorMessage::new(format!("{e}")))?;
+            if s.contains("${") {
+                return Err(ErrorMessage::new(format!(
+                    "環境変数置換 '${{...}}' は未対応です (key: '{label}')"
+                ))
+                .into());
+            }
+            Ok(s)
+        }
+        JsonValueKind::Array => {
+            let mut joined = String::new();
+            let mut first = true;
+            for element in value
+                .to_array()
+                .map_err(|e| ErrorMessage::new(format!("{label} parse error: {e}")))?
+            {
+                let s: String = match element.kind() {
+                    JsonValueKind::String => element
+                        .try_into()
+                        .map_err(|e: nojson::JsonParseError| ErrorMessage::new(format!("{e}")))?,
+                    _ => {
+                        return Err(ErrorMessage::new(format!(
+                            "{label} の要素は文字列で指定してください"
+                        ))
+                        .into());
+                    }
+                };
+                if s.contains("${") {
+                    return Err(ErrorMessage::new(format!(
+                        "環境変数置換 '${{...}}' は未対応です ({label}: '{s}')"
+                    ))
+                    .into());
+                }
+                if !first {
+                    joined.push(',');
+                }
+                joined.push_str(&s);
+                first = false;
+            }
+            if joined.is_empty() {
+                return Err(
+                    ErrorMessage::new(format!("{label} に空の配列は指定できません")).into(),
+                );
+            }
+            Ok(joined)
+        }
+        _ => Err(ErrorMessage::new(format!(
+            "{label} は文字列または文字列の配列で指定してください"
+        ))
+        .into()),
+    }
+}
+
 /// `sora` キー配下のオブジェクトを `--sora-{subkey}` 群に展開する
 ///
 /// `sora.signaling-url` が配列の場合のみカンマ結合して 1 引数に詰める
@@ -525,42 +594,9 @@ fn flatten_sora_object(
             .map_err(|e: nojson::JsonParseError| ErrorMessage::new(format!("{e}")))?;
 
         if key == "signaling-url" && value.kind() == JsonValueKind::Array {
-            // 配列を Comma 結合して 1 引数で渡す
-            let mut joined = String::new();
-            let mut first = true;
-            for elem in value
-                .to_array()
-                .map_err(|e| ErrorMessage::new(format!("sora.signaling-url parse error: {e}")))?
-            {
-                let url: String = match elem.kind() {
-                    JsonValueKind::String => elem
-                        .try_into()
-                        .map_err(|e: nojson::JsonParseError| ErrorMessage::new(format!("{e}")))?,
-                    _ => {
-                        return Err(ErrorMessage::new(
-                            "sora.signaling-url の要素は文字列で指定してください",
-                        )
-                        .into());
-                    }
-                };
-                if url.contains("${") {
-                    return Err(ErrorMessage::new(format!(
-                        "環境変数置換 '${{...}}' は未対応です (sora.signaling-url: '{url}')"
-                    ))
-                    .into());
-                }
-                if !first {
-                    joined.push(',');
-                }
-                joined.push_str(&url);
-                first = false;
-            }
+            // 配列をカンマ結合して 1 引数で渡す
+            let joined = comma_join_string_value(value, "sora.signaling-url")?;
             argv.push("--sora-signaling-url".to_string());
-            if joined.is_empty() {
-                return Err(
-                    ErrorMessage::new("sora.signaling-url に空の配列は指定できません").into(),
-                );
-            }
             argv.push(joined);
         } else {
             push_kv(&format!("sora-{key}"), value, argv)?;
@@ -650,6 +686,11 @@ fn parse_jsonc_config(content: &str) -> Result<JsoncConfig> {
 
         if key == "instances" {
             instances_value = Some(value);
+        } else if key == "log-suppress" {
+            // 配列はカンマ結合して 1 引数にする (`--log-suppress` は `split(',')` 仕様)
+            let joined = comma_join_string_value(value, "log-suppress")?;
+            common_argv.push("--log-suppress".to_string());
+            common_argv.push(joined);
         } else if is_common_key(&key) {
             push_kv(&key, value, &mut common_argv)?;
         } else if is_unsupported_key(&key) {
@@ -999,6 +1040,15 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
         .present_and_then(|o| parse_log_level_str(o.value()))?
         .unwrap_or(log::Severity::Info);
 
+    // --log-suppress は抑制するログの部分文字列 (カンマ区切り)。
+    // メッセージ本体または発生元ファイル名に部分一致した行を出力しない
+    let log_suppress: Vec<String> = noargs::opt("log-suppress")
+        .doc("Log substrings to suppress (comma separated, matched against the message or the source file name)")
+        .example("Failed to lookup send time for packet")
+        .take(&mut args)
+        .present_and_then(|o| parse_log_suppress_str(o.value()))?
+        .unwrap_or_default();
+
     // --fdk-aac-lib は値付きオプション (--openh264 と同様にファイル存在を検証する)
     let fdk_aac_lib: Option<String> = noargs::opt("fdk-aac-lib")
         .doc("FDK AAC shared library path (required to decode AAC audio in MP4, Linux only)")
@@ -1043,6 +1093,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
                 duckdb_interval,
                 no_duckdb_output,
                 log_level,
+                log_suppress,
                 fdk_aac_lib,
             },
             help,
@@ -1077,6 +1128,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
             duckdb_interval,
             no_duckdb_output,
             log_level,
+            log_suppress,
             fdk_aac_lib,
         },
         help,
@@ -1789,24 +1841,43 @@ fn parse_log_level_str(value: &str) -> std::result::Result<log::Severity, &'stat
     }
 }
 
-/// トークン列から最後に現れた `--log-level` の値を取り出す
+/// `--log-suppress` / JSONC `"log-suppress"` の値を抑制パターンの一覧に変換する
 ///
-/// 不正値・値欠落は `None` を返す (本パース側でエラーにする)。
-fn peek_log_level_from_tokens<'a, I>(tokens: I) -> Option<log::Severity>
+/// カンマ区切りで指定し、各要素の前後の空白は取り除く (`--sora-signaling-url` と同じ
+/// 規則)。空要素はあらゆるメッセージに一致してログを全消ししてしまうため、指定ミスと
+/// して弾く。
+fn parse_log_suppress_str(value: &str) -> std::result::Result<Vec<String>, &'static str> {
+    let mut patterns = Vec::new();
+    for element in value.split(',') {
+        let pattern = element.trim();
+        if pattern.is_empty() {
+            return Err("log-suppress の要素が空です (カンマ区切りで指定してください)");
+        }
+        patterns.push(pattern.to_string());
+    }
+    Ok(patterns)
+}
+
+/// トークン列から最後に現れた `--{name}` の値を取り出す
+///
+/// `--name=value` と `--name value` の両方に対応する。値欠落は `None` を返す。
+fn peek_option_value<'a, I>(tokens: I, name: &str) -> Option<String>
 where
     I: IntoIterator<Item = &'a String>,
 {
+    let key = format!("--{name}");
+    let equal_form = format!("{key}=");
     let tokens: Vec<&String> = tokens.into_iter().collect();
-    let mut found: Option<log::Severity> = None;
+    let mut found: Option<String> = None;
     let mut i = 0;
     while i < tokens.len() {
         let token = tokens[i].as_str();
-        if let Some(value) = token.strip_prefix("--log-level=") {
-            found = parse_log_level_str(value).ok();
+        if let Some(value) = token.strip_prefix(equal_form.as_str()) {
+            found = Some(value.to_string());
             i += 1;
-        } else if token == "--log-level" {
+        } else if token == key {
             if let Some(value) = tokens.get(i + 1).filter(|v| !v.starts_with("--")) {
-                found = parse_log_level_str(value).ok();
+                found = Some((*value).clone());
                 i += 2;
             } else {
                 i += 1;
@@ -1818,8 +1889,30 @@ where
     found
 }
 
-/// JSONC 最上位の `"log-level"` だけを静かに読む (ログ出力・警告なし)
-fn peek_log_level_from_jsonc(content: &str) -> Option<log::Severity> {
+/// トークン列から最後に現れた `--log-level` の値を取り出す
+///
+/// 不正値・値欠落は `None` を返す (本パース側でエラーにする)。
+fn peek_log_level_from_tokens<'a, I>(tokens: I) -> Option<log::Severity>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    peek_option_value(tokens, "log-level").and_then(|value| parse_log_level_str(&value).ok())
+}
+
+/// トークン列から最後に現れた `--log-suppress` の値を取り出す
+///
+/// 不正値・値欠落は `None` を返す (本パース側でエラーにする)。
+fn peek_log_suppress_from_tokens<'a, I>(tokens: I) -> Option<Vec<String>>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    peek_option_value(tokens, "log-suppress").and_then(|value| parse_log_suppress_str(&value).ok())
+}
+
+/// JSONC 最上位の値 (`--{name}` に渡す文字列、配列はカンマ結合) を静かに読む
+///
+/// 文字列でも文字列配列でもない値は `None` を返す (本パース側でエラーにする)。
+fn peek_jsonc_option_value(content: &str, name: &str) -> Option<String> {
     let (json, _) = RawJson::parse_jsonc(content).ok()?;
     let root = json.value();
     if root.kind() != JsonValueKind::Object {
@@ -1828,57 +1921,93 @@ fn peek_log_level_from_jsonc(content: &str) -> Option<log::Severity> {
     let members = root.to_object().ok()?;
     for (key_value, value) in members {
         let key: String = key_value.try_into().ok()?;
-        if key != "log-level" {
+        if key != name {
             continue;
         }
-        if value.kind() != JsonValueKind::String {
-            return None;
+        if value.kind() == JsonValueKind::String {
+            return value.try_into().ok();
         }
-        let s: String = value.try_into().ok()?;
-        return parse_log_level_str(&s).ok();
+        if value.kind() == JsonValueKind::Array {
+            let mut joined = String::new();
+            let mut first = true;
+            for element in value.to_array().ok()? {
+                let s: String = element.try_into().ok()?;
+                if !first {
+                    joined.push(',');
+                }
+                joined.push_str(&s);
+                first = false;
+            }
+            return Some(joined);
+        }
+        return None;
     }
     None
 }
 
-/// ログ初期化用に CLI / JSONC から `--log-level` を覗き見る
-///
-/// `initialize_logging` は最初のログ出力前に 1 回だけ有効なため、
-/// `parse_args()` 内の `rtc_log_*` より前に呼ぶ必要がある。
-/// 優先順位は本パースと同じく CLI が JSONC に勝つ。不正値は無視して `Info` に落とす
-/// (本パース側で同じ不正値をエラーにする)。
-pub(crate) fn peek_log_level() -> log::Severity {
-    let env_argv: Vec<String> = std::env::args().collect();
+/// JSONC 最上位の `"log-level"` だけを静かに読む (ログ出力・警告なし)
+fn peek_log_level_from_jsonc(content: &str) -> Option<log::Severity> {
+    peek_jsonc_option_value(content, "log-level").and_then(|value| parse_log_level_str(&value).ok())
+}
 
-    // CLI に有効な --log-level があればそれを採用 (JSONC より優先)
-    if let Some(level) = peek_log_level_from_tokens(env_argv.iter().skip(1)) {
-        return level;
-    }
+/// JSONC 最上位の `"log-suppress"` だけを静かに読む (ログ出力・警告なし)
+fn peek_log_suppress_from_jsonc(content: &str) -> Option<Vec<String>> {
+    peek_jsonc_option_value(content, "log-suppress")
+        .and_then(|value| parse_log_suppress_str(&value).ok())
+}
 
-    // CLI に無ければ --config の JSONC 最上位を静かに読む
-    let mut config_path: Option<&str> = None;
+/// ログ初期化用に CLI / JSONC から読み取ったログ設定
+pub(crate) struct PeekedLogConfig {
+    /// libwebrtc のデバッグログ閾値 (`--log-level`)
+    pub(crate) level: log::Severity,
+    /// 抑制するログの部分文字列 (`--log-suppress`)
+    pub(crate) suppress: Vec<String>,
+}
+
+/// `--config` に指定された JSONC ファイルのパスを取り出す
+fn peek_config_path(env_argv: &[String]) -> Option<&str> {
     let mut i = 1;
     while i < env_argv.len() {
         let token = env_argv[i].as_str();
         if token == "--config" {
-            if let Some(value) = env_argv.get(i + 1) {
-                config_path = Some(value.as_str());
-            }
-            break;
+            return env_argv.get(i + 1).map(|value| value.as_str());
         }
         if let Some(value) = token.strip_prefix("--config=") {
-            config_path = Some(value);
-            break;
+            return Some(value);
         }
         i += 1;
     }
-    if let Some(path) = config_path
-        && let Ok(content) = std::fs::read_to_string(path)
-        && let Some(level) = peek_log_level_from_jsonc(&content)
-    {
-        return level;
-    }
+    None
+}
 
-    log::Severity::Info
+/// ログ初期化用に CLI / JSONC からログ設定を覗き見る
+///
+/// `initialize_logging` は最初のログ出力前に 1 回だけ有効なため、
+/// `parse_args()` 内の `rtc_log_*` より前に呼ぶ必要がある。
+/// 優先順位は本パースと同じく CLI が JSONC に勝つ。不正値は無視して既定値に落とす
+/// (本パース側で同じ不正値をエラーにする)。
+pub(crate) fn peek_log_config() -> PeekedLogConfig {
+    let env_argv: Vec<String> = std::env::args().collect();
+    let cli_level = peek_log_level_from_tokens(env_argv.iter().skip(1));
+    let cli_suppress = peek_log_suppress_from_tokens(env_argv.iter().skip(1));
+
+    // CLI にどちらも指定が無ければ --config の JSONC 最上位を静かに読む
+    let (jsonc_level, jsonc_suppress) = if cli_level.is_some() && cli_suppress.is_some() {
+        (None, None)
+    } else {
+        match peek_config_path(&env_argv).and_then(|path| std::fs::read_to_string(path).ok()) {
+            Some(content) => (
+                peek_log_level_from_jsonc(&content),
+                peek_log_suppress_from_jsonc(&content),
+            ),
+            None => (None, None),
+        }
+    };
+
+    PeekedLogConfig {
+        level: cli_level.or(jsonc_level).unwrap_or(log::Severity::Info),
+        suppress: cli_suppress.or(jsonc_suppress).unwrap_or_default(),
+    }
 }
 
 /// プロセス入口の引数パース
@@ -2898,6 +3027,236 @@ mod tests {
         assert!(
             msg.contains("log-level"),
             "エラーメッセージに 'log-level' が含まれていない: {msg}"
+        );
+    }
+
+    // ---- ログ抑制パターン (--log-suppress) ----
+
+    /// `--log-suppress` はカンマ区切りで、要素の前後の空白を取り除くこと
+    #[test]
+    fn parse_log_suppress_str_splits_and_trims() {
+        let patterns =
+            parse_log_suppress_str(" Failed to lookup send time , Packet buffer fully flushed. ")
+                .expect("カンマ区切りの抑制パターンを受理すべき");
+        assert_eq!(
+            patterns,
+            vec![
+                "Failed to lookup send time".to_string(),
+                "Packet buffer fully flushed.".to_string(),
+            ],
+            "前後の空白を取り除いた 2 件になるべき"
+        );
+    }
+
+    /// `--log-suppress` の空要素は指定ミスとして拒否すること
+    #[test]
+    fn parse_log_suppress_str_rejects_empty_element() {
+        // 空文字列はあらゆるメッセージに一致し、ログを全消ししてしまう
+        assert!(parse_log_suppress_str("").is_err(), "空の指定は拒否すべき");
+        assert!(
+            parse_log_suppress_str("foo,").is_err(),
+            "末尾カンマの空要素は拒否すべき"
+        );
+        assert!(
+            parse_log_suppress_str(",foo").is_err(),
+            "先頭カンマの空要素は拒否すべき"
+        );
+        assert!(
+            parse_log_suppress_str("foo, ,bar").is_err(),
+            "空白のみの要素は拒否すべき"
+        );
+    }
+
+    /// トークン列から最後の `--log-suppress` を採用し、`--log-suppress=` 形式も読めること
+    #[test]
+    fn peek_log_suppress_from_tokens_reads_last_value() {
+        let tokens = vec![
+            "--log-suppress".to_string(),
+            "first".to_string(),
+            "--log-suppress=second,third".to_string(),
+        ];
+        assert_eq!(
+            peek_log_suppress_from_tokens(&tokens),
+            Some(vec!["second".to_string(), "third".to_string()]),
+            "最後の --log-suppress を採用すべき"
+        );
+    }
+
+    /// 不正な `--log-suppress` は peek では無視すること
+    #[test]
+    fn peek_log_suppress_from_tokens_ignores_invalid_value() {
+        let empty = vec!["--log-suppress".to_string(), "".to_string()];
+        assert_eq!(
+            peek_log_suppress_from_tokens(&empty),
+            None,
+            "空要素のみの指定は peek では None になるべき"
+        );
+        let missing = vec!["--log-suppress".to_string()];
+        assert_eq!(
+            peek_log_suppress_from_tokens(&missing),
+            None,
+            "値欠落は peek では None になるべき"
+        );
+    }
+
+    /// JSONC の文字列 / 配列を抑制パターンとして静かに読めること
+    #[test]
+    fn peek_log_suppress_from_jsonc_reads_string_and_array() {
+        let string_form = r#"{ "log-suppress": "foo,bar" }"#;
+        assert_eq!(
+            peek_log_suppress_from_jsonc(string_form),
+            Some(vec!["foo".to_string(), "bar".to_string()]),
+            "JSONC の文字列をカンマで分割すべき"
+        );
+        let array_form = r#"{ "log-suppress": ["foo", "bar"] }"#;
+        assert_eq!(
+            peek_log_suppress_from_jsonc(array_form),
+            Some(vec!["foo".to_string(), "bar".to_string()]),
+            "JSONC の配列をカンマ結合して分割すべき"
+        );
+    }
+
+    /// 文字列でも配列でもない `"log-suppress"` は peek では無視すること
+    #[test]
+    fn peek_log_suppress_from_jsonc_ignores_non_string() {
+        let content = r#"{ "log-suppress": 2 }"#;
+        assert_eq!(
+            peek_log_suppress_from_jsonc(content),
+            None,
+            "数値の log-suppress は peek では None になるべき"
+        );
+    }
+
+    /// JSONC 最上位の `"log-suppress"` 配列がカンマ結合で common_argv に載ること
+    #[test]
+    fn jsonc_log_suppress_array_is_comma_joined() {
+        let content = r#"{
+            "log-suppress": ["Failed to lookup send time", "Packet buffer fully flushed."],
+            "sora": {
+                "signaling-url": "wss://example.com/",
+                "channel-id": "ch",
+                "role": "sendonly"
+            }
+        }"#;
+        let cfg = parse_jsonc_config(content).expect("有効な JSONC のパースに失敗してはならない");
+        assert_eq!(
+            cfg.common_argv,
+            vec![
+                "--log-suppress".to_string(),
+                "Failed to lookup send time,Packet buffer fully flushed.".to_string(),
+            ],
+            "common_argv に log-suppress がカンマ結合で載っていない"
+        );
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            cfg.common_argv,
+            Vec::new(),
+            cfg.instance_argvs,
+            Vec::new(),
+        )
+        .expect("JSONC 由来の log-suppress のパースに失敗してはならない");
+        assert_eq!(
+            common.log_suppress,
+            vec![
+                "Failed to lookup send time".to_string(),
+                "Packet buffer fully flushed.".to_string(),
+            ],
+            "JSONC の log-suppress が抑制パターンに反映されていない"
+        );
+    }
+
+    /// JSONC の `"log-suppress"` が配列の要素に文字列以外を許さないこと
+    #[test]
+    fn jsonc_log_suppress_rejects_non_string_element() {
+        let content = r#"{ "log-suppress": ["foo", 2] }"#;
+        let err = parse_jsonc_config(content).expect_err("数値要素を許容してはならない");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("log-suppress の要素は文字列で指定してください"),
+            "要素の型エラーメッセージが一致しない: {msg}"
+        );
+    }
+
+    /// instances[i] 内の `"log-suppress"` は common キー禁止エラーになること
+    #[test]
+    fn jsonc_rejects_log_suppress_inside_instance() {
+        let content = r#"{
+            "instances": [
+                {
+                    "log-suppress": ["foo"],
+                    "sora": {
+                        "signaling-url": "wss://a/",
+                        "channel-id": "c",
+                        "role": "sendonly"
+                    }
+                }
+            ]
+        }"#;
+        let err = parse_jsonc_config(content)
+            .expect_err("CommonArgs キーが instances 内にあるのを許容してはならない");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("log-suppress"),
+            "エラーメッセージに 'log-suppress' が含まれていない: {msg}"
+        );
+    }
+
+    /// CLI の `--log-suppress` が CommonArgs に載ること
+    #[test]
+    fn parse_args_from_argv_reads_log_suppress() {
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            Vec::new(),
+            vec![
+                "--log-suppress".to_string(),
+                "transport_feedback_adapter.cc,Packet buffer fully flushed.".to_string(),
+            ],
+            vec![vec![
+                "--sora-signaling-url".to_string(),
+                "wss://example.com/".to_string(),
+                "--sora-channel-id".to_string(),
+                "ch".to_string(),
+                "--sora-role".to_string(),
+                "sendonly".to_string(),
+            ]],
+            Vec::new(),
+        )
+        .expect("CLI の --log-suppress のパースに失敗してはならない");
+        assert_eq!(
+            common.log_suppress,
+            vec![
+                "transport_feedback_adapter.cc".to_string(),
+                "Packet buffer fully flushed.".to_string(),
+            ],
+            "CLI の log-suppress が抑制パターンに反映されていない"
+        );
+    }
+
+    /// `is_common_key` に log-suppress が含まれること
+    #[test]
+    fn is_common_key_includes_log_suppress() {
+        assert!(is_common_key("log-suppress"));
+    }
+
+    /// `--log-suppress` を CLI から common 側へ振り分けること
+    #[test]
+    fn split_cli_argv_routes_log_suppress_to_common() {
+        let cli: Vec<String> = vec![
+            "--log-suppress".into(),
+            "foo".into(),
+            "--vcs".into(),
+            "5".into(),
+        ];
+        let (common, instance) = split_cli_argv(cli).expect("正常な CLI は分割できること");
+        assert!(
+            common
+                .windows(2)
+                .any(|w| w[0] == "--log-suppress" && w[1] == "foo"),
+            "common 側に --log-suppress が振り分けられていない"
+        );
+        assert!(
+            instance.windows(2).any(|w| w[0] == "--vcs" && w[1] == "5"),
+            "instance 側に --vcs が振り分けられていない"
         );
     }
 
