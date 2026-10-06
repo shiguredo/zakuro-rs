@@ -1,7 +1,7 @@
 # moqt-rs の rev を f36009d へ更新する
 
 - Created: 2026-10-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-06
 - Branch: feature/update-moqt-rs-f36009d
 - Polished: {YYYY-MM-DD}
 
@@ -38,3 +38,15 @@
 - `cargo clippy --locked --workspace --all-targets --features fdk-aac -- -D warnings` が通ること
 - `cargo test --locked --workspace --features fdk-aac` が通ること
 - `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+- `zakuro-moq/Cargo.toml` の rev を `f36009d45bfa373b693642630b8f355b4d0aaed4` へ更新し、
+  `cargo update -p shiguredo_moqt` で `Cargo.lock` を再生成した
+- `6c3ab63` と `f36009d` の差に `zakuro-moq` が使う API の変更はなく、コードの変更は
+  不要だった。新設された `TerminationReason::GoawayTimeout` は `zakuro-moq` が判定に
+  使っておらず、`SessionEvent` は未対応 variant を無視する形で扱っている
+- 検証: `cargo check -p zakuro-moq --all-targets` /
+  `cargo clippy --locked --workspace --all-targets --features fdk-aac -- -D warnings` /
+  `cargo test --locked --workspace --features fdk-aac` / `cargo fmt --all -- --check`
+  が exit 0
