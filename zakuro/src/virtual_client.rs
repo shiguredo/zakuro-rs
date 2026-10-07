@@ -14,7 +14,7 @@ use tokio_stream::{StreamExt, wrappers::IntervalStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::connection_lifecycle::{
-    ConnectionLifecycle, LifecycleEnd, OUTCOME_GRACE, OutcomeSettings,
+    ConnectionLifecycle, ConnectionOutcome, LifecycleEnd, OUTCOME_GRACE, OutcomeSettings,
 };
 use crate::data_channel::MessageChannel;
 use crate::duckdb_stats::{
@@ -117,7 +117,7 @@ pub(crate) async fn run(
         };
 
         let record_lifecycle = |end: LifecycleEnd| {
-            write_connection_lifecycle(
+            let Some(result) = write_connection_lifecycle(
                 &config.duckdb_client,
                 &lifecycle,
                 &ids,
@@ -127,7 +127,18 @@ pub(crate) async fn run(
                 config.role.as_sora_role(),
                 &outcome_settings,
                 end,
-            );
+            ) else {
+                return;
+            };
+            // 集計側へ合否を渡す。統計と同じく欠落しうる前提のため待たない。
+            let _ = stats_tx.try_send(StatsEvent::ConnectionEnded {
+                instance_id,
+                vc_id,
+                outcome: result.outcome.as_str(),
+                failure_reason: result.outcome.failure_reason(),
+                stalled: result.stalled,
+                connect_duration: result.connect_duration,
+            });
         };
 
         // WebRTC の接続確立 (PeerConnection が Connected) を待つための通知経路。
@@ -599,11 +610,22 @@ impl VirtualClientEventHandler {
     }
 }
 
-/// 接続 1 本のライフサイクルを DuckDB へ記録する
+/// 判定した接続 1 本の結果
+struct ConnectionResult {
+    /// 合否の判定結果
+    outcome: ConnectionOutcome,
+    /// メディアが止まった状態か
+    stalled: bool,
+    /// 接続の試行から確立までに要した時間 (確立しなかった場合は None)
+    connect_duration: Option<Duration>,
+}
+
+/// 接続 1 本のライフサイクルを DuckDB へ記録し、判定結果を返す
 ///
 /// 接続を終えるすべての経路から呼び、1 接続につき 1 行を残す。構築に失敗した接続は
 /// connection_id / session_id が無いまま 1 行を書く (試行そのものを記録に残す)。
 /// 統計の書き込みと同じく `try_send` を使うため、チャネルが満杯のときは行が欠落しうる。
+/// ライフサイクルのロックが poison されている場合は記録せず None を返す。
 #[expect(clippy::too_many_arguments)]
 fn write_connection_lifecycle(
     client: &DuckDBClient,
@@ -615,7 +637,7 @@ fn write_connection_lifecycle(
     role: &str,
     outcome_settings: &OutcomeSettings,
     end: LifecycleEnd,
-) {
+) -> Option<ConnectionResult> {
     let now = SystemTime::now();
     let Ok(mut guard) = lifecycle.lock() else {
         rtc_log_warning!(
@@ -623,7 +645,7 @@ fn write_connection_lifecycle(
             instance_id,
             vc_id,
         );
-        return;
+        return None;
     };
     guard.mark_disconnected(end, now);
     let snapshot = guard.clone();
@@ -649,13 +671,20 @@ fn write_connection_lifecycle(
 
     // 記録した材料から接続の合否を判定する
     let outcome = snapshot.judge(outcome_settings);
+    let stalled = snapshot.is_stalled();
+    let connect_duration = snapshot.webrtc_connected_at.and_then(|connected_at| {
+        connected_at
+            .duration_since(snapshot.attempt_started_at)
+            .ok()
+    });
     rtc_log_info!(
-        "[i{}/vc-{}] connection lifecycle: outcome={} reason={} stalled={}",
+        "[i{}/vc-{}] connection lifecycle: outcome={} reason={} stalled={} connect={:?}",
         instance_id,
         vc_id,
         outcome.as_str(),
         outcome.failure_reason().unwrap_or("-"),
-        snapshot.is_stalled(),
+        stalled,
+        connect_duration,
     );
 
     client.try_send(WriteCommand::InsertConnectionLifecycle(Box::new(
@@ -687,9 +716,14 @@ fn write_connection_lifecycle(
             end_reason: end.as_str(),
             outcome: outcome.as_str(),
             failure_reason: outcome.failure_reason(),
-            stalled: snapshot.is_stalled(),
+            stalled,
         },
     )));
+    Some(ConnectionResult {
+        outcome,
+        stalled,
+        connect_duration,
+    })
 }
 
 /// 映像が有効か

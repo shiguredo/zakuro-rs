@@ -24,6 +24,8 @@ pub(crate) struct CommonArgs {
     pub(crate) duckdb_interval: f64,
     /// DuckDB 出力を無効化する (`--no-duckdb-output`)
     pub(crate) no_duckdb_output: bool,
+    /// 試験全体の集計結果を書く JSON ファイルのパス (`--summary-json`)
+    pub(crate) summary_json: Option<String>,
     /// libwebrtc のデバッグログ閾値 (`--log-level`, デフォルト: Info)
     pub(crate) log_level: log::Severity,
     /// 抑制するログの部分文字列 (`--log-suppress`、カンマ区切り)
@@ -116,6 +118,7 @@ fn is_common_key(key: &str) -> bool {
             | "duckdb-output-dir"
             | "duckdb-interval"
             | "no-duckdb-output"
+            | "summary-json"
             | "log-level"
             | "log-suppress"
             | "fdk-aac-lib"
@@ -1015,6 +1018,24 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
         })?
         .unwrap_or_else(|| ".".to_string());
 
+    // --summary-json は値付きオプション
+    // 出力先のディレクトリが無い場合は起動時にエラーにする (実行し終えてから気づくのを避ける)
+    let summary_json: Option<String> = noargs::opt("summary-json")
+        .doc("Write the run summary as JSON to this file")
+        .example("summary.json")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let path = o.value().to_string();
+            if !help_mode
+                && let Some(parent) = std::path::Path::new(&path).parent()
+                && !parent.as_os_str().is_empty()
+                && !parent.is_dir()
+            {
+                return Err("summary-json: directory not found");
+            }
+            Ok(path)
+        })?;
+
     // --duckdb-interval は 0.1 以上 86400 以下の inclusive 範囲
     let mut interval_presented = false;
     let duckdb_interval: f64 = noargs::opt("duckdb-interval")
@@ -1092,6 +1113,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
                 duckdb_output_dir,
                 duckdb_interval,
                 no_duckdb_output,
+                summary_json,
                 log_level,
                 log_suppress,
                 fdk_aac_lib,
@@ -1127,6 +1149,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
             duckdb_output_dir,
             duckdb_interval,
             no_duckdb_output,
+            summary_json,
             log_level,
             log_suppress,
             fdk_aac_lib,
@@ -3890,6 +3913,62 @@ mod tests {
         assert!(
             err.to_string().contains("--sora-channel-id"),
             "エラーメッセージが期待と異なる: {err}"
+        );
+    }
+
+    // ---- サマリ出力のテスト ----
+
+    #[test]
+    fn summary_json_defaults_to_none() {
+        // --summary-json 未指定時はファイルを書かない (None)
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            Vec::new(),
+            Vec::new(),
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect("有効な argv のパースに失敗してはならない");
+        assert_eq!(common.summary_json, None, "未指定時は None になるべき");
+    }
+
+    #[test]
+    fn summary_json_parses() {
+        let dir = tempfile::TempDir::new().expect("一時ディレクトリの作成に失敗");
+        let path = dir.path().join("summary.json");
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            Vec::new(),
+            vec!["--summary-json".into(), path.to_string_lossy().to_string()],
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect("有効な argv のパースに失敗してはならない");
+        assert_eq!(
+            common.summary_json.as_deref(),
+            Some(path.to_string_lossy().as_ref()),
+            "指定したパスがそのまま入るべき"
+        );
+    }
+
+    #[test]
+    fn summary_json_rejects_missing_directory() {
+        // 出力先のディレクトリが存在しない場合は起動時にエラーにする
+        let err = parse_args_from_argv(
+            "zakuro",
+            Vec::new(),
+            vec![
+                "--summary-json".into(),
+                "/nonexistent-dir/summary.json".into(),
+            ],
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect_err("存在しないディレクトリを許容してはならない");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("summary-json"),
+            "エラーメッセージに summary-json が含まれていない: {msg}"
         );
     }
 }

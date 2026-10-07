@@ -385,6 +385,7 @@ reconnect シナリオは「切断してすぐ再接続 → 1-5 秒のランダ�
 | `--duckdb-output-dir` | DuckDB ファイルの出力ディレクトリ |
 | `--duckdb-interval` | DuckDB への統計書き込み間隔 (秒、デフォルト: 1.0) |
 | `--no-duckdb-output` | DuckDB への統計情報出力を無効化 |
+| `--summary-json` | 試験全体の集計結果を書く JSON ファイルのパス |
 
 `--log-suppress` は指定した文字列を部分文字列として扱い、ログのメッセージ本体または
 発生元ファイル名 (`transport_feedback_adapter.cc` など) に一致した行を出力しません。
@@ -402,6 +403,43 @@ zakuro --config zakuro.jsonc --log-suppress transport_feedback_adapter.cc
 LS_INFO 固定であるため、verbose ログは出力されません。
 
 すべてのオプションは `--help` でも確認できます。
+
+## 試験結果の集計
+
+プロセスが正常終了すると、接続単位の合否を集計した結果をログへ 1 回出力します。
+`--summary-json` を指定すると、同じ内容が JSON ファイルに書かれます。
+
+集計する内容は次のとおりです。
+
+- 成功 / 失敗 / 判定不能の接続数
+- 成功接続率 (判定不能の接続は分母から外す)
+- 失敗理由ごとの接続数
+- メディアが止まった接続数
+- 接続確立までの所要時間の p50 / p95 / p99
+
+接続の合否は、確立とメディアの観測から判定します。有効な種別のメディアが流れていない
+接続は失敗とし、統計サンプルが取れなかった接続と確立直後に終了した接続は判定不能として
+成功接続率の分母から外します。判定に使う観測の詳細は DuckDB の統計出力 (`connection_lifecycle`
+テーブル) と同じで、`docs/DUCKDB.md` にまとめています。
+
+```console
+$ ./target/release/zakuro --summary-json summary.json ...
+```
+
+```json
+{
+  "success": 98,
+  "failure": 2,
+  "unjudged": 0,
+  "judged": 100,
+  "success_rate": 0.980000,
+  "stalled": 1,
+  "failure_reasons": [
+    {"reason": "no-media-sent", "count": 2}
+  ],
+  "connect_time_ms": {"p50": 120.500, "p95": 300.250, "p99": 500.000}
+}
+```
 
 ## HTTP API
 

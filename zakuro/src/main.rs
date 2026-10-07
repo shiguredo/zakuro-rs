@@ -16,6 +16,7 @@ mod mp4_audio;
 mod nop_video_decoder;
 mod openh264_video_codec;
 mod scenario;
+mod summary;
 mod video_codec_capability;
 mod video_device_capturer;
 mod virtual_client;
@@ -630,6 +631,10 @@ async fn async_main() -> Result<()> {
         }
     }
 
+    // 全インスタンスの終了後、集約タスクが残りのイベントを処理し終えるのを待つ。
+    // ここで受け取った集計結果が試験全体の合否になる。
+    let summary = stats.finalize().await;
+
     // 経路 (2) で reporter (定期統計出力) を停止する。経路 (1) では既に cancel 済みだが
     // token.cancel() は idempotent なため二度呼び出しても問題ない。
     token.cancel();
@@ -647,6 +652,15 @@ async fn async_main() -> Result<()> {
     }
     drop(duckdb_client);
     duckdb_writer.join().await?;
+
+    // 試験全体の集計結果を出し、指定があれば JSON ファイルへ書く
+    summary::log_summary(&summary);
+    if let Some(path) = &common.summary_json {
+        match summary::write_summary_json(std::path::Path::new(path), &summary) {
+            Ok(()) => rtc_log_info!("[summary] wrote {}", path),
+            Err(e) => rtc_log_warning!("[summary] failed to write {}: {}", path, e),
+        }
+    }
 
     rtc_log_info!("zakuro: all Zakuro instances finished");
 

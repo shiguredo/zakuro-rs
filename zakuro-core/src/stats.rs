@@ -44,6 +44,23 @@ pub enum StatsEvent {
         /// 仮想クライアント番号
         vc_id: u32,
     },
+    /// 接続が終了し、合否が確定した
+    ///
+    /// 接続単位の合否を判定する実装 (Sora) だけが送る。
+    ConnectionEnded {
+        /// インスタンス番号
+        instance_id: u32,
+        /// 仮想クライアント番号
+        vc_id: u32,
+        /// 判定結果 (`success` / `failure` / `unjudged`)
+        outcome: &'static str,
+        /// 失敗理由 (成功と判定不能の場合は None)
+        failure_reason: Option<&'static str>,
+        /// メディアが止まった状態か
+        stalled: bool,
+        /// 接続の試行から確立までに要した時間
+        connect_duration: Option<Duration>,
+    },
 }
 
 /// 集計時点の仮想クライアントの状態
@@ -59,6 +76,14 @@ pub struct StatsSnapshot {
     pub retrying: u32,
     /// 終了した仮想クライアント数
     pub stopped: u32,
+    /// 成功した接続数
+    pub success: u32,
+    /// 失敗した接続数
+    pub failure: u32,
+    /// 判定できなかった接続数
+    pub unjudged: u32,
+    /// メディアが止まった接続数
+    pub stalled: u32,
 }
 
 impl StatsSnapshot {
@@ -69,6 +94,10 @@ impl StatsSnapshot {
             connected: 0,
             retrying: 0,
             stopped: 0,
+            success: 0,
+            failure: 0,
+            unjudged: 0,
+            stalled: 0,
         }
     }
 
@@ -107,8 +136,155 @@ impl StatsSnapshot {
                     self.retrying -= 1;
                 }
             }
+            StatsEvent::ConnectionEnded {
+                outcome, stalled, ..
+            } => {
+                match outcome {
+                    "success" => self.success += 1,
+                    "failure" => self.failure += 1,
+                    _ => self.unjudged += 1,
+                }
+                if stalled {
+                    self.stalled += 1;
+                }
+            }
         }
     }
+}
+
+/// 試験全体の集計結果
+///
+/// 集約タスクが終了したときに [`StatsCollector::finalize`] が返す。
+#[derive(Debug, Clone, Default)]
+pub struct StatsSummary {
+    /// 成功した接続数
+    pub success: u32,
+    /// 失敗した接続数
+    pub failure: u32,
+    /// 判定できなかった接続数
+    pub unjudged: u32,
+    /// メディアが止まった接続数
+    pub stalled: u32,
+    /// 失敗理由ごとの接続数 (接続数の多い順)
+    pub failure_reasons: Vec<(&'static str, u32)>,
+    /// 確立までの所要時間の p50 / p95 / p99 (ミリ秒)
+    pub connect_time_p50_ms: Option<f64>,
+    pub connect_time_p95_ms: Option<f64>,
+    pub connect_time_p99_ms: Option<f64>,
+}
+
+impl StatsSummary {
+    /// 合否を判定した接続数 (判定不能を除く)
+    pub fn judged(&self) -> u32 {
+        self.success + self.failure
+    }
+
+    /// 成功した接続の割合
+    ///
+    /// 判定できなかった接続は分母から外す。判定した接続が 1 本も無い場合は None。
+    pub fn success_rate(&self) -> Option<f64> {
+        let judged = self.judged();
+        if judged == 0 {
+            return None;
+        }
+        Some(f64::from(self.success) / f64::from(judged))
+    }
+}
+
+/// 合否の集計
+///
+/// 毎イベント複製される [`StatsSnapshot`] とは別に、集約タスクの中だけで持つ。
+#[derive(Debug)]
+struct OutcomeTotals {
+    /// 判定結果ごとの接続数
+    success: u32,
+    failure: u32,
+    unjudged: u32,
+    /// メディアが止まった接続数
+    stalled: u32,
+    /// 失敗理由ごとの接続数
+    failure_reasons: Vec<(&'static str, u32)>,
+    /// 確立までの所要時間 (ミリ秒)。パーセンタイルの算出に使う
+    connect_times_ms: Vec<f64>,
+}
+
+impl OutcomeTotals {
+    fn new() -> Self {
+        Self {
+            success: 0,
+            failure: 0,
+            unjudged: 0,
+            stalled: 0,
+            failure_reasons: Vec::new(),
+            connect_times_ms: Vec::new(),
+        }
+    }
+
+    fn apply(&mut self, event: StatsEvent) {
+        let StatsEvent::ConnectionEnded {
+            outcome,
+            failure_reason,
+            stalled,
+            connect_duration,
+            ..
+        } = event
+        else {
+            return;
+        };
+        match outcome {
+            "success" => self.success += 1,
+            "failure" => self.failure += 1,
+            _ => self.unjudged += 1,
+        }
+        if stalled {
+            self.stalled += 1;
+        }
+        if let Some(reason) = failure_reason {
+            match self
+                .failure_reasons
+                .iter_mut()
+                .find(|(name, _)| *name == reason)
+            {
+                Some((_, count)) => *count += 1,
+                None => self.failure_reasons.push((reason, 1)),
+            }
+        }
+        if let Some(duration) = connect_duration {
+            self.connect_times_ms.push(duration.as_secs_f64() * 1000.0);
+        }
+    }
+
+    /// 集計結果をまとめる
+    fn summary(&self) -> StatsSummary {
+        let mut failure_reasons = self.failure_reasons.clone();
+        // 接続数の多い順に並べる (同数の場合は理由名の昇順で安定させる)
+        failure_reasons.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        let mut connect_times_ms = self.connect_times_ms.clone();
+        connect_times_ms.sort_by(f64::total_cmp);
+        StatsSummary {
+            success: self.success,
+            failure: self.failure,
+            unjudged: self.unjudged,
+            stalled: self.stalled,
+            failure_reasons,
+            connect_time_p50_ms: percentile(&connect_times_ms, 0.50),
+            connect_time_p95_ms: percentile(&connect_times_ms, 0.95),
+            connect_time_p99_ms: percentile(&connect_times_ms, 0.99),
+        }
+    }
+}
+
+/// 昇順に並んだ値のパーセンタイルを返す
+///
+/// 値が無い場合は None。最も近い順位の値を返す (補間しない)。
+fn percentile(sorted: &[f64], ratio: f64) -> Option<f64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    // 最も近い順位 (nearest rank): 順位 = ceil(割合 * 件数)、1 始まり
+    let rank = (ratio * sorted.len() as f64).ceil().max(1.0) as usize;
+    let index = (rank - 1).min(sorted.len() - 1);
+    sorted.get(index).copied()
 }
 
 /// 仮想クライアントの状態変化を集約する
@@ -118,6 +294,8 @@ impl StatsSnapshot {
 pub struct StatsCollector {
     /// 仮想クライアントが状態変化を送るチャネル
     event_tx: mpsc::Sender<StatsEvent>,
+    /// 集約タスクのハンドル (`finalize` で最終結果を受け取る)
+    aggregator: tokio::task::JoinHandle<StatsSummary>,
     /// 集約タスクが生きている間だけ保持する (`new` の戻り値で受信側を保持する)
     _snapshot_rx: watch::Receiver<StatsSnapshot>,
 }
@@ -128,7 +306,7 @@ impl StatsCollector {
         let (event_tx, event_rx) = mpsc::channel(256);
         let (snapshot_tx, snapshot_rx) = watch::channel(StatsSnapshot::initial(total, instances));
 
-        tokio::spawn(Self::aggregator(
+        let aggregator = tokio::spawn(Self::aggregator(
             event_rx,
             snapshot_tx,
             total,
@@ -139,6 +317,7 @@ impl StatsCollector {
 
         Self {
             event_tx,
+            aggregator,
             _snapshot_rx: snapshot_rx,
         }
     }
@@ -148,14 +327,37 @@ impl StatsCollector {
         self.event_tx.clone()
     }
 
+    /// 集約タスクの終了を待ち、試験全体の集計結果を返す
+    ///
+    /// 呼び出し側が持つ送信チャネルを閉じ、仮想クライアント側の送信チャネルも
+    /// すべて破棄されたあとに呼ぶこと。割り込み (キャンセル) で集約タスクが先に
+    /// 終了した場合は、その時点までの集計結果を返す。
+    pub async fn finalize(self) -> StatsSummary {
+        let Self {
+            event_tx,
+            aggregator,
+            ..
+        } = self;
+        // 送信側を閉じて、集約タスクが残りのイベントを処理し終えるのを待つ
+        drop(event_tx);
+        match aggregator.await {
+            Ok(summary) => summary,
+            Err(e) => {
+                log::warn!("[stats] aggregator task failed: {}", e);
+                StatsSummary::default()
+            }
+        }
+    }
+
     async fn aggregator(
         event_rx: mpsc::Receiver<StatsEvent>,
         snapshot_tx: watch::Sender<StatsSnapshot>,
         total: u32,
         instances: u32,
         token: CancellationToken,
-    ) {
+    ) -> StatsSummary {
         let mut snapshot = StatsSnapshot::initial(total, instances);
+        let mut totals = OutcomeTotals::new();
         let mut events = ReceiverStream::new(event_rx);
         loop {
             tokio::select! {
@@ -164,10 +366,12 @@ impl StatsCollector {
                 maybe_event = events.next() => {
                     let Some(event) = maybe_event else { break };
                     snapshot.apply(event);
+                    totals.apply(event);
                     let _ = snapshot_tx.send(snapshot.clone());
                 }
             }
         }
+        totals.summary()
     }
 
     async fn reporter(snapshot_rx: watch::Receiver<StatsSnapshot>, token: CancellationToken) {
@@ -181,15 +385,200 @@ impl StatsCollector {
                 _ = ticks.next() => {
                     let snap = snapshot_rx.borrow().clone();
                     log::info!(
-                        "[stats] instances={} total={} connected={} retrying={} stopped={}",
+                        "[stats] instances={} total={} connected={} retrying={} stopped={} \
+                         success={} failure={} unjudged={} stalled={}",
                         snap.instances,
                         snap.total,
                         snap.connected,
                         snap.retrying,
                         snap.stopped,
+                        snap.success,
+                        snap.failure,
+                        snap.unjudged,
+                        snap.stalled,
                     );
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 値が無い場合はパーセンタイルを返さないこと
+    #[test]
+    fn percentile_returns_none_for_empty_values() {
+        assert_eq!(
+            percentile(&[], 0.5),
+            None,
+            "値が 1 つも無い場合は None を返すこと"
+        );
+    }
+
+    /// 最も近い順位の値を返すこと
+    #[test]
+    fn percentile_returns_the_nearest_rank() {
+        let values: Vec<f64> = (1..=100).map(f64::from).collect();
+        assert_eq!(percentile(&values, 0.50), Some(50.0), "p50 を返すこと");
+        assert_eq!(percentile(&values, 0.95), Some(95.0), "p95 を返すこと");
+        assert_eq!(percentile(&values, 0.99), Some(99.0), "p99 を返すこと");
+        assert_eq!(
+            percentile(&values, 1.0),
+            Some(100.0),
+            "最大値は最後の要素を返すこと"
+        );
+    }
+
+    /// 判定した接続が無い場合は成功接続率を出さないこと
+    #[test]
+    fn success_rate_is_none_without_judged_connections() {
+        let summary = StatsSummary {
+            unjudged: 5,
+            ..StatsSummary::default()
+        };
+        assert_eq!(
+            summary.success_rate(),
+            None,
+            "判定不能しかない場合は成功接続率を出さないこと"
+        );
+    }
+
+    /// 判定不能を分母から外して成功接続率を出すこと
+    #[test]
+    fn success_rate_excludes_unjudged_connections() {
+        let summary = StatsSummary {
+            success: 3,
+            failure: 1,
+            unjudged: 6,
+            ..StatsSummary::default()
+        };
+        assert_eq!(
+            summary.success_rate(),
+            Some(0.75),
+            "判定した接続だけを分母にすること"
+        );
+    }
+
+    /// 集約タスクが合否を集計してサマリを返すこと
+    #[tokio::test]
+    async fn collector_summarizes_connection_outcomes() {
+        let token = CancellationToken::new();
+        let collector = StatsCollector::new(4, 1, token.clone());
+        let event_tx = collector.event_tx();
+
+        let events = [
+            StatsEvent::ConnectionEnded {
+                instance_id: 0,
+                vc_id: 0,
+                outcome: "success",
+                failure_reason: None,
+                stalled: false,
+                connect_duration: Some(Duration::from_millis(100)),
+            },
+            StatsEvent::ConnectionEnded {
+                instance_id: 0,
+                vc_id: 1,
+                outcome: "success",
+                failure_reason: None,
+                stalled: true,
+                connect_duration: Some(Duration::from_millis(300)),
+            },
+            StatsEvent::ConnectionEnded {
+                instance_id: 0,
+                vc_id: 2,
+                outcome: "failure",
+                failure_reason: Some("no-media-sent"),
+                stalled: false,
+                connect_duration: Some(Duration::from_millis(200)),
+            },
+            StatsEvent::ConnectionEnded {
+                instance_id: 0,
+                vc_id: 3,
+                outcome: "unjudged",
+                failure_reason: None,
+                stalled: false,
+                connect_duration: None,
+            },
+        ];
+        for event in events {
+            event_tx
+                .send(event)
+                .await
+                .expect("イベントの送信に成功すること");
+        }
+        drop(event_tx);
+
+        let summary = collector.finalize().await;
+        assert_eq!(summary.success, 2, "成功した接続数を数えること");
+        assert_eq!(summary.failure, 1, "失敗した接続数を数えること");
+        assert_eq!(summary.unjudged, 1, "判定不能の接続数を数えること");
+        assert_eq!(summary.judged(), 3, "判定した接続数を数えること");
+        assert_eq!(summary.stalled, 1, "停止した接続数を数えること");
+        assert_eq!(
+            summary.failure_reasons,
+            vec![("no-media-sent", 1)],
+            "失敗理由ごとの接続数を数えること"
+        );
+        assert_eq!(
+            summary.success_rate(),
+            Some(2.0 / 3.0),
+            "判定不能を分母から外すこと"
+        );
+        assert_eq!(
+            summary.connect_time_p50_ms,
+            Some(200.0),
+            "確立までの所要時間の p50 を出すこと"
+        );
+        assert_eq!(
+            summary.connect_time_p95_ms,
+            Some(300.0),
+            "確立までの所要時間の p95 を出すこと"
+        );
+        assert_eq!(
+            summary.connect_time_p99_ms,
+            Some(300.0),
+            "確立までの所要時間の p99 を出すこと"
+        );
+    }
+
+    /// 状態変化のイベントは従来どおり集計されること
+    #[tokio::test]
+    async fn collector_keeps_counting_state_changes() {
+        let token = CancellationToken::new();
+        let collector = StatsCollector::new(2, 1, token.clone());
+        let event_tx = collector.event_tx();
+
+        event_tx
+            .send(StatsEvent::Connected {
+                instance_id: 0,
+                vc_id: 0,
+            })
+            .await
+            .expect("イベントの送信に成功すること");
+        event_tx
+            .send(StatsEvent::Stopped {
+                instance_id: 0,
+                vc_id: 1,
+            })
+            .await
+            .expect("イベントの送信に成功すること");
+        drop(event_tx);
+
+        let summary = collector.finalize().await;
+        assert_eq!(
+            summary.judged(),
+            0,
+            "合否のイベントが無ければ判定数は 0 であること"
+        );
+        assert!(
+            summary.failure_reasons.is_empty(),
+            "失敗理由が無ければ空であること"
+        );
+        assert_eq!(
+            summary.connect_time_p50_ms, None,
+            "所要時間が無ければ None であること"
+        );
     }
 }

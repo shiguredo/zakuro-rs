@@ -544,6 +544,9 @@ fn common_json(c: &crate::args::CommonArgs) -> impl DisplayJson + '_ {
             f.member("duckdb_output_dir", c.duckdb_output_dir.as_str())?;
             f.member("duckdb_interval", c.duckdb_interval)?;
             f.member("no_duckdb_output", c.no_duckdb_output)?;
+            if let Some(ref p) = c.summary_json {
+                f.member("summary_json", p)?;
+            }
             // CLI / JSONC と同形の小文字文字列で出力する (Debug の PascalCase は使わない)
             f.member("log_level", severity_as_str(c.log_level))?;
             // 抑制パターンは配列で出力する (未指定なら空配列)
@@ -861,6 +864,7 @@ mod tests {
             duckdb_output_dir: ".".into(),
             duckdb_interval: 1.0,
             no_duckdb_output: false,
+            summary_json: None,
             log_level: log::Severity::Info,
             log_suppress: Vec::new(),
             fdk_aac_lib: None,
@@ -948,6 +952,7 @@ mod tests {
             duckdb_output_dir: ".".into(),
             duckdb_interval: 1.0,
             no_duckdb_output: false,
+            summary_json: None,
             log_level: log::Severity::Info,
             log_suppress: Vec::new(),
             fdk_aac_lib: None,
@@ -1046,6 +1051,7 @@ mod tests {
             duckdb_output_dir: ".".into(),
             duckdb_interval: 1.0,
             no_duckdb_output: false,
+            summary_json: None,
             log_level: log::Severity::Info,
             log_suppress: vec![
                 "Failed to lookup send time for packet".to_string(),
@@ -1126,6 +1132,7 @@ mod tests {
             duckdb_output_dir: ".".into(),
             duckdb_interval: 1.0,
             no_duckdb_output: false,
+            summary_json: None,
             log_level: log::Severity::Info,
             log_suppress: Vec::new(),
             fdk_aac_lib: None,
@@ -1209,6 +1216,7 @@ mod tests {
             duckdb_output_dir: ".".into(),
             duckdb_interval: 1.0,
             no_duckdb_output: false,
+            summary_json: None,
             log_level: log::Severity::Warning,
             log_suppress: Vec::new(),
             fdk_aac_lib: None,
