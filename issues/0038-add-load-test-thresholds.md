@@ -1,7 +1,7 @@
 # しきい値で合否を判定して終了コードを返す
 
 - Created: 2026-10-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-07
 - Branch: feature/add-load-test-thresholds
 - Polished: {YYYY-MM-DD}
 
@@ -43,3 +43,23 @@ CI のジョブとしては常に成功してしまう。
 - `cargo fmt --all -- --check` が通ること
 - `cargo clippy --locked --workspace --all-targets --features fdk-aac -- -D warnings` が通ること
 - `cargo test --locked --workspace --features fdk-aac` が通ること
+
+## 解決方法
+
+- `zakuro/src/threshold.rs` を追加し、`Thresholds` (未指定の項目は判定しない) と
+  `ThresholdViolation`、集計結果としきい値を突き合わせる `evaluate` を実装した。
+  判定は集計結果としきい値だけを受け取る純粋な処理にした
+- しきい値の引数を `CommonArgs` に追加した。`--threshold-success-rate` (0.0 から 1.0)、
+  `--threshold-connect-time-p95-ms` (正の数)、`--threshold-stalled` (0 以上の整数)。
+  範囲外の値は起動時にエラーにする。JSONC の最上位でも指定できる
+- しきい値を指定したのに判定に必要なデータが無い場合 (判定した接続が 0、確立できた接続が 0)
+  は違反として扱う。測定できなかった試験が CI で成功になるのを避けるため
+- `zakuro/src/main.rs` は、サマリの出力後にしきい値を判定する。満たさなかった項目は
+  警告としてログに出し、1 つでもあれば `Err` を返して終了コード 1 で終わる。
+  すべて満たした場合は `[threshold] all thresholds are satisfied` を出す
+- 単体テストとして、しきい値の判定 (未指定 / 境界値 / 下回り / 上回り / データ無し /
+  複数の同時違反) と、引数の解析・範囲検証・JSONC からの指定を追加した
+- 到達できないシグナリング URL に対して実際に起動し、`connect-failed` として集計され、
+  `--summary-json` のファイルが書かれ、しきい値を満たさないため終了コード 1 で終わること、
+  しきい値を指定しなければ終了コード 0 で終わることを確認した
+- README にしきい値の引数と合否判定の説明を追記した
