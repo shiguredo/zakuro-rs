@@ -81,6 +81,7 @@ impl MediaObserver {
         };
 
         let mut has_media_entry = false;
+        let mut has_activity = false;
         let mut has_delivery_report = false;
         for element in elements {
             let Some(stats_type) = get_string(element, "type") else {
@@ -102,6 +103,7 @@ impl MediaObserver {
                     };
                     if observe_stream(&mut self.outbound, &id, counters) {
                         lifecycle.on_media_sent(kind, observed_at);
+                        has_activity = true;
                     }
                 }
                 "inbound-rtp" => {
@@ -119,6 +121,7 @@ impl MediaObserver {
                     };
                     if observe_stream(&mut self.inbound, &id, counters) {
                         lifecycle.on_media_received(kind, observed_at);
+                        has_activity = true;
                     }
                 }
                 // SFU からのレポートが届いた = 送信したパケットが SFU に届いた証拠
@@ -131,6 +134,8 @@ impl MediaObserver {
 
         if has_media_entry {
             lifecycle.on_sample_observed();
+            // 増加が無いサンプルが続くほどメディアが止まっている可能性が高い
+            lifecycle.on_sample_activity(observed_at, has_activity);
         }
         if has_delivery_report {
             lifecycle.on_delivery_report(observed_at);
@@ -231,6 +236,50 @@ mod tests {
             "SFU からのレポート到着が記録されること"
         );
         assert_eq!(lifecycle.samples, 1, "サンプル数が記録されること");
+        assert_eq!(
+            lifecycle.last_media_activity_at,
+            Some(at(100)),
+            "最後にメディアが動いた時刻が記録されること"
+        );
+        assert_eq!(
+            lifecycle.max_idle_samples, 0,
+            "増加が無いサンプルは数えないこと"
+        );
+    }
+
+    /// 増加が無いサンプルが連続したら数えること
+    #[test]
+    fn idle_samples_are_counted_when_media_stops() {
+        let mut observer = MediaObserver::new();
+        let mut lifecycle = ConnectionLifecycle::new(at(0));
+
+        // メディアが流れている
+        observer.observe(&mut lifecycle, &sample(10, 3, 20), at(100));
+        // 増加が止まる
+        observer.observe(&mut lifecycle, &sample(10, 3, 20), at(200));
+        observer.observe(&mut lifecycle, &sample(10, 3, 20), at(300));
+        assert_eq!(
+            lifecycle.max_idle_samples, 2,
+            "増加が無いサンプルが連続して数えられること"
+        );
+
+        // 再び流れる
+        observer.observe(&mut lifecycle, &sample(20, 6, 40), at(400));
+        assert_eq!(
+            lifecycle.last_media_activity_at,
+            Some(at(400)),
+            "最後に動いた時刻が更新されること"
+        );
+
+        // 止まると最大値が更新される
+        observer.observe(&mut lifecycle, &sample(20, 6, 40), at(500));
+        observer.observe(&mut lifecycle, &sample(20, 6, 40), at(600));
+        observer.observe(&mut lifecycle, &sample(20, 6, 40), at(700));
+        assert_eq!(
+            lifecycle.max_idle_samples, 3,
+            "最も長く止まった連続サンプル数を保持すること"
+        );
+        assert!(lifecycle.is_stalled(), "止まった状態として判定されること");
     }
 
     /// カウンタが 0 のままなら流れたと判断しないこと

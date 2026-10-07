@@ -13,7 +13,9 @@ use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::IntervalStream};
 use tokio_util::sync::CancellationToken;
 
-use crate::connection_lifecycle::{ConnectionLifecycle, LifecycleEnd};
+use crate::connection_lifecycle::{
+    ConnectionLifecycle, LifecycleEnd, OUTCOME_GRACE, OutcomeSettings,
+};
 use crate::data_channel::MessageChannel;
 use crate::duckdb_stats::{
     ConnectionIds, DuckDBClient, InsertConnectionLifecycleRow, InsertConnectionRow, WriteCommand,
@@ -105,6 +107,15 @@ pub(crate) async fn run(
         )));
         // 接続を終えるすべての経路でライフサイクルを 1 行残す。呼び出しを短く保つため、
         // この接続に紐づく引数をまとめたクロージャにする。
+        // 合否判定に使う設定。ロールと映像 / 音声の有効 / 無効は接続をまたいで同じ。
+        let outcome_settings = OutcomeSettings {
+            grace: OUTCOME_GRACE,
+            expects_send: config.role.wants_send(),
+            expects_receive: config.role.wants_recv(),
+            video_enabled: is_video_enabled(&config),
+            audio_enabled: is_audio_enabled(&config),
+        };
+
         let record_lifecycle = |end: LifecycleEnd| {
             write_connection_lifecycle(
                 &config.duckdb_client,
@@ -114,6 +125,7 @@ pub(crate) async fn run(
                 vc_id,
                 &config.channel_id,
                 config.role.as_sora_role(),
+                &outcome_settings,
                 end,
             );
         };
@@ -601,6 +613,7 @@ fn write_connection_lifecycle(
     vc_id: u32,
     channel_id: &str,
     role: &str,
+    outcome_settings: &OutcomeSettings,
     end: LifecycleEnd,
 ) {
     let now = SystemTime::now();
@@ -634,6 +647,17 @@ fn write_connection_lifecycle(
         }
     };
 
+    // 記録した材料から接続の合否を判定する
+    let outcome = snapshot.judge(outcome_settings);
+    rtc_log_info!(
+        "[i{}/vc-{}] connection lifecycle: outcome={} reason={} stalled={}",
+        instance_id,
+        vc_id,
+        outcome.as_str(),
+        outcome.failure_reason().unwrap_or("-"),
+        snapshot.is_stalled(),
+    );
+
     client.try_send(WriteCommand::InsertConnectionLifecycle(Box::new(
         InsertConnectionLifecycleRow {
             instance_id,
@@ -653,14 +677,34 @@ fn write_connection_lifecycle(
             first_audio_received_at: snapshot.first_audio_received_at,
             first_delivery_report_at: snapshot.first_delivery_report_at,
             samples: snapshot.samples,
+            last_media_activity_at: snapshot.last_media_activity_at,
+            max_idle_samples: snapshot.max_idle_samples,
             disconnected_at: now,
             peer_connection_state: snapshot.peer_connection_state,
             ice_connection_state: snapshot.ice_connection_state,
             ice_gathering_state: snapshot.ice_gathering_state,
             signaling_state: snapshot.signaling_state,
             end_reason: end.as_str(),
+            outcome: outcome.as_str(),
+            failure_reason: outcome.failure_reason(),
+            stalled: snapshot.is_stalled(),
         },
     )));
+}
+
+/// 映像が有効か
+///
+/// `Video::Bool(false)` は映像無効、それ以外 (未指定 / `Video` の各設定) は映像有効。
+/// 合否判定と SDP の組み立てで判定が食い違わないよう、1 箇所にまとめる。
+fn is_video_enabled(config: &VirtualClientConfig) -> bool {
+    !matches!(&config.video, Some(sora_sdk::Video::Bool(false)))
+}
+
+/// 音声が有効か
+///
+/// `Audio::Bool(false)` は音声無効、それ以外 (未指定 / `Audio` の各設定) は音声有効。
+fn is_audio_enabled(config: &VirtualClientConfig) -> bool {
+    !matches!(&config.audio, Some(sora_sdk::Audio::Bool(false)))
 }
 
 /// 仮想クライアントを構築する
@@ -677,10 +721,8 @@ fn build_client(
     instance_id: u32,
     vc_id: u32,
 ) -> sora_sdk::Result<(sora_sdk::SoraConnection, sora_sdk::SoraConnectionHandle)> {
-    // Audio::Bool(false) は音声無効、それ以外 (None / Audio{...}) は音声有効
-    let audio_value = !matches!(&config.audio, Some(sora_sdk::Audio::Bool(false)));
-    // Video::Bool(false) は映像無効、それ以外 (None / Video{...}) は映像有効
-    let video_value = !matches!(&config.video, Some(sora_sdk::Video::Bool(false)));
+    let audio_value = is_audio_enabled(config);
+    let video_value = is_video_enabled(config);
     let event_handler = VirtualClientEventHandler {
         ids: ids.clone(),
         lifecycle: lifecycle.clone(),
@@ -984,12 +1026,23 @@ mod tests {
                 .expect("ライフサイクルのロックに成功すること");
             guard.on_offer_received(at(110));
             guard.on_peer_connection_state(PeerConnectionState::Connected, at(120));
+            // 判定には統計サンプルが要る (0 件だと判定不能になる)
+            guard.on_sample_observed();
+            guard.on_sample_activity(at(130), false);
         }
         let ids = Arc::new(std::sync::Mutex::new(Some(ConnectionIds {
             connection_id: "conn-1".to_string(),
             session_id: "sess-1".to_string(),
         })));
 
+        // 確立後にメディアを観測していないため、失敗 (送信が無い) と判定される
+        let settings = OutcomeSettings {
+            grace: OUTCOME_GRACE,
+            expects_send: true,
+            expects_receive: false,
+            video_enabled: true,
+            audio_enabled: true,
+        };
         write_connection_lifecycle(
             &client,
             &lifecycle,
@@ -998,6 +1051,7 @@ mod tests {
             1,
             "ch",
             "sendonly",
+            &settings,
             LifecycleEnd::DurationExpired,
         );
 
@@ -1030,6 +1084,13 @@ mod tests {
                     "終了理由が記録されること"
                 );
                 assert!(row.disconnected_at >= at(100), "切断時刻が記録されること");
+                assert_eq!(row.outcome, "failure", "判定結果が記録されること");
+                assert_eq!(
+                    row.failure_reason,
+                    Some("no-media-sent"),
+                    "失敗理由が記録されること"
+                );
+                assert!(!row.stalled, "メディアが止まった状態ではないこと");
             }
             _ => panic!("InsertConnectionLifecycle が送られること"),
         }

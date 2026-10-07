@@ -70,12 +70,17 @@ MOQ 版 (`zakuro-moq`) は DuckDB 出力を持ちません。
 | `first_audio_received_at` | TIMESTAMP | 音声のパケットが届いたことを最初に観測した時刻 |
 | `first_delivery_report_at` | TIMESTAMP | SFU からのレポート (remote-inbound-rtp) を最初に観測した時刻 |
 | `samples` | INTEGER | 判定に使った統計サンプル数 |
+| `last_media_activity_at` | TIMESTAMP | 最後にメディアの増加を観測した時刻 |
+| `max_idle_samples` | INTEGER | 連続して増加が観測されなかったサンプル数の最大値 |
 | `disconnected_at` | TIMESTAMP | 接続が終了した時刻 |
 | `peer_connection_state` | VARCHAR | 最後に観測した PeerConnection の状態 |
 | `ice_connection_state` | VARCHAR | 最後に観測した ICE 接続の状態 |
 | `ice_gathering_state` | VARCHAR | 最後に観測した ICE 候補収集の状態 |
 | `signaling_state` | VARCHAR | 最後に観測したシグナリングの状態 |
 | `end_reason` | VARCHAR | 接続が終了した理由 |
+| `outcome` | VARCHAR | 接続の判定結果 (`success` / `failure` / `unjudged`) |
+| `failure_reason` | VARCHAR | 失敗理由 (成功と判定不能の場合は NULL) |
+| `stalled` | BOOLEAN | メディアが止まった状態か |
 
 ## シーケンスとインデックス
 
@@ -116,6 +121,16 @@ SELECT mime_type, COUNT(DISTINCT connection_id) FROM rtc_stats_codec
 GROUP BY mime_type;
 ```
 
+### 合否の集計
+
+```sql
+SELECT outcome, failure_reason, COUNT(*) FROM connection_lifecycle
+GROUP BY outcome, failure_reason ORDER BY COUNT(*) DESC;
+```
+
+`failure_reason` は `build-failed` / `connect-failed` / `no-media-sent` /
+`no-delivery-report` / `no-media-received` / `unexpected-disconnect` のいずれかです。
+
 ### 接続の確立状況
 
 `connection_lifecycle` の 1 行が接続 1 本に対応します。
@@ -155,6 +170,9 @@ GROUP BY instance_id;
 - `connection_lifecycle` の `first_*_at` は RTCStats の累積カウンタから観測した時刻です。映像と音声を分けてあるため、「音声だけ流れている」といった失敗を切り分けられます
 - `connection_lifecycle` の `samples` はメディアの統計を含むサンプル数です。`samples` が 0 の接続は送受信の有無を判定できていません (接続が短命だった場合に起こります)
 - メディアの観測には統計の収集が要るため、`--no-duckdb-output` を指定しても接続確立後は `--duckdb-interval` ごとに `get_stats` を呼びます (ファイルは生成しません)
+- `outcome` は「接続が確立し、有効な種別のメディアが流れていることを観測できたか」を表します。`sendonly` は送信と SFU からのレポート到着、`recvonly` は受信、`sendrecv` はその両方を満たす必要があります
+- `outcome` が `unjudged` になるのは、統計サンプルが 1 件も無い場合、映像も音声も無効な場合、確立から猶予 (10 秒) 未満で終了した場合です。成功接続率を出すときは分母から外してください
+- `stalled` は「動いていたメディアが 3 サンプル連続で増加しなかった」状態です。成功 / 失敗とは別の軸なので、`outcome = 'success'` かつ `stalled = true` の接続は「メディアは流れたが途中で止まった」ことを表します
 - `websocket_connected` は常に `true`、`datachannel_connected` は常に `false` が記録されます (offer 受信時のスナップショット固定値)。動的追跡は未対応です
 - `config_mode` は `ARGS` (CLI 引数) または `JSONC` (`--config` 指定) です
 - `config_json` の機密フィールド (`client_cert` / `client_key` / `sora_metadata` / `sora_signaling_notify_metadata`) は `"<masked>"` で出力されます

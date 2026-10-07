@@ -100,12 +100,20 @@ pub(crate) struct InsertConnectionLifecycleRow {
     pub(crate) first_audio_received_at: Option<SystemTime>,
     pub(crate) first_delivery_report_at: Option<SystemTime>,
     pub(crate) samples: u32,
+    pub(crate) last_media_activity_at: Option<SystemTime>,
+    pub(crate) max_idle_samples: u32,
     pub(crate) disconnected_at: SystemTime,
     pub(crate) peer_connection_state: Option<&'static str>,
     pub(crate) ice_connection_state: Option<&'static str>,
     pub(crate) ice_gathering_state: Option<&'static str>,
     pub(crate) signaling_state: Option<&'static str>,
     pub(crate) end_reason: &'static str,
+    /// 接続の判定結果 (`success` / `failure` / `unjudged`)
+    pub(crate) outcome: &'static str,
+    /// 失敗理由 (成功と判定不能の場合は NULL)
+    pub(crate) failure_reason: Option<&'static str>,
+    /// メディアが止まった状態か
+    pub(crate) stalled: bool,
 }
 
 /// `rtc_stats_codec` テーブルへの 1 行
@@ -489,22 +497,28 @@ pub(crate) fn insert_connection_lifecycle(
         &row.first_audio_received_at.map(system_time_to_duck),
         &row.first_delivery_report_at.map(system_time_to_duck),
         &(i32::try_from(row.samples).unwrap_or(i32::MAX)),
+        &row.last_media_activity_at.map(system_time_to_duck),
+        &(i32::try_from(row.max_idle_samples).unwrap_or(i32::MAX)),
         &system_time_to_duck(row.disconnected_at),
         &row.peer_connection_state,
         &row.ice_connection_state,
         &row.ice_gathering_state,
         &row.signaling_state,
         &row.end_reason,
+        &row.outcome,
+        &row.failure_reason,
+        &row.stalled,
     ];
     conn.execute(
         "INSERT INTO connection_lifecycle (instance_id, vc_id, channel_id, role, \
          connection_id, session_id, attempt_started_at, offer_received_at, \
          webrtc_connected_at, ice_connected_at, ice_gathering_complete_at, \
          first_video_sent_at, first_video_received_at, first_audio_sent_at, \
-         first_audio_received_at, first_delivery_report_at, samples, disconnected_at, \
+         first_audio_received_at, first_delivery_report_at, samples, \
+         last_media_activity_at, max_idle_samples, disconnected_at, \
          peer_connection_state, ice_connection_state, ice_gathering_state, \
-         signaling_state, end_reason) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         signaling_state, end_reason, outcome, failure_reason, stalled) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params,
     )?;
     Ok(())
@@ -1009,27 +1023,63 @@ mod tests {
                 first_audio_received_at: None,
                 first_delivery_report_at: Some(UNIX_EPOCH + Duration::from_secs(105)),
                 samples: 42,
+                last_media_activity_at: Some(UNIX_EPOCH + Duration::from_secs(150)),
+                max_idle_samples: 5,
                 disconnected_at: UNIX_EPOCH + Duration::from_secs(160),
                 peer_connection_state: Some("closed"),
                 ice_connection_state: Some("completed"),
                 ice_gathering_state: Some("complete"),
                 signaling_state: Some("stable"),
                 end_reason: "duration-expired",
+                outcome: "success",
+                failure_reason: None,
+                stalled: true,
             },
         )
         .expect("INSERT に失敗");
 
-        let (vc_id, role, connection_id, end_reason): (i32, String, String, String) = conn
+        let (vc_id, role, connection_id, end_reason, outcome, stalled): (
+            i32,
+            String,
+            String,
+            String,
+            String,
+            bool,
+        ) = conn
             .query_row(
-                "SELECT vc_id, role, connection_id, end_reason FROM connection_lifecycle",
+                "SELECT vc_id, role, connection_id, end_reason, outcome, stalled \
+                 FROM connection_lifecycle",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
             )
             .expect("SELECT に失敗");
         assert_eq!(vc_id, 3, "vc_id が保存されること");
         assert_eq!(role, "sendonly", "role が保存されること");
         assert_eq!(connection_id, "c1", "connection_id が保存されること");
         assert_eq!(end_reason, "duration-expired", "終了理由が保存されること");
+        assert_eq!(outcome, "success", "判定結果が保存されること");
+        assert!(stalled, "メディアが止まった状態が保存されること");
+
+        let failure_reason: Option<String> = conn
+            .query_row(
+                "SELECT failure_reason FROM connection_lifecycle WHERE vc_id = 3",
+                [],
+                |row| row.get(0),
+            )
+            .expect("SELECT に失敗");
+        assert_eq!(
+            failure_reason, None,
+            "成功した接続の失敗理由は NULL であること"
+        );
 
         // 確立しなかった接続では時刻が NULL のまま残ること
         insert_connection_lifecycle(
@@ -1052,24 +1102,34 @@ mod tests {
                 first_audio_received_at: None,
                 first_delivery_report_at: None,
                 samples: 0,
+                last_media_activity_at: None,
+                max_idle_samples: 0,
                 disconnected_at: UNIX_EPOCH + Duration::from_secs(201),
                 peer_connection_state: None,
                 ice_connection_state: None,
                 ice_gathering_state: None,
                 signaling_state: None,
                 end_reason: "build-failed",
+                outcome: "failure",
+                failure_reason: Some("build-failed"),
+                stalled: false,
             },
         )
         .expect("INSERT に失敗");
 
-        let nulls: i64 = conn
+        let (nulls, failure_reason): (i64, Option<String>) = conn
             .query_row(
-                "SELECT COUNT(*) FROM connection_lifecycle \
+                "SELECT COUNT(*), MAX(failure_reason) FROM connection_lifecycle \
                  WHERE vc_id = 4 AND connection_id IS NULL AND webrtc_connected_at IS NULL",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("SELECT に失敗");
         assert_eq!(nulls, 1, "未確立の接続は NULL として保存されること");
+        assert_eq!(
+            failure_reason,
+            Some("build-failed".to_string()),
+            "構築に失敗した理由が保存されること"
+        );
     }
 }

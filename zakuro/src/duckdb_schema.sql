@@ -88,12 +88,17 @@ CREATE TABLE connection_lifecycle (
     first_audio_received_at TIMESTAMP,
     first_delivery_report_at TIMESTAMP,
     samples INTEGER,
+    last_media_activity_at TIMESTAMP,
+    max_idle_samples INTEGER,
     disconnected_at TIMESTAMP,
     peer_connection_state VARCHAR,
     ice_connection_state VARCHAR,
     ice_gathering_state VARCHAR,
     signaling_state VARCHAR,
-    end_reason VARCHAR
+    end_reason VARCHAR,
+    outcome VARCHAR,
+    failure_reason VARCHAR,
+    stalled BOOLEAN
 );
 
 -- rtc_stats_codec: codec 統計 (重複は ON CONFLICT で抑制)
