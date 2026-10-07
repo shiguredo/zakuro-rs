@@ -25,6 +25,7 @@ pub(crate) enum WriteCommand {
     UpdateZakuroStop { stop_timestamp: SystemTime },
     InsertZakuroScenario(Box<InsertZakuroScenarioRow>),
     InsertConnection(Box<InsertConnectionRow>),
+    InsertConnectionLifecycle(Box<InsertConnectionLifecycleRow>),
     InsertRtcStatsCodec(Box<RtcStatsCodecRow>),
     InsertRtcStatsInboundRtp(Box<RtcStatsInboundRtpRow>),
     InsertRtcStatsOutboundRtp(Box<RtcStatsOutboundRtpRow>),
@@ -74,6 +75,37 @@ pub(crate) struct InsertConnectionRow {
     pub(crate) role: String,
     pub(crate) audio: bool,
     pub(crate) video: bool,
+}
+
+/// `connection_lifecycle` テーブルへの 1 行
+///
+/// 接続 1 本につき 1 行を、接続が終了した時点で書く。接続の構築に失敗した場合は
+/// connection_id / session_id が無いまま 1 行を書く (試行そのものは記録に残す)。
+#[derive(Clone)]
+pub(crate) struct InsertConnectionLifecycleRow {
+    pub(crate) instance_id: u32,
+    pub(crate) vc_id: u32,
+    pub(crate) channel_id: String,
+    pub(crate) role: String,
+    pub(crate) connection_id: Option<String>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) attempt_started_at: SystemTime,
+    pub(crate) offer_received_at: Option<SystemTime>,
+    pub(crate) webrtc_connected_at: Option<SystemTime>,
+    pub(crate) ice_connected_at: Option<SystemTime>,
+    pub(crate) ice_gathering_complete_at: Option<SystemTime>,
+    pub(crate) first_video_sent_at: Option<SystemTime>,
+    pub(crate) first_video_received_at: Option<SystemTime>,
+    pub(crate) first_audio_sent_at: Option<SystemTime>,
+    pub(crate) first_audio_received_at: Option<SystemTime>,
+    pub(crate) first_delivery_report_at: Option<SystemTime>,
+    pub(crate) samples: u32,
+    pub(crate) disconnected_at: SystemTime,
+    pub(crate) peer_connection_state: Option<&'static str>,
+    pub(crate) ice_connection_state: Option<&'static str>,
+    pub(crate) ice_gathering_state: Option<&'static str>,
+    pub(crate) signaling_state: Option<&'static str>,
+    pub(crate) end_reason: &'static str,
 }
 
 /// `rtc_stats_codec` テーブルへの 1 行
@@ -430,6 +462,49 @@ pub(crate) fn insert_connection(conn: &Connection, row: InsertConnectionRow) -> 
         "INSERT INTO connection (instance_id, vc_id, timestamp, channel_id, \
          connection_id, session_id, role, audio, video, websocket_connected, \
          datachannel_connected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params,
+    )?;
+    Ok(())
+}
+
+pub(crate) fn insert_connection_lifecycle(
+    conn: &Connection,
+    row: InsertConnectionLifecycleRow,
+) -> duckdb::Result<()> {
+    let params: &[&dyn ToSql] = &[
+        &(i32::try_from(row.instance_id).unwrap_or(0)),
+        &(i32::try_from(row.vc_id).unwrap_or(0)),
+        &row.channel_id,
+        &row.role,
+        &row.connection_id,
+        &row.session_id,
+        &system_time_to_duck(row.attempt_started_at),
+        &row.offer_received_at.map(system_time_to_duck),
+        &row.webrtc_connected_at.map(system_time_to_duck),
+        &row.ice_connected_at.map(system_time_to_duck),
+        &row.ice_gathering_complete_at.map(system_time_to_duck),
+        &row.first_video_sent_at.map(system_time_to_duck),
+        &row.first_video_received_at.map(system_time_to_duck),
+        &row.first_audio_sent_at.map(system_time_to_duck),
+        &row.first_audio_received_at.map(system_time_to_duck),
+        &row.first_delivery_report_at.map(system_time_to_duck),
+        &(i32::try_from(row.samples).unwrap_or(i32::MAX)),
+        &system_time_to_duck(row.disconnected_at),
+        &row.peer_connection_state,
+        &row.ice_connection_state,
+        &row.ice_gathering_state,
+        &row.signaling_state,
+        &row.end_reason,
+    ];
+    conn.execute(
+        "INSERT INTO connection_lifecycle (instance_id, vc_id, channel_id, role, \
+         connection_id, session_id, attempt_started_at, offer_received_at, \
+         webrtc_connected_at, ice_connected_at, ice_gathering_complete_at, \
+         first_video_sent_at, first_video_received_at, first_audio_sent_at, \
+         first_audio_received_at, first_delivery_report_at, samples, disconnected_at, \
+         peer_connection_state, ice_connection_state, ice_gathering_state, \
+         signaling_state, end_reason) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params,
     )?;
     Ok(())
@@ -908,5 +983,93 @@ mod tests {
         );
         let safe: i32 = result.unwrap_or(0);
         assert_eq!(safe, 0, "オーバーフローハンドリングで 0 が使われること");
+    }
+
+    /// connection_lifecycle へ確立済みの接続を記録できること
+    #[test]
+    fn insert_connection_lifecycle_stores_observed_times() {
+        let (_dir, conn) = setup_db();
+        insert_connection_lifecycle(
+            &conn,
+            InsertConnectionLifecycleRow {
+                instance_id: 0,
+                vc_id: 3,
+                channel_id: "ch".into(),
+                role: "sendonly".into(),
+                connection_id: Some("c1".into()),
+                session_id: Some("s1".into()),
+                attempt_started_at: UNIX_EPOCH + Duration::from_secs(100),
+                offer_received_at: Some(UNIX_EPOCH + Duration::from_secs(101)),
+                webrtc_connected_at: Some(UNIX_EPOCH + Duration::from_secs(102)),
+                ice_connected_at: Some(UNIX_EPOCH + Duration::from_secs(102)),
+                ice_gathering_complete_at: Some(UNIX_EPOCH + Duration::from_secs(103)),
+                first_video_sent_at: Some(UNIX_EPOCH + Duration::from_secs(104)),
+                first_video_received_at: None,
+                first_audio_sent_at: Some(UNIX_EPOCH + Duration::from_secs(104)),
+                first_audio_received_at: None,
+                first_delivery_report_at: Some(UNIX_EPOCH + Duration::from_secs(105)),
+                samples: 42,
+                disconnected_at: UNIX_EPOCH + Duration::from_secs(160),
+                peer_connection_state: Some("closed"),
+                ice_connection_state: Some("completed"),
+                ice_gathering_state: Some("complete"),
+                signaling_state: Some("stable"),
+                end_reason: "duration-expired",
+            },
+        )
+        .expect("INSERT に失敗");
+
+        let (vc_id, role, connection_id, end_reason): (i32, String, String, String) = conn
+            .query_row(
+                "SELECT vc_id, role, connection_id, end_reason FROM connection_lifecycle",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("SELECT に失敗");
+        assert_eq!(vc_id, 3, "vc_id が保存されること");
+        assert_eq!(role, "sendonly", "role が保存されること");
+        assert_eq!(connection_id, "c1", "connection_id が保存されること");
+        assert_eq!(end_reason, "duration-expired", "終了理由が保存されること");
+
+        // 確立しなかった接続では時刻が NULL のまま残ること
+        insert_connection_lifecycle(
+            &conn,
+            InsertConnectionLifecycleRow {
+                instance_id: 0,
+                vc_id: 4,
+                channel_id: "ch".into(),
+                role: "recvonly".into(),
+                connection_id: None,
+                session_id: None,
+                attempt_started_at: UNIX_EPOCH + Duration::from_secs(200),
+                offer_received_at: None,
+                webrtc_connected_at: None,
+                ice_connected_at: None,
+                ice_gathering_complete_at: None,
+                first_video_sent_at: None,
+                first_video_received_at: None,
+                first_audio_sent_at: None,
+                first_audio_received_at: None,
+                first_delivery_report_at: None,
+                samples: 0,
+                disconnected_at: UNIX_EPOCH + Duration::from_secs(201),
+                peer_connection_state: None,
+                ice_connection_state: None,
+                ice_gathering_state: None,
+                signaling_state: None,
+                end_reason: "build-failed",
+            },
+        )
+        .expect("INSERT に失敗");
+
+        let nulls: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM connection_lifecycle \
+                 WHERE vc_id = 4 AND connection_id IS NULL AND webrtc_connected_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("SELECT に失敗");
+        assert_eq!(nulls, 1, "未確立の接続は NULL として保存されること");
     }
 }

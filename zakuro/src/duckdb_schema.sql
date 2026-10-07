@@ -11,6 +11,7 @@ BEGIN;
 
 -- シーケンス
 CREATE SEQUENCE connection_pk_seq;
+CREATE SEQUENCE connection_lifecycle_pk_seq;
 CREATE SEQUENCE rtc_stats_codec_pk_seq;
 CREATE SEQUENCE rtc_stats_inbound_rtp_pk_seq;
 CREATE SEQUENCE rtc_stats_outbound_rtp_pk_seq;
@@ -61,6 +62,38 @@ CREATE TABLE connection (
     video BOOLEAN,
     websocket_connected BOOLEAN,
     datachannel_connected BOOLEAN
+);
+
+-- connection_lifecycle: 接続 1 本のライフサイクル (接続終了時に 1 行)
+--
+-- Sora のシグナリングが成立した時刻 (offer_received_at) と WebRTC の接続が
+-- 確立した時刻 (webrtc_connected_at) を別々に持つ。どちらで止まったかを
+-- 切り分けるための材料になる。
+CREATE TABLE connection_lifecycle (
+    pk BIGINT PRIMARY KEY DEFAULT nextval('connection_lifecycle_pk_seq'),
+    instance_id INTEGER,
+    vc_id INTEGER,
+    channel_id VARCHAR,
+    role VARCHAR,
+    connection_id VARCHAR,
+    session_id VARCHAR,
+    attempt_started_at TIMESTAMP,
+    offer_received_at TIMESTAMP,
+    webrtc_connected_at TIMESTAMP,
+    ice_connected_at TIMESTAMP,
+    ice_gathering_complete_at TIMESTAMP,
+    first_video_sent_at TIMESTAMP,
+    first_video_received_at TIMESTAMP,
+    first_audio_sent_at TIMESTAMP,
+    first_audio_received_at TIMESTAMP,
+    first_delivery_report_at TIMESTAMP,
+    samples INTEGER,
+    disconnected_at TIMESTAMP,
+    peer_connection_state VARCHAR,
+    ice_connection_state VARCHAR,
+    ice_gathering_state VARCHAR,
+    signaling_state VARCHAR,
+    end_reason VARCHAR
 );
 
 -- rtc_stats_codec: codec 統計 (重複は ON CONFLICT で抑制)
@@ -320,6 +353,7 @@ CREATE TABLE rtc_stats_data_channel (
 -- インデックス
 CREATE INDEX idx_connection_id ON connection(connection_id);
 CREATE INDEX idx_connection_composite ON connection(channel_id, timestamp);
+CREATE INDEX idx_connection_lifecycle_connection_id ON connection_lifecycle(connection_id);
 CREATE INDEX idx_rtc_stats_codec_composite ON rtc_stats_codec(instance_id, channel_id, connection_id, timestamp);
 CREATE INDEX idx_rtc_stats_inbound_rtp_composite ON rtc_stats_inbound_rtp(instance_id, channel_id, connection_id, timestamp);
 CREATE INDEX idx_rtc_stats_outbound_rtp_composite ON rtc_stats_outbound_rtp(instance_id, channel_id, connection_id, timestamp);

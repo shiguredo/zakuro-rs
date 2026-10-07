@@ -1,6 +1,7 @@
 mod args;
 mod cmd_fmt;
 mod cmd_lint;
+mod connection_lifecycle;
 mod data_channel;
 mod diagnostic;
 mod duckdb_stats;
@@ -10,6 +11,7 @@ mod fake_video_capturer;
 mod jsonc_fmt;
 mod log_bridge;
 mod log_filter;
+mod media_observer;
 mod mp4_audio;
 mod nop_video_decoder;
 mod openh264_video_codec;

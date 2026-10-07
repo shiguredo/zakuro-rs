@@ -16,10 +16,11 @@ use crate::error::{AppError, ErrorMessage, Result};
 
 use super::module::CHANNEL_CAPACITY;
 use super::rows::{
-    WriteCommand, insert_connection, insert_rtc_stats_codec, insert_rtc_stats_data_channel,
-    insert_rtc_stats_inbound_rtp, insert_rtc_stats_media_source, insert_rtc_stats_outbound_rtp,
-    insert_rtc_stats_remote_inbound_rtp, insert_rtc_stats_remote_outbound_rtp, insert_zakuro,
-    insert_zakuro_scenario, update_zakuro_stop,
+    WriteCommand, insert_connection, insert_connection_lifecycle, insert_rtc_stats_codec,
+    insert_rtc_stats_data_channel, insert_rtc_stats_inbound_rtp, insert_rtc_stats_media_source,
+    insert_rtc_stats_outbound_rtp, insert_rtc_stats_remote_inbound_rtp,
+    insert_rtc_stats_remote_outbound_rtp, insert_zakuro, insert_zakuro_scenario,
+    update_zakuro_stop,
 };
 use super::schema::SCHEMA_SQL;
 
@@ -261,6 +262,9 @@ pub(crate) fn dispatch_command(conn: &Connection, cmd: WriteCommand) -> duckdb::
         }
         WriteCommand::InsertConnection(row) => {
             insert_connection(conn, *row)?;
+        }
+        WriteCommand::InsertConnectionLifecycle(row) => {
+            insert_connection_lifecycle(conn, *row)?;
         }
         WriteCommand::InsertRtcStatsCodec(row) => {
             insert_rtc_stats_codec(conn, *row)?;

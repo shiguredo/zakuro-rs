@@ -2,7 +2,7 @@
 // DDL
 // ============================================================================
 
-/// シーケンス 8 個 + テーブル 10 個 + インデックス 9 個を 1 発で投入する DDL
+/// シーケンス 9 個 + テーブル 11 個 + インデックス 10 個を 1 発で投入する DDL
 ///
 /// `BEGIN; ... COMMIT;` で囲むことで `Connection::execute_batch` 1 回で投入する。
 /// `instance_id INTEGER` 列を各 stats テーブルの `pk` 列の直後に挿入する
@@ -91,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_creates_ten_tables() {
+    fn schema_creates_eleven_tables() {
         let (_dir, conn) = setup_db();
         let count: i64 = conn
             .query_row(
@@ -100,11 +100,11 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("テーブル数の取得に失敗");
-        assert_eq!(count, 10, "テーブル数は 10 であるべき");
+        assert_eq!(count, 11, "テーブル数は 11 であるべき");
     }
 
     #[test]
-    fn schema_creates_eight_sequences() {
+    fn schema_creates_nine_sequences() {
         let (_dir, conn) = setup_db();
         let count: i64 = conn
             .query_row(
@@ -113,11 +113,11 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("シーケンス数の取得に失敗");
-        assert_eq!(count, 8, "シーケンス数は 8 であるべき");
+        assert_eq!(count, 9, "シーケンス数は 9 であるべき");
     }
 
     #[test]
-    fn schema_creates_nine_indexes() {
+    fn schema_creates_ten_indexes() {
         let (_dir, conn) = setup_db();
         let count: i64 = conn
             .query_row(
@@ -126,7 +126,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("インデックス数の取得に失敗");
-        assert_eq!(count, 9, "インデックス数は 9 であるべき");
+        assert_eq!(count, 10, "インデックス数は 10 であるべき");
     }
 
     #[test]

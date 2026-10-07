@@ -1,7 +1,10 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use shiguredo_webrtc::{VideoTrackSource, rtc_log_info, rtc_log_warning};
+use shiguredo_webrtc::{
+    IceConnectionState, IceGatheringState, PeerConnectionState, SignalingState, VideoTrackSource,
+    rtc_log_info, rtc_log_warning,
+};
 use sora_sdk::{
     ConnectDataChannel, JsonString, Mp4VideoCapturer, Role, SignalingDirection, SoraConnection,
     SoraConnectionContext, SoraConnectionEventHandler,
@@ -10,10 +13,13 @@ use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::IntervalStream};
 use tokio_util::sync::CancellationToken;
 
+use crate::connection_lifecycle::{ConnectionLifecycle, LifecycleEnd};
 use crate::data_channel::MessageChannel;
 use crate::duckdb_stats::{
-    ConnectionIds, DuckDBClient, InsertConnectionRow, WriteCommand, dispatch_stats, parse_offer_ids,
+    ConnectionIds, DuckDBClient, InsertConnectionLifecycleRow, InsertConnectionRow, WriteCommand,
+    dispatch_stats, parse_offer_ids,
 };
+use crate::media_observer::MediaObserver;
 use crate::scenario::{Scenario, ScenarioEnd, ScenarioPlayer};
 use zakuro_core::stats::StatsEvent;
 
@@ -91,12 +97,38 @@ pub(crate) async fn run(
         // 接続ごとに identifiers を新規生成する (再接続時は別 connection_id が記録される)
         let ids: Arc<std::sync::Mutex<Option<ConnectionIds>>> =
             Arc::new(std::sync::Mutex::new(None));
+        // 接続 1 本ごとのライフサイクル。SDK のイベントハンドラ (状態変化) と
+        // このループ (試行開始・切断) の両方から更新するため Arc<Mutex> で共有する。
+        // 状態変化は 1 接続あたり数回しか起きないため、ロックの保持時間は問題にならない。
+        let lifecycle = Arc::new(std::sync::Mutex::new(ConnectionLifecycle::new(
+            SystemTime::now(),
+        )));
+        // 接続を終えるすべての経路でライフサイクルを 1 行残す。呼び出しを短く保つため、
+        // この接続に紐づく引数をまとめたクロージャにする。
+        let record_lifecycle = |end: LifecycleEnd| {
+            write_connection_lifecycle(
+                &config.duckdb_client,
+                &lifecycle,
+                &ids,
+                instance_id,
+                vc_id,
+                &config.channel_id,
+                config.role.as_sora_role(),
+                end,
+            );
+        };
+
+        // WebRTC の接続確立 (PeerConnection が Connected) を待つための通知経路。
+        // SDK のイベントハンドラから 1 度だけ送られる。
+        let (connected_tx, connected_rx) = tokio::sync::oneshot::channel::<()>();
 
         let (client, handle) = match build_client(
             &context,
             &video_source,
             &config,
             &ids,
+            &lifecycle,
+            connected_tx,
             instance_id,
             vc_id,
         ) {
@@ -108,6 +140,7 @@ pub(crate) async fn run(
                     vc_id,
                     e,
                 );
+                record_lifecycle(LifecycleEnd::BuildFailed);
                 retry_count += 1;
                 if retry_count > config.max_retry {
                     rtc_log_info!(
@@ -132,14 +165,37 @@ pub(crate) async fn run(
                 }
             }
         };
-        let _ = stats_tx
-            .send(StatsEvent::Connected { instance_id, vc_id })
-            .await;
-        rtc_log_info!("[i{}/vc-{}] connected", instance_id, vc_id);
+        // WebRTC の接続確立を待ってから connected として数える。
+        // build_client() が返るのは接続オブジェクトを作れた時点であり、実際の接続は run() が行う。
+        let mut run_future = Box::pin(client.run());
+        // 確立前に run() が終わった場合、完了済み future を再 poll すると panic するため結果を保持する
+        let mut finished: Option<sora_sdk::Result<()>> = None;
+        let established = tokio::select! {
+            biased;
+            _ = token.cancelled() => false,
+            established = connected_rx => established.is_ok(),
+            result = &mut run_future => {
+                finished = Some(result);
+                false
+            }
+        };
+
+        if established {
+            let _ = stats_tx
+                .send(StatsEvent::Connected { instance_id, vc_id })
+                .await;
+            rtc_log_info!("[i{}/vc-{}] connected", instance_id, vc_id);
+        } else {
+            rtc_log_info!(
+                "[i{}/vc-{}] connection ended before the WebRTC establishment",
+                instance_id,
+                vc_id,
+            );
+        }
 
         // DataChannel メッセージングタスクの起動
         let messaging_token = connection_token.child_token();
-        if !config.message_channels.is_empty() {
+        if established && !config.message_channels.is_empty() {
             let msg_handle = handle.clone();
             let msg_channels = config.message_channels.clone();
             let msg_token = messaging_token.clone();
@@ -155,10 +211,14 @@ pub(crate) async fn run(
             });
         }
 
-        // DuckDB 統計収集タスクの起動 (disabled 時は起動しない)
-        if config.duckdb_client.is_enabled() {
+        // 統計サンプルの収集タスクの起動
+        //
+        // メディアの送受信の観測は合否判定の材料になるため、DuckDB 出力の
+        // 有無にかかわらず行う。書き込みだけを client の有効 / 無効で切り替える。
+        if established {
             let stats_client = config.duckdb_client.clone();
             let stats_ids = ids.clone();
+            let stats_lifecycle = lifecycle.clone();
             let stats_handle = handle.clone();
             let stats_token = connection_token.child_token();
             let interval = config.duckdb_interval;
@@ -170,6 +230,7 @@ pub(crate) async fn run(
                     channel_id,
                     stats_client,
                     stats_ids,
+                    stats_lifecycle,
                     stats_handle,
                     stats_token,
                     interval,
@@ -178,9 +239,10 @@ pub(crate) async fn run(
             });
         }
 
-        let mut run_future = Box::pin(client.run());
-
-        let reason = if let Some(ref mut player) = scenario_player {
+        let reason = if let Some(result) = finished {
+            // 確立の待機中に run() が終わっていた場合は、その結果で切断処理へ進む
+            DisconnectReason::Unexpected(result)
+        } else if let Some(ref mut player) = scenario_player {
             // シナリオモード: シナリオの Reconnect / Disconnect / Exit 操作まで実行する
             tokio::select! {
                 biased;
@@ -210,6 +272,7 @@ pub(crate) async fn run(
                 }
                 // DataChannel messaging / DuckDB stats 収集タスクを止める
                 connection_token.cancel();
+                record_lifecycle(LifecycleEnd::Shutdown);
                 break;
             }
             DisconnectReason::DurationExpired => {
@@ -219,6 +282,7 @@ pub(crate) async fn run(
                     _ = &mut run_future => {}
                 }
                 connection_token.cancel();
+                record_lifecycle(LifecycleEnd::DurationExpired);
                 let _ = stats_tx
                     .send(StatsEvent::Disconnected { instance_id, vc_id })
                     .await;
@@ -248,6 +312,7 @@ pub(crate) async fn run(
                     _ = &mut run_future => {}
                 }
                 connection_token.cancel();
+                record_lifecycle(LifecycleEnd::ScenarioDisconnect);
                 let _ = stats_tx
                     .send(StatsEvent::Disconnected { instance_id, vc_id })
                     .await;
@@ -262,6 +327,7 @@ pub(crate) async fn run(
                     _ = &mut run_future => {}
                 }
                 connection_token.cancel();
+                record_lifecycle(LifecycleEnd::ScenarioExit);
                 let _ = stats_tx
                     .send(StatsEvent::Disconnected { instance_id, vc_id })
                     .await;
@@ -274,6 +340,7 @@ pub(crate) async fn run(
             }
             DisconnectReason::Unexpected(result) => {
                 connection_token.cancel();
+                record_lifecycle(LifecycleEnd::Unexpected);
                 let _ = stats_tx
                     .send(StatsEvent::Disconnected { instance_id, vc_id })
                     .await;
@@ -331,11 +398,12 @@ async fn duration_timer(duration: Option<f64>) {
     }
 }
 
-/// DuckDB 統計収集ループ
+/// 統計サンプルの収集ループ
 ///
-/// `--duckdb-interval` 秒ごとに `handle.get_stats()` を呼び、戻り JSON を
-/// `dispatch_stats` で各テーブルに振り分ける。connection_id 確定前の初回 tick は
-/// スキップし、確定後にログを出す。
+/// `--duckdb-interval` 秒ごとに `handle.get_stats()` を呼び、戻り JSON から
+/// メディアの送受信を観測してライフサイクルへ反映する。DuckDB 出力が有効な場合は
+/// 同じサンプルを `dispatch_stats` で各テーブルへ振り分ける。
+/// connection_id 確定前の初回 tick はスキップし、確定後にログを出す。
 #[expect(clippy::too_many_arguments)]
 async fn run_stats_collection(
     instance_id: u32,
@@ -343,10 +411,12 @@ async fn run_stats_collection(
     channel_id: String,
     client: DuckDBClient,
     ids: Arc<std::sync::Mutex<Option<ConnectionIds>>>,
+    lifecycle: Arc<std::sync::Mutex<ConnectionLifecycle>>,
     handle: sora_sdk::SoraConnectionHandle,
     token: CancellationToken,
     interval: Duration,
 ) {
+    let mut observer = MediaObserver::new();
     let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // 初回 tick は即座に発火するが、connection_id 未確定の可能性が高いため
@@ -397,15 +467,19 @@ async fn run_stats_collection(
                 // JsonString から RawJsonOwned への抽出は再 parse 経由
                 // (sora_sdk に as_raw() / into_raw() が無いため)
                 let stats_text = stats.to_string();
-                dispatch_stats(
-                    instance_id,
-                    vc_id,
-                    &channel_id,
-                    &parsed,
-                    &client,
-                    &stats_text,
-                    SystemTime::now(),
-                );
+                let now = SystemTime::now();
+                // メディアの観測は DuckDB 出力の有無にかかわらず行う (合否判定の材料)
+                match lifecycle.lock() {
+                    Ok(mut lifecycle) => observer.observe(&mut lifecycle, &stats_text, now),
+                    Err(_) => rtc_log_warning!(
+                        "[i{}/vc-{}][duckdb] connection lifecycle mutex poisoned in stats_collection",
+                        instance_id,
+                        vc_id,
+                    ),
+                }
+                if client.is_enabled() {
+                    dispatch_stats(instance_id, vc_id, &channel_id, &parsed, &client, &stats_text, now);
+                }
             }
         }
     }
@@ -415,8 +489,12 @@ async fn run_stats_collection(
 ///
 /// offer 受信時に connection_id / session_id を抽出し DuckDB へ記録する。
 /// (on_notify の connection.created は同一チャネル内の他 client 接続でも届きうるため不採用)
+/// あわせて、WebRTC の接続状態の変化を接続ライフサイクルへ記録する。
 struct VirtualClientEventHandler {
     ids: Arc<std::sync::Mutex<Option<ConnectionIds>>>,
+    lifecycle: Arc<std::sync::Mutex<ConnectionLifecycle>>,
+    /// WebRTC の確立 (PeerConnection が Connected) を 1 度だけ通知する
+    connected_tx: Option<tokio::sync::oneshot::Sender<()>>,
     duckdb_client: DuckDBClient,
     channel_id: String,
     role: String,
@@ -463,14 +541,139 @@ impl SoraConnectionEventHandler for VirtualClientEventHandler {
                 },
             )));
         *guard = Some(parsed);
+        // ids のロックを解放してからライフサイクルのロックを取る (ロック順序を固定しない)
+        drop(guard);
+        self.record(|lifecycle, now| lifecycle.on_offer_received(now));
+    }
+
+    fn on_connection_state_change(&mut self, state: PeerConnectionState) {
+        self.record(|lifecycle, now| lifecycle.on_peer_connection_state(state, now));
+        if state == PeerConnectionState::Connected {
+            // 最初の Connected だけを通知する (`take` により 2 回目以降は送らない)
+            if let Some(tx) = self.connected_tx.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    fn on_ice_connection_state_change(&mut self, state: IceConnectionState) {
+        self.record(|lifecycle, now| lifecycle.on_ice_connection_state(state, now));
+    }
+
+    fn on_ice_gathering_state_change(&mut self, state: IceGatheringState) {
+        self.record(|lifecycle, now| lifecycle.on_ice_gathering_state(state, now));
+    }
+
+    fn on_signaling_state_change(&mut self, state: SignalingState) {
+        self.record(|lifecycle, _| lifecycle.on_signaling_state(state));
     }
 }
 
+impl VirtualClientEventHandler {
+    /// ライフサイクルを更新する
+    ///
+    /// ロックが poison されている場合は記録を諦める。負荷試験の統計は
+    /// 欠落しうる前提 (writer の drop と同じ扱い) のため、ここではパニックさせない。
+    fn record(&self, update: impl FnOnce(&mut ConnectionLifecycle, SystemTime)) {
+        let Ok(mut lifecycle) = self.lifecycle.lock() else {
+            rtc_log_warning!(
+                "[i{}/vc-{}] connection lifecycle mutex poisoned; dropping the state change",
+                self.instance_id,
+                self.vc_id,
+            );
+            return;
+        };
+        update(&mut lifecycle, SystemTime::now());
+    }
+}
+
+/// 接続 1 本のライフサイクルを DuckDB へ記録する
+///
+/// 接続を終えるすべての経路から呼び、1 接続につき 1 行を残す。構築に失敗した接続は
+/// connection_id / session_id が無いまま 1 行を書く (試行そのものを記録に残す)。
+/// 統計の書き込みと同じく `try_send` を使うため、チャネルが満杯のときは行が欠落しうる。
+#[expect(clippy::too_many_arguments)]
+fn write_connection_lifecycle(
+    client: &DuckDBClient,
+    lifecycle: &Arc<std::sync::Mutex<ConnectionLifecycle>>,
+    ids: &Arc<std::sync::Mutex<Option<ConnectionIds>>>,
+    instance_id: u32,
+    vc_id: u32,
+    channel_id: &str,
+    role: &str,
+    end: LifecycleEnd,
+) {
+    let now = SystemTime::now();
+    let Ok(mut guard) = lifecycle.lock() else {
+        rtc_log_warning!(
+            "[i{}/vc-{}] connection lifecycle mutex poisoned; skipping the lifecycle row",
+            instance_id,
+            vc_id,
+        );
+        return;
+    };
+    guard.mark_disconnected(end, now);
+    let snapshot = guard.clone();
+    drop(guard);
+
+    let (connection_id, session_id) = match ids.lock() {
+        Ok(guard) => match guard.as_ref() {
+            Some(ids) => (
+                Some(ids.connection_id.clone()),
+                Some(ids.session_id.clone()),
+            ),
+            None => (None, None),
+        },
+        Err(_) => {
+            rtc_log_warning!(
+                "[i{}/vc-{}] connection_ids mutex poisoned; the lifecycle row has no ids",
+                instance_id,
+                vc_id,
+            );
+            (None, None)
+        }
+    };
+
+    client.try_send(WriteCommand::InsertConnectionLifecycle(Box::new(
+        InsertConnectionLifecycleRow {
+            instance_id,
+            vc_id,
+            channel_id: channel_id.to_string(),
+            role: role.to_string(),
+            connection_id,
+            session_id,
+            attempt_started_at: snapshot.attempt_started_at,
+            offer_received_at: snapshot.offer_received_at,
+            webrtc_connected_at: snapshot.webrtc_connected_at,
+            ice_connected_at: snapshot.ice_connected_at,
+            ice_gathering_complete_at: snapshot.ice_gathering_complete_at,
+            first_video_sent_at: snapshot.first_video_sent_at,
+            first_video_received_at: snapshot.first_video_received_at,
+            first_audio_sent_at: snapshot.first_audio_sent_at,
+            first_audio_received_at: snapshot.first_audio_received_at,
+            first_delivery_report_at: snapshot.first_delivery_report_at,
+            samples: snapshot.samples,
+            disconnected_at: now,
+            peer_connection_state: snapshot.peer_connection_state,
+            ice_connection_state: snapshot.ice_connection_state,
+            ice_gathering_state: snapshot.ice_gathering_state,
+            signaling_state: snapshot.signaling_state,
+            end_reason: end.as_str(),
+        },
+    )));
+}
+
+/// 仮想クライアントを構築する
+///
+/// `connected_tx` は WebRTC の確立 (PeerConnection が Connected) を 1 度だけ通知する。
+#[expect(clippy::too_many_arguments)]
 fn build_client(
     context: &Arc<SoraConnectionContext>,
     video_source: &Option<VideoTrackSource>,
     config: &VirtualClientConfig,
     ids: &Arc<std::sync::Mutex<Option<ConnectionIds>>>,
+    lifecycle: &Arc<std::sync::Mutex<ConnectionLifecycle>>,
+    connected_tx: tokio::sync::oneshot::Sender<()>,
     instance_id: u32,
     vc_id: u32,
 ) -> sora_sdk::Result<(sora_sdk::SoraConnection, sora_sdk::SoraConnectionHandle)> {
@@ -480,6 +683,8 @@ fn build_client(
     let video_value = !matches!(&config.video, Some(sora_sdk::Video::Bool(false)));
     let event_handler = VirtualClientEventHandler {
         ids: ids.clone(),
+        lifecycle: lifecycle.clone(),
+        connected_tx: Some(connected_tx),
         duckdb_client: config.duckdb_client.clone(),
         channel_id: config.channel_id.clone(),
         role: config.role.as_sora_role().to_string(),
@@ -635,6 +840,202 @@ mod tests {
         assert_eq!(
             ids_ref.session_id, "test_sess",
             "session_id が正しく設定されていること"
+        );
+    }
+
+    /// 固定の基準時刻からの経過秒で SystemTime を作る
+    fn at(seconds: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    /// テスト用のイベントハンドラを組み立てる
+    fn test_event_handler(
+        ids: Arc<std::sync::Mutex<Option<ConnectionIds>>>,
+        lifecycle: Arc<std::sync::Mutex<ConnectionLifecycle>>,
+    ) -> VirtualClientEventHandler {
+        VirtualClientEventHandler {
+            ids,
+            lifecycle,
+            connected_tx: None,
+            duckdb_client: DuckDBClient::noop(),
+            channel_id: "ch".to_string(),
+            role: "sendonly".to_string(),
+            audio: true,
+            video: true,
+            instance_id: 0,
+            vc_id: 1,
+        }
+    }
+
+    /// WebRTC の確立で通知が 1 度だけ送られること
+    #[test]
+    fn test_connected_notification_fires_once() {
+        let ids = Arc::new(std::sync::Mutex::new(None::<ConnectionIds>));
+        let lifecycle = Arc::new(std::sync::Mutex::new(ConnectionLifecycle::new(at(100))));
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+        let mut handler = VirtualClientEventHandler {
+            ids: Arc::clone(&ids),
+            lifecycle: Arc::clone(&lifecycle),
+            connected_tx: Some(tx),
+            duckdb_client: DuckDBClient::noop(),
+            channel_id: "ch".to_string(),
+            role: "sendonly".to_string(),
+            audio: true,
+            video: true,
+            instance_id: 0,
+            vc_id: 1,
+        };
+
+        // Connected 以外では通知しない
+        handler.on_connection_state_change(PeerConnectionState::Connecting);
+        assert!(
+            rx.try_recv().is_err(),
+            "Connected 以外では確立を通知しないこと"
+        );
+
+        handler.on_connection_state_change(PeerConnectionState::Connected);
+        assert!(rx.try_recv().is_ok(), "Connected で確立を通知すること");
+        assert!(
+            handler.connected_tx.is_none(),
+            "通知の送信器は 1 度使ったら破棄されること"
+        );
+
+        // 2 回目の Connected では送信器が無いため何も起きない
+        handler.on_connection_state_change(PeerConnectionState::Connected);
+    }
+
+    /// offer 受信で ids とライフサイクルの offer 受信時刻が記録されること
+    #[test]
+    fn test_on_signaling_message_records_offer() {
+        let ids = Arc::new(std::sync::Mutex::new(None::<ConnectionIds>));
+        let lifecycle = Arc::new(std::sync::Mutex::new(ConnectionLifecycle::new(at(100))));
+        let mut handler = test_event_handler(Arc::clone(&ids), Arc::clone(&lifecycle));
+
+        handler.on_signaling_message(
+            sora_sdk::SignalingType::WebSocket,
+            SignalingDirection::Received,
+            r#"{"type":"offer","connection_id":"conn-1","session_id":"sess-1"}"#,
+        );
+
+        let stored = ids.lock().expect("ids のロックに成功すること");
+        let stored = stored.as_ref().expect("offer 受信で ids が設定されること");
+        assert_eq!(
+            stored.connection_id, "conn-1",
+            "connection_id が記録されること"
+        );
+        let recorded = lifecycle
+            .lock()
+            .expect("ライフサイクルのロックに成功すること");
+        assert!(
+            recorded.offer_received_at.is_some(),
+            "offer の受信時刻が記録されること"
+        );
+        assert!(
+            recorded.webrtc_connected_at.is_none(),
+            "WebRTC の確立は offer 受信では記録されないこと"
+        );
+    }
+
+    /// WebRTC の状態変化がライフサイクルへ記録されること
+    #[test]
+    fn test_connection_state_change_records_webrtc_establishment() {
+        let ids = Arc::new(std::sync::Mutex::new(None::<ConnectionIds>));
+        let lifecycle = Arc::new(std::sync::Mutex::new(ConnectionLifecycle::new(at(100))));
+        let mut handler = test_event_handler(Arc::clone(&ids), Arc::clone(&lifecycle));
+
+        handler.on_connection_state_change(PeerConnectionState::Connected);
+        handler.on_ice_connection_state_change(IceConnectionState::Completed);
+        handler.on_ice_gathering_state_change(IceGatheringState::Complete);
+
+        let recorded = lifecycle
+            .lock()
+            .expect("ライフサイクルのロックに成功すること");
+        assert!(
+            recorded.webrtc_connected_at.is_some(),
+            "WebRTC の確立時刻が記録されること"
+        );
+        assert!(
+            recorded.ice_connected_at.is_some(),
+            "ICE の接続時刻が記録されること"
+        );
+        assert!(
+            recorded.ice_gathering_complete_at.is_some(),
+            "候補収集の完了時刻が記録されること"
+        );
+        assert_eq!(
+            recorded.peer_connection_state,
+            Some("connected"),
+            "PeerConnection の状態が記録されること"
+        );
+    }
+
+    /// ライフサイクルが 1 行として writer へ渡されること
+    #[test]
+    fn test_write_connection_lifecycle_sends_one_row() {
+        let (tx, mut rx) = mpsc::channel::<WriteCommand>(4);
+        let client = DuckDBClient {
+            sender: Some(tx),
+            dropped_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        };
+        let lifecycle = Arc::new(std::sync::Mutex::new(ConnectionLifecycle::new(at(100))));
+        {
+            let mut guard = lifecycle
+                .lock()
+                .expect("ライフサイクルのロックに成功すること");
+            guard.on_offer_received(at(110));
+            guard.on_peer_connection_state(PeerConnectionState::Connected, at(120));
+        }
+        let ids = Arc::new(std::sync::Mutex::new(Some(ConnectionIds {
+            connection_id: "conn-1".to_string(),
+            session_id: "sess-1".to_string(),
+        })));
+
+        write_connection_lifecycle(
+            &client,
+            &lifecycle,
+            &ids,
+            0,
+            1,
+            "ch",
+            "sendonly",
+            LifecycleEnd::DurationExpired,
+        );
+
+        let command = rx.try_recv().expect("ライフサイクルの行が送られること");
+        match command {
+            WriteCommand::InsertConnectionLifecycle(row) => {
+                assert_eq!(
+                    row.connection_id.as_deref(),
+                    Some("conn-1"),
+                    "connection_id が記録されること"
+                );
+                assert_eq!(
+                    row.session_id.as_deref(),
+                    Some("sess-1"),
+                    "session_id が記録されること"
+                );
+                assert_eq!(row.role, "sendonly", "role が記録されること");
+                assert_eq!(
+                    row.offer_received_at,
+                    Some(at(110)),
+                    "offer の受信時刻が記録されること"
+                );
+                assert_eq!(
+                    row.webrtc_connected_at,
+                    Some(at(120)),
+                    "WebRTC の確立時刻が記録されること"
+                );
+                assert_eq!(
+                    row.end_reason, "duration-expired",
+                    "終了理由が記録されること"
+                );
+                assert!(row.disconnected_at >= at(100), "切断時刻が記録されること");
+            }
+            _ => panic!("InsertConnectionLifecycle が送られること"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "接続 1 本につき 1 行だけ送られること"
         );
     }
 }
