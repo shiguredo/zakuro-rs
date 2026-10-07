@@ -1,7 +1,7 @@
 # 接続の合否を集計してサマリを出力する
 
 - Created: 2026-10-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-07
 - Branch: feature/add-connection-outcome-summary
 - Polished: {YYYY-MM-DD}
 
@@ -44,3 +44,23 @@
 - `cargo fmt --all -- --check` が通ること
 - `cargo clippy --locked --workspace --all-targets --features fdk-aac -- -D warnings` が通ること
 - `cargo test --locked --workspace --features fdk-aac` が通ること
+
+## 解決方法
+
+- `zakuro-core/src/stats.rs` の `StatsEvent` に `ConnectionEnded` を追加し、判定結果、
+  失敗理由、停止の有無、確立までの所要時間を集約側へ渡すようにした
+- `StatsSnapshot` に成功 / 失敗 / 判定不能 / 停止の接続数を追加し、5 秒ごとのログにも出した。
+  毎イベント複製されるため、所要時間の一覧のような重い集計は入れていない
+- 集約タスクは内部に `OutcomeTotals` を持ち、終了時に `StatsSummary` を返す。
+  `StatsSummary` は判定結果別の接続数、失敗理由別の接続数 (接続数の多い順)、停止した接続数、
+  確立までの所要時間の p50 / p95 / p99 を持つ。所要時間のパーセンタイルは
+  最も近い順位 (nearest rank) で求める
+- `StatsCollector::finalize` を追加し、`zakuro/src/main.rs` が全インスタンスの終了後に
+  最終的な集計結果を受け取るようにした。割り込みで集約タスクが先に終了した場合は
+  その時点までの結果を返す
+- `zakuro/src/summary.rs` を追加し、人が読めるサマリのログ出力と、`--summary-json` で
+  指定されたパスへの JSON 出力を実装した。出力先のディレクトリが無い場合は
+  引数の検証で起動時にエラーにする
+- 単体テストとして、パーセンタイルの算出、成功接続率の算出、集約タスクの集計、
+  JSON の組み立て、`--summary-json` のパースと検証を追加した
+- README に `--summary-json` と集計内容を追記した
