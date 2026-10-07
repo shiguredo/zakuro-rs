@@ -1,7 +1,7 @@
 # 接続単位の outcome と失敗理由を記録する
 
 - Created: 2026-10-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-07
 - Branch: feature/add-connection-outcome-classification
 - Polished: {YYYY-MM-DD}
 
@@ -57,3 +57,25 @@
 - `cargo fmt --all -- --check` が通ること
 - `cargo clippy --locked --workspace --all-targets --features fdk-aac -- -D warnings` が通ること
 - `cargo test --locked --workspace --features fdk-aac` が通ること
+
+## 解決方法
+
+- `zakuro/src/connection_lifecycle.rs` に `ConnectionOutcome` (成功 / 失敗 / 判定不能) と
+  `ConnectionFailure` (失敗理由)、判定の入力になる `OutcomeSettings` を追加し、
+  `ConnectionLifecycle::judge` で判定する。判定は記録済みの時刻だけで行うため、
+  時刻に依存せず単体テストで組み合わせを検証できる
+- 成功述語はロールと映像 / 音声の有効 / 無効で決める。`expects_send` なら有効な種別すべての
+  送信と SFU からのレポート到着、`expects_receive` なら有効な種別すべての受信を求める
+- 判定不能は、統計サンプルが 0 のとき、映像も音声も無効なとき、確立から猶予
+  (`OUTCOME_GRACE`、10 秒) 未満で終了したときとした
+- `ConnectionLifecycle` に `last_media_activity_at` と `max_idle_samples` を追加し、
+  `zakuro/src/media_observer.rs` がサンプルごとにメディアの増加を記録する。
+  `is_stalled` は成功 / 失敗とは別の軸として `STALL_SAMPLES` (3) 回連続で増加が無い場合に true を返す
+- 映像 / 音声の有効判定は `is_video_enabled` / `is_audio_enabled` にまとめ、SDP の組み立てと
+  判定が食い違わないようにした
+- `connection_lifecycle` テーブルに `outcome` / `failure_reason` / `stalled` /
+  `max_idle_samples` / `last_media_activity_at` を追加し、接続終了時に 1 行として記録する
+- `docs/DUCKDB.md` に列の意味と集計クエリを追記した
+- 単体テストとして、構築失敗 / 確立失敗 / 成功 / 送信欠け / レポート欠け / 受信欠け /
+  想定外の切断 / サンプル 0 / 猶予内の終了 / 映像無効の場合 / メディア無効の場合 /
+  停止の検出と非検出、統計サンプルからの停止検出を追加した
