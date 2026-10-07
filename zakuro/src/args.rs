@@ -26,6 +26,12 @@ pub(crate) struct CommonArgs {
     pub(crate) no_duckdb_output: bool,
     /// 試験全体の集計結果を書く JSON ファイルのパス (`--summary-json`)
     pub(crate) summary_json: Option<String>,
+    /// 成功接続率の下限 (`--threshold-success-rate`、未指定なら判定しない)
+    pub(crate) threshold_success_rate: Option<f64>,
+    /// 接続確立までの所要時間 p95 の上限 (`--threshold-connect-time-p95-ms`、ミリ秒)
+    pub(crate) threshold_connect_time_p95_ms: Option<f64>,
+    /// 停止した接続数の上限 (`--threshold-stalled`)
+    pub(crate) threshold_stalled: Option<u32>,
     /// libwebrtc のデバッグログ閾値 (`--log-level`, デフォルト: Info)
     pub(crate) log_level: log::Severity,
     /// 抑制するログの部分文字列 (`--log-suppress`、カンマ区切り)
@@ -119,6 +125,9 @@ fn is_common_key(key: &str) -> bool {
             | "duckdb-interval"
             | "no-duckdb-output"
             | "summary-json"
+            | "threshold-success-rate"
+            | "threshold-connect-time-p95-ms"
+            | "threshold-stalled"
             | "log-level"
             | "log-suppress"
             | "fdk-aac-lib"
@@ -1036,6 +1045,50 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
             Ok(path)
         })?;
 
+    // --threshold-success-rate は 0.0 以上 1.0 以下の inclusive 範囲
+    let threshold_success_rate: Option<f64> = noargs::opt("threshold-success-rate")
+        .doc("Minimum success rate of connections (0.0 to 1.0)")
+        .example("0.99")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let v: f64 = o
+                .value()
+                .parse()
+                .map_err(|_| "threshold-success-rate は 0.0 から 1.0 の範囲で指定してください")?;
+            if !(0.0..=1.0).contains(&v) {
+                return Err("threshold-success-rate は 0.0 から 1.0 の範囲で指定してください");
+            }
+            Ok(v)
+        })?;
+
+    // --threshold-connect-time-p95-ms は正の数
+    let threshold_connect_time_p95_ms: Option<f64> = noargs::opt("threshold-connect-time-p95-ms")
+        .doc("Maximum p95 of connection establishment time (milliseconds)")
+        .example("3000")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let v: f64 = o
+                .value()
+                .parse()
+                .map_err(|_| "threshold-connect-time-p95-ms は正の数で指定してください")?;
+            if v <= 0.0 {
+                return Err("threshold-connect-time-p95-ms は正の数で指定してください");
+            }
+            Ok(v)
+        })?;
+
+    // --threshold-stalled は 0 以上の整数
+    let threshold_stalled: Option<u32> = noargs::opt("threshold-stalled")
+        .doc("Maximum number of connections whose media stalled")
+        .example("2")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let Ok(v) = o.value().parse::<u32>() else {
+                return Err("threshold-stalled は 0 以上の整数で指定してください");
+            };
+            Ok(v)
+        })?;
+
     // --duckdb-interval は 0.1 以上 86400 以下の inclusive 範囲
     let mut interval_presented = false;
     let duckdb_interval: f64 = noargs::opt("duckdb-interval")
@@ -1114,6 +1167,9 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
                 duckdb_interval,
                 no_duckdb_output,
                 summary_json,
+                threshold_success_rate,
+                threshold_connect_time_p95_ms,
+                threshold_stalled,
                 log_level,
                 log_suppress,
                 fdk_aac_lib,
@@ -1150,6 +1206,9 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
             duckdb_interval,
             no_duckdb_output,
             summary_json,
+            threshold_success_rate,
+            threshold_connect_time_p95_ms,
+            threshold_stalled,
             log_level,
             log_suppress,
             fdk_aac_lib,
@@ -3969,6 +4028,158 @@ mod tests {
         assert!(
             msg.contains("summary-json"),
             "エラーメッセージに summary-json が含まれていない: {msg}"
+        );
+    }
+
+    // ---- しきい値のテスト ----
+
+    /// しきい値の 3 引数を含む argv を組み立てる
+    fn common_threshold_argv(success_rate: &str, p95: &str, stalled: &str) -> Vec<String> {
+        let mut v: Vec<String> = Vec::new();
+        for (name, value) in [
+            ("--threshold-success-rate", success_rate),
+            ("--threshold-connect-time-p95-ms", p95),
+            ("--threshold-stalled", stalled),
+        ] {
+            if !value.is_empty() {
+                v.push(name.into());
+                v.push(value.into());
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn thresholds_default_to_none() {
+        // 未指定時は判定しない (すべて None)
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            Vec::new(),
+            Vec::new(),
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect("有効な argv のパースに失敗してはならない");
+        assert_eq!(
+            common.threshold_success_rate, None,
+            "未指定時は None になるべき"
+        );
+        assert_eq!(
+            common.threshold_connect_time_p95_ms, None,
+            "未指定時は None になるべき"
+        );
+        assert_eq!(common.threshold_stalled, None, "未指定時は None になるべき");
+    }
+
+    #[test]
+    fn thresholds_parse() {
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            Vec::new(),
+            common_threshold_argv("0.99", "3000", "2"),
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect("有効な argv のパースに失敗してはならない");
+        assert_eq!(
+            common.threshold_success_rate,
+            Some(0.99),
+            "成功接続率の下限が入るべき"
+        );
+        assert_eq!(
+            common.threshold_connect_time_p95_ms,
+            Some(3000.0),
+            "所要時間の上限が入るべき"
+        );
+        assert_eq!(common.threshold_stalled, Some(2), "停止数の上限が入るべき");
+    }
+
+    #[test]
+    fn threshold_success_rate_rejects_out_of_range() {
+        // 0.0 から 1.0 の範囲外は起動時にエラーにする
+        for value in ["-0.1", "1.5"] {
+            let err = parse_args_from_argv(
+                "zakuro",
+                Vec::new(),
+                common_threshold_argv(value, "", ""),
+                vec![minimal_sora_argv()],
+                Vec::new(),
+            )
+            .err()
+            .unwrap_or_else(|| panic!("threshold-success-rate={value} を許容してはならない"));
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("threshold-success-rate"),
+                "エラーメッセージに threshold-success-rate が含まれていない: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn threshold_connect_time_rejects_non_positive() {
+        // 0 以下は起動時にエラーにする
+        let err = parse_args_from_argv(
+            "zakuro",
+            Vec::new(),
+            common_threshold_argv("", "0", ""),
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect_err("threshold-connect-time-p95-ms=0 を許容してはならない");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("threshold-connect-time-p95-ms"),
+            "エラーメッセージに threshold-connect-time-p95-ms が含まれていない: {msg}"
+        );
+    }
+
+    #[test]
+    fn threshold_stalled_rejects_negative() {
+        let err = parse_args_from_argv(
+            "zakuro",
+            Vec::new(),
+            common_threshold_argv("", "", "-1"),
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect_err("threshold-stalled=-1 を許容してはならない");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("threshold-stalled"),
+            "エラーメッセージに threshold-stalled が含まれていない: {msg}"
+        );
+    }
+
+    #[test]
+    fn jsonc_accepts_threshold_keys() {
+        // JSONC の最上位でもしきい値を指定できる
+        let content = r#"{
+            "vcs": 1,
+            "threshold-success-rate": 0.99,
+            "threshold-connect-time-p95-ms": 3000,
+            "threshold-stalled": 2,
+            "sora": {
+                "signaling-url": "wss://example.com/",
+                "channel-id": "ch",
+                "role": "sendonly"
+            }
+        }"#;
+        let (common, _instances) =
+            validate_jsonc_config_str(content).expect("有効な JSONC のパースに失敗してはならない");
+        assert_eq!(
+            common.threshold_success_rate,
+            Some(0.99),
+            "成功接続率のしきい値が入るべき"
+        );
+        assert_eq!(
+            common.threshold_connect_time_p95_ms,
+            Some(3000.0),
+            "所要時間のしきい値が入るべき"
+        );
+        assert_eq!(
+            common.threshold_stalled,
+            Some(2),
+            "停止数のしきい値が入るべき"
         );
     }
 }

@@ -17,6 +17,7 @@ mod nop_video_decoder;
 mod openh264_video_codec;
 mod scenario;
 mod summary;
+mod threshold;
 mod video_codec_capability;
 mod video_device_capturer;
 mod virtual_client;
@@ -659,6 +660,28 @@ async fn async_main() -> Result<()> {
         match summary::write_summary_json(std::path::Path::new(path), &summary) {
             Ok(()) => rtc_log_info!("[summary] wrote {}", path),
             Err(e) => rtc_log_warning!("[summary] failed to write {}: {}", path, e),
+        }
+    }
+
+    // しきい値が指定されていれば合否を判定する。満たさない項目があれば終了コード 1 で終わる
+    let thresholds = threshold::Thresholds {
+        success_rate: common.threshold_success_rate,
+        connect_time_p95_ms: common.threshold_connect_time_p95_ms,
+        stalled: common.threshold_stalled,
+    };
+    if !thresholds.is_empty() {
+        let violations = threshold::evaluate(&thresholds, &summary);
+        if violations.is_empty() {
+            rtc_log_info!("[threshold] all thresholds are satisfied");
+        } else {
+            for violation in &violations {
+                rtc_log_warning!("[threshold] not satisfied: {}", violation.message());
+            }
+            return Err(ErrorMessage::new(format!(
+                "threshold not satisfied: {} item(s)",
+                violations.len()
+            ))
+            .into());
         }
     }
 

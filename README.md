@@ -386,6 +386,9 @@ reconnect シナリオは「切断してすぐ再接続 → 1-5 秒のランダ�
 | `--duckdb-interval` | DuckDB への統計書き込み間隔 (秒、デフォルト: 1.0) |
 | `--no-duckdb-output` | DuckDB への統計情報出力を無効化 |
 | `--summary-json` | 試験全体の集計結果を書く JSON ファイルのパス |
+| `--threshold-success-rate` | 成功接続率の下限 (0.0 から 1.0) |
+| `--threshold-connect-time-p95-ms` | 接続確立までの所要時間 p95 の上限 (ミリ秒) |
+| `--threshold-stalled` | 停止した接続数の上限 |
 
 `--log-suppress` は指定した文字列を部分文字列として扱い、ログのメッセージ本体または
 発生元ファイル名 (`transport_feedback_adapter.cc` など) に一致した行を出力しません。
@@ -440,6 +443,24 @@ $ ./target/release/zakuro --summary-json summary.json ...
   "connect_time_ms": {"p50": 120.500, "p95": 300.250, "p99": 500.000}
 }
 ```
+
+### しきい値による合否判定
+
+`--threshold-*` を指定すると、集計結果をしきい値と突き合わせて合否を判定します。
+満たさなかった項目はログに警告として出し、終了コード 1 で終わります。しきい値を指定しない
+場合は判定せず、終了コード 0 で終わります。
+
+```console
+$ ./target/release/zakuro \
+    --summary-json summary.json \
+    --threshold-success-rate 0.99 \
+    --threshold-connect-time-p95-ms 3000 \
+    --threshold-stalled 2 ...
+```
+
+しきい値を指定したのに判定に必要なデータが無い場合 (接続を 1 本も判定できなかった、
+確立できた接続が 1 本も無かったなど) は、満たしたとはみなしません。測定できなかった試験が
+CI で成功になるのを避けるためです。
 
 ## HTTP API
 
