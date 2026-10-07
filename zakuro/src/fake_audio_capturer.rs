@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use shiguredo_webrtc::{
-    AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportRef, rtc_log_warning,
+    AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportPtr, rtc_log_warning,
 };
 
 use crate::mp4_audio::Mp4AudioSource;
@@ -128,7 +128,7 @@ pub(crate) enum FakeAudioSource {
 #[derive(Clone)]
 struct FakeAudioState {
     recording: Arc<AtomicBool>,
-    audio_transport: Arc<std::sync::Mutex<Option<AudioTransportRef>>>,
+    audio_transport: Arc<std::sync::Mutex<Option<AudioTransportPtr>>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -150,11 +150,11 @@ pub(crate) struct FakeAudioCapturer {
 
 struct FakeAudioHandler {
     recording: Arc<AtomicBool>,
-    audio_transport: Arc<std::sync::Mutex<Option<AudioTransportRef>>>,
+    audio_transport: Arc<std::sync::Mutex<Option<AudioTransportPtr>>>,
 }
 
 impl AudioDeviceModuleHandler for FakeAudioHandler {
-    fn register_audio_callback(&self, transport: Option<AudioTransportRef>) -> i32 {
+    fn register_audio_callback(&mut self, transport: Option<AudioTransportPtr>) -> i32 {
         let Ok(mut stored) = self.audio_transport.lock() else {
             rtc_log_warning!("audio_transport mutex poisoned in register_audio_callback");
             return -1;
@@ -163,23 +163,23 @@ impl AudioDeviceModuleHandler for FakeAudioHandler {
         0
     }
 
-    fn init(&self) -> i32 {
+    fn init(&mut self) -> i32 {
         0
     }
 
-    fn terminate(&self) -> i32 {
+    fn terminate(&mut self) -> i32 {
         0
     }
 
-    fn initialized(&self) -> bool {
+    fn initialized(&mut self) -> bool {
         true
     }
 
-    fn recording_devices(&self) -> i16 {
+    fn recording_devices(&mut self) -> i16 {
         1
     }
 
-    fn recording_device_name(&self, index: u16) -> Option<(String, String)> {
+    fn recording_device_name(&mut self, index: u16) -> Option<(String, String)> {
         if index == 0 {
             Some(("Fake Recording".to_string(), "fake-recording".to_string()))
         } else {
@@ -187,30 +187,30 @@ impl AudioDeviceModuleHandler for FakeAudioHandler {
         }
     }
 
-    fn recording_is_available(&self, available: &mut bool) -> i32 {
+    fn recording_is_available(&mut self, available: &mut bool) -> i32 {
         *available = true;
         0
     }
 
-    fn init_recording(&self) -> i32 {
+    fn init_recording(&mut self) -> i32 {
         0
     }
 
-    fn recording_is_initialized(&self) -> bool {
+    fn recording_is_initialized(&mut self) -> bool {
         true
     }
 
-    fn start_recording(&self) -> i32 {
+    fn start_recording(&mut self) -> i32 {
         self.recording.store(true, Ordering::SeqCst);
         0
     }
 
-    fn stop_recording(&self) -> i32 {
+    fn stop_recording(&mut self) -> i32 {
         self.recording.store(false, Ordering::SeqCst);
         0
     }
 
-    fn recording(&self) -> bool {
+    fn recording(&mut self) -> bool {
         self.recording.load(Ordering::SeqCst)
     }
 }
@@ -346,7 +346,7 @@ mod tests {
     /// poison 済み Mutex に対して register_audio_callback が -1 を返すことを検証する
     #[test]
     fn test_register_audio_callback_poisoned_mutex() {
-        let audio_transport = Arc::new(std::sync::Mutex::new(None::<AudioTransportRef>));
+        let audio_transport = Arc::new(std::sync::Mutex::new(None::<AudioTransportPtr>));
         // Mutex を poison させる
         let poisoned = audio_transport.clone();
         let handle = std::thread::spawn(move || {
@@ -355,7 +355,7 @@ mod tests {
         });
         let _ = handle.join();
 
-        let handler = FakeAudioHandler {
+        let mut handler = FakeAudioHandler {
             recording: Arc::new(AtomicBool::new(false)),
             audio_transport,
         };
@@ -369,8 +369,8 @@ mod tests {
     /// 正常系: register_audio_callback が 0 を返し transport が設定されることを検証する
     #[test]
     fn test_register_audio_callback_normal() {
-        let audio_transport = Arc::new(std::sync::Mutex::new(None::<AudioTransportRef>));
-        let handler = FakeAudioHandler {
+        let audio_transport = Arc::new(std::sync::Mutex::new(None::<AudioTransportPtr>));
+        let mut handler = FakeAudioHandler {
             recording: Arc::new(AtomicBool::new(false)),
             audio_transport,
         };

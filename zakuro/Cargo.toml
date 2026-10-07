@@ -45,10 +45,10 @@ shiguredo_openh264 = "2026.2"
 shiguredo_opus = "2026.2"
 # クロスプラットフォーム ビデオデバイス
 shiguredo_video_device = "2026.3"
-# libwebrtc バインディング (sora_sdk が要求する ~0.154 と揃え、同一 crate を 1 バージョンに統一する)
-shiguredo_webrtc = "0.154"
-# Sora Rust SDK
-sora_sdk = "2026.2.0-canary.1"
+# libwebrtc バインディング (sora_sdk が要求する ~0.154.1-canary.5 と揃え、同一 crate を 1 バージョンに統一する)
+shiguredo_webrtc = "0.154.1-canary.5"
+# Sora Rust SDK (on_connection_state_change などの状態変化コールバックは canary.7 以降)
+sora_sdk = "2026.2.0-canary.7"
 # tokio Stream ラッパー (ReceiverStream, IntervalStream)
 tokio-stream = "0.1"
 # tokio ユーティリティ (CancellationToken, DelayQueue)

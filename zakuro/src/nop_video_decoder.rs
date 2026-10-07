@@ -34,11 +34,11 @@ impl VideoDecoderHandler for NopDecoder {
         // 符号化データをフレームバッファから捨てさせる。
         let buffer = I420Buffer::new(2, 2);
         let frame_buffer = buffer.cast_to_video_frame_buffer();
-        let frame = VideoFrame::builder(&frame_buffer)
+        let mut frame = VideoFrame::builder(&frame_buffer)
             .set_timestamp_us(render_time_ms.saturating_mul(1000))
             .set_rtp_timestamp(input_image.rtp_timestamp())
             .build();
-        unsafe { callback.decoded(frame.as_ref()) };
+        unsafe { callback.decoded(frame.as_mut()) };
         VideoCodecStatus::Ok
     }
 

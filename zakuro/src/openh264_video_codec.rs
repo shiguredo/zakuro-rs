@@ -7,7 +7,7 @@ use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EnvironmentRef, H264PacketizationMode,
     ScalabilityMode, SdpVideoFormat, SdpVideoFormatRef, VideoCodecStatus, VideoCodecType,
     VideoDecoder, VideoEncoder, VideoEncoderEncodedImageCallbackPtr,
-    VideoEncoderEncodedImageCallbackRef, VideoEncoderEncoderInfo, VideoEncoderHandler,
+    VideoEncoderEncodedImageCallbackRefMut, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
     rtc_log_info, rtc_log_warning,
 };
@@ -159,10 +159,10 @@ impl VideoEncoderHandler for Openh264Encoder {
 
     fn register_encode_complete_callback(
         &mut self,
-        callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
+        callback: Option<VideoEncoderEncodedImageCallbackRefMut<'_>>,
     ) -> VideoCodecStatus {
         self.callback =
-            callback.map(|cb| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(cb) });
+            callback.map(|cb| unsafe { VideoEncoderEncodedImageCallbackPtr::from_mut(&cb) });
         VideoCodecStatus::Ok
     }
 
@@ -369,7 +369,7 @@ mod tests {
         );
         let params = format
             .as_ref()
-            .parameters_mut()
+            .parameters()
             .iter()
             .collect::<HashMap<String, String>>();
         assert_eq!(
