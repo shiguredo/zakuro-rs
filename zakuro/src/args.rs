@@ -32,6 +32,8 @@ pub(crate) struct CommonArgs {
     pub(crate) threshold_connect_time_p95_ms: Option<f64>,
     /// 停止した接続数の上限 (`--threshold-stalled`)
     pub(crate) threshold_stalled: Option<u32>,
+    /// 集計から除外する立ち上がり期間 (`--threshold-warmup`、秒)
+    pub(crate) threshold_warmup: f64,
     /// libwebrtc のデバッグログ閾値 (`--log-level`, デフォルト: Info)
     pub(crate) log_level: log::Severity,
     /// 抑制するログの部分文字列 (`--log-suppress`、カンマ区切り)
@@ -128,6 +130,7 @@ fn is_common_key(key: &str) -> bool {
             | "threshold-success-rate"
             | "threshold-connect-time-p95-ms"
             | "threshold-stalled"
+            | "threshold-warmup"
             | "log-level"
             | "log-suppress"
             | "fdk-aac-lib"
@@ -1089,6 +1092,22 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
             Ok(v)
         })?;
 
+    // --threshold-warmup は 0 以上 86400 以下の inclusive 範囲 (デフォルト: 0 で除外しない)
+    let threshold_warmup: f64 = noargs::opt("threshold-warmup")
+        .doc("Exclude connections that ended within this period from the summary (seconds, default: 0)")
+        .example("10")
+        .take(&mut args)
+        .present_and_then(|o| {
+            let Ok(v) = o.value().parse::<f64>() else {
+                return Err("threshold-warmup は 0 から 86400 の範囲で指定してください");
+            };
+            if !(0.0..=86400.0).contains(&v) {
+                return Err("threshold-warmup は 0 から 86400 の範囲で指定してください");
+            }
+            Ok(v)
+        })?
+        .unwrap_or(0.0);
+
     // --duckdb-interval は 0.1 以上 86400 以下の inclusive 範囲
     let mut interval_presented = false;
     let duckdb_interval: f64 = noargs::opt("duckdb-interval")
@@ -1170,6 +1189,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
                 threshold_success_rate,
                 threshold_connect_time_p95_ms,
                 threshold_stalled,
+                threshold_warmup,
                 log_level,
                 log_suppress,
                 fdk_aac_lib,
@@ -1209,6 +1229,7 @@ fn parse_common_args(program_name: &str, argv: Vec<String>) -> Result<(CommonArg
             threshold_success_rate,
             threshold_connect_time_p95_ms,
             threshold_stalled,
+            threshold_warmup,
             log_level,
             log_suppress,
             fdk_aac_lib,
@@ -4180,6 +4201,73 @@ mod tests {
             common.threshold_stalled,
             Some(2),
             "停止数のしきい値が入るべき"
+        );
+    }
+
+    #[test]
+    fn threshold_warmup_defaults_to_zero() {
+        // 未指定時は除外しない (短い試験で判定対象が 0 本になるのを避ける)
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            Vec::new(),
+            Vec::new(),
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect("有効な argv のパースに失敗してはならない");
+        assert_eq!(common.threshold_warmup, 0.0, "未指定時は 0 になるべき");
+    }
+
+    #[test]
+    fn threshold_warmup_parses() {
+        let (common, _instances) = parse_args_from_argv(
+            "zakuro",
+            Vec::new(),
+            vec!["--threshold-warmup".into(), "10".into()],
+            vec![minimal_sora_argv()],
+            Vec::new(),
+        )
+        .expect("有効な argv のパースに失敗してはならない");
+        assert_eq!(common.threshold_warmup, 10.0, "除外期間が入るべき");
+    }
+
+    #[test]
+    fn threshold_warmup_rejects_out_of_range() {
+        // 負の数と 86400 秒より大きい値は起動時にエラーにする
+        for value in ["-1", "86401"] {
+            let err = parse_args_from_argv(
+                "zakuro",
+                Vec::new(),
+                vec!["--threshold-warmup".into(), value.into()],
+                vec![minimal_sora_argv()],
+                Vec::new(),
+            )
+            .err()
+            .unwrap_or_else(|| panic!("threshold-warmup={value} を許容してはならない"));
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("threshold-warmup"),
+                "エラーメッセージに threshold-warmup が含まれていない: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn jsonc_accepts_threshold_warmup_key() {
+        let content = r#"{
+            "vcs": 1,
+            "threshold-warmup": 10,
+            "sora": {
+                "signaling-url": "wss://example.com/",
+                "channel-id": "ch",
+                "role": "sendonly"
+            }
+        }"#;
+        let (common, _instances) =
+            validate_jsonc_config_str(content).expect("有効な JSONC のパースに失敗してはならない");
+        assert_eq!(
+            common.threshold_warmup, 10.0,
+            "JSONC から除外期間が入るべき"
         );
     }
 }

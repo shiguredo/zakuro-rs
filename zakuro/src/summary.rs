@@ -28,6 +28,12 @@ pub(crate) fn log_summary(summary: &StatsSummary) {
     for (reason, count) in &summary.failure_reasons {
         log::info!("[summary] failure reason: {} = {}", reason, count);
     }
+    if summary.warmup_excluded > 0 {
+        log::info!(
+            "[summary] excluded from the summary (warmup): {}",
+            summary.warmup_excluded,
+        );
+    }
     log::info!(
         "[summary] connect time (ms): p50={} p95={} p99={}",
         format_optional_ms(summary.connect_time_p50_ms),
@@ -60,6 +66,7 @@ pub(crate) fn write_summary_json(path: &Path, summary: &StatsSummary) -> std::io
     let json = format!(
         "{{\n  \"success\": {},\n  \"failure\": {},\n  \"unjudged\": {},\n  \
          \"judged\": {},\n  \"success_rate\": {},\n  \"stalled\": {},\n  \
+         \"warmup_excluded\": {},\n  \
          \"failure_reasons\": {},\n  \
          \"connect_time_ms\": {{\"p50\": {}, \"p95\": {}, \"p99\": {}}}\n}}\n",
         summary.success,
@@ -68,6 +75,7 @@ pub(crate) fn write_summary_json(path: &Path, summary: &StatsSummary) -> std::io
         summary.judged(),
         format_optional_rate(summary.success_rate()),
         summary.stalled,
+        summary.warmup_excluded,
         reasons,
         format_optional_ms(summary.connect_time_p50_ms),
         format_optional_ms(summary.connect_time_p95_ms),
@@ -106,6 +114,7 @@ mod tests {
             failure: 2,
             unjudged: 5,
             stalled: 1,
+            warmup_excluded: 3,
             failure_reasons: vec![("no-media-sent", 2), ("connect-failed", 1)],
             connect_time_p50_ms: Some(120.5),
             connect_time_p95_ms: Some(300.25),

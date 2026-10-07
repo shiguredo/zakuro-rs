@@ -89,7 +89,13 @@ async fn async_main() -> Result<()> {
     }
 
     // 接続数の集計と、object 送信数の集計
-    let stats = StatsCollector::new(total_vcs, instances_count, token.clone());
+    // MOQ 版は接続単位の合否を判定しないため、立ち上がり期間の除外は使わない
+    let stats = StatsCollector::new(
+        total_vcs,
+        instances_count,
+        std::time::Duration::ZERO,
+        token.clone(),
+    );
     let stats_tx = stats.event_tx();
     let objects_sent = Arc::new(AtomicU64::new(0));
     let receive_counters = moq_client::ReceiveCounters::new();

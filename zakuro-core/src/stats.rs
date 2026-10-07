@@ -3,7 +3,7 @@
 //! 仮想クライアントが送る [`StatsEvent`] を集約し、[`StatsSnapshot`] として保持する。
 //! 集計結果は 5 秒ごとにログへ出す。
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
@@ -60,6 +60,8 @@ pub enum StatsEvent {
         stalled: bool,
         /// 接続の試行から確立までに要した時間
         connect_duration: Option<Duration>,
+        /// 接続が終了した時刻 (単調時計)
+        ended_at: Instant,
     },
 }
 
@@ -165,6 +167,8 @@ pub struct StatsSummary {
     pub unjudged: u32,
     /// メディアが止まった接続数
     pub stalled: u32,
+    /// 立ち上がり期間のため集計から除外した接続数
+    pub warmup_excluded: u32,
     /// 失敗理由ごとの接続数 (接続数の多い順)
     pub failure_reasons: Vec<(&'static str, u32)>,
     /// 確立までの所要時間の p50 / p95 / p99 (ミリ秒)
@@ -206,6 +210,8 @@ struct OutcomeTotals {
     failure_reasons: Vec<(&'static str, u32)>,
     /// 確立までの所要時間 (ミリ秒)。パーセンタイルの算出に使う
     connect_times_ms: Vec<f64>,
+    /// 立ち上がり期間のため集計から除外した接続数
+    warmup_excluded: u32,
 }
 
 impl OutcomeTotals {
@@ -217,7 +223,13 @@ impl OutcomeTotals {
             stalled: 0,
             failure_reasons: Vec::new(),
             connect_times_ms: Vec::new(),
+            warmup_excluded: 0,
         }
+    }
+
+    /// 立ち上がり期間のため集計から除外したことを記録する
+    fn exclude_for_warmup(&mut self) {
+        self.warmup_excluded = self.warmup_excluded.saturating_add(1);
     }
 
     fn apply(&mut self, event: StatsEvent) {
@@ -266,12 +278,27 @@ impl OutcomeTotals {
             failure: self.failure,
             unjudged: self.unjudged,
             stalled: self.stalled,
+            warmup_excluded: self.warmup_excluded,
             failure_reasons,
             connect_time_p50_ms: percentile(&connect_times_ms, 0.50),
             connect_time_p95_ms: percentile(&connect_times_ms, 0.95),
             connect_time_p99_ms: percentile(&connect_times_ms, 0.99),
         }
     }
+}
+
+/// 集計の対象になるイベントか
+///
+/// 立ち上がり期間 (`warmup`) が経過する前に終了した接続は対象から外す。
+/// 接続の合否は終了時点の 1 点で決まるため、測定窓は「終了時刻が `warmup` 以降」と定める。
+fn is_counted(event: &StatsEvent, started_at: Instant, warmup: Duration) -> bool {
+    if warmup.is_zero() {
+        return true;
+    }
+    let StatsEvent::ConnectionEnded { ended_at, .. } = event else {
+        return true;
+    };
+    ended_at.duration_since(started_at) >= warmup
 }
 
 /// 昇順に並んだ値のパーセンタイルを返す
@@ -302,15 +329,21 @@ pub struct StatsCollector {
 
 impl StatsCollector {
     /// 集約タスクとレポータータスクを起動する
-    pub fn new(total: u32, instances: u32, token: CancellationToken) -> Self {
+    ///
+    /// `warmup` は集計から除外する立ち上がり期間。0 を指定すると除外しない。
+    /// 試験の開始時刻はこの関数を呼んだ時点とする。
+    pub fn new(total: u32, instances: u32, warmup: Duration, token: CancellationToken) -> Self {
         let (event_tx, event_rx) = mpsc::channel(256);
         let (snapshot_tx, snapshot_rx) = watch::channel(StatsSnapshot::initial(total, instances));
 
+        let started_at = Instant::now();
         let aggregator = tokio::spawn(Self::aggregator(
             event_rx,
             snapshot_tx,
             total,
             instances,
+            started_at,
+            warmup,
             token.clone(),
         ));
         tokio::spawn(Self::reporter(snapshot_rx.clone(), token));
@@ -354,6 +387,8 @@ impl StatsCollector {
         snapshot_tx: watch::Sender<StatsSnapshot>,
         total: u32,
         instances: u32,
+        started_at: Instant,
+        warmup: Duration,
         token: CancellationToken,
     ) -> StatsSummary {
         let mut snapshot = StatsSnapshot::initial(total, instances);
@@ -365,9 +400,14 @@ impl StatsCollector {
                 _ = token.cancelled() => break,
                 maybe_event = events.next() => {
                     let Some(event) = maybe_event else { break };
-                    snapshot.apply(event);
-                    totals.apply(event);
-                    let _ = snapshot_tx.send(snapshot.clone());
+                    // 立ち上がり期間に終了した接続は集計から外す (生の記録は残る)
+                    if is_counted(&event, started_at, warmup) {
+                        snapshot.apply(event);
+                        totals.apply(event);
+                        let _ = snapshot_tx.send(snapshot.clone());
+                    } else {
+                        totals.exclude_for_warmup();
+                    }
                 }
             }
         }
@@ -465,7 +505,7 @@ mod tests {
     #[tokio::test]
     async fn collector_summarizes_connection_outcomes() {
         let token = CancellationToken::new();
-        let collector = StatsCollector::new(4, 1, token.clone());
+        let collector = StatsCollector::new(4, 1, Duration::ZERO, token.clone());
         let event_tx = collector.event_tx();
 
         let events = [
@@ -476,6 +516,7 @@ mod tests {
                 failure_reason: None,
                 stalled: false,
                 connect_duration: Some(Duration::from_millis(100)),
+                ended_at: Instant::now(),
             },
             StatsEvent::ConnectionEnded {
                 instance_id: 0,
@@ -484,6 +525,7 @@ mod tests {
                 failure_reason: None,
                 stalled: true,
                 connect_duration: Some(Duration::from_millis(300)),
+                ended_at: Instant::now(),
             },
             StatsEvent::ConnectionEnded {
                 instance_id: 0,
@@ -492,6 +534,7 @@ mod tests {
                 failure_reason: Some("no-media-sent"),
                 stalled: false,
                 connect_duration: Some(Duration::from_millis(200)),
+                ended_at: Instant::now(),
             },
             StatsEvent::ConnectionEnded {
                 instance_id: 0,
@@ -500,6 +543,7 @@ mod tests {
                 failure_reason: None,
                 stalled: false,
                 connect_duration: None,
+                ended_at: Instant::now(),
             },
         ];
         for event in events {
@@ -547,7 +591,7 @@ mod tests {
     #[tokio::test]
     async fn collector_keeps_counting_state_changes() {
         let token = CancellationToken::new();
-        let collector = StatsCollector::new(2, 1, token.clone());
+        let collector = StatsCollector::new(2, 1, Duration::ZERO, token.clone());
         let event_tx = collector.event_tx();
 
         event_tx
@@ -580,5 +624,89 @@ mod tests {
             summary.connect_time_p50_ms, None,
             "所要時間が無ければ None であること"
         );
+    }
+
+    /// 立ち上がり期間の内側で終了した接続は集計しないこと
+    #[test]
+    fn connection_ended_within_warmup_is_not_counted() {
+        let started_at = Instant::now();
+        let warmup = Duration::from_secs(10);
+        let event = |ended_at: Instant| StatsEvent::ConnectionEnded {
+            instance_id: 0,
+            vc_id: 0,
+            outcome: "success",
+            failure_reason: None,
+            stalled: false,
+            connect_duration: Some(Duration::from_millis(100)),
+            ended_at,
+        };
+
+        assert!(
+            !is_counted(
+                &event(started_at + Duration::from_secs(9)),
+                started_at,
+                warmup
+            ),
+            "立ち上がり期間の内側で終了した接続は集計しないこと"
+        );
+        assert!(
+            is_counted(
+                &event(started_at + Duration::from_secs(10)),
+                started_at,
+                warmup
+            ),
+            "立ち上がり期間ちょうどで終了した接続は集計すること"
+        );
+        assert!(
+            is_counted(
+                &event(started_at + Duration::from_secs(11)),
+                started_at,
+                warmup
+            ),
+            "立ち上がり期間を過ぎた接続は集計すること"
+        );
+        assert!(
+            is_counted(
+                &event(started_at + Duration::from_secs(1)),
+                started_at,
+                Duration::ZERO
+            ),
+            "除外期間が 0 の場合は常に集計すること"
+        );
+    }
+
+    /// 立ち上がり期間に終了した接続は集計から除外されること
+    #[tokio::test]
+    async fn collector_excludes_warmup_connections() {
+        let token = CancellationToken::new();
+        // 1 時間を除外期間にすると、この時点で終了した接続は必ず内側になる
+        let collector = StatsCollector::new(2, 1, Duration::from_secs(3600), token.clone());
+        let event_tx = collector.event_tx();
+
+        event_tx
+            .send(StatsEvent::ConnectionEnded {
+                instance_id: 0,
+                vc_id: 0,
+                outcome: "failure",
+                failure_reason: Some("connect-failed"),
+                stalled: false,
+                connect_duration: None,
+                ended_at: Instant::now(),
+            })
+            .await
+            .expect("イベントの送信に成功すること");
+        drop(event_tx);
+
+        let summary = collector.finalize().await;
+        assert_eq!(
+            summary.judged(),
+            0,
+            "立ち上がり期間の接続は合否の集計に含めないこと"
+        );
+        assert!(
+            summary.failure_reasons.is_empty(),
+            "立ち上がり期間の接続は失敗理由にも含めないこと"
+        );
+        assert_eq!(summary.warmup_excluded, 1, "除外した接続数を数えること");
     }
 }

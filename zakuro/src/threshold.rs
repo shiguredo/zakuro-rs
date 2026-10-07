@@ -111,6 +111,7 @@ mod tests {
             failure: 1,
             unjudged: 0,
             stalled: 1,
+            warmup_excluded: 0,
             failure_reasons: vec![("no-media-sent", 1)],
             connect_time_p50_ms: Some(100.0),
             connect_time_p95_ms: Some(2000.0),

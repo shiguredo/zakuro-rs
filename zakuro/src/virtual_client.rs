@@ -138,6 +138,8 @@ pub(crate) async fn run(
                 failure_reason: result.outcome.failure_reason(),
                 stalled: result.stalled,
                 connect_duration: result.connect_duration,
+                // 立ち上がり期間の判定に使うため、終了時刻はここで取る
+                ended_at: std::time::Instant::now(),
             });
         };
 

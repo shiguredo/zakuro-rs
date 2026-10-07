@@ -389,6 +389,7 @@ reconnect シナリオは「切断してすぐ再接続 → 1-5 秒のランダ�
 | `--threshold-success-rate` | 成功接続率の下限 (0.0 から 1.0) |
 | `--threshold-connect-time-p95-ms` | 接続確立までの所要時間 p95 の上限 (ミリ秒) |
 | `--threshold-stalled` | 停止した接続数の上限 |
+| `--threshold-warmup` | 集計から除外する立ち上がり期間 (秒、デフォルト: 0 で除外しない) |
 
 `--log-suppress` は指定した文字列を部分文字列として扱い、ログのメッセージ本体または
 発生元ファイル名 (`transport_feedback_adapter.cc` など) に一致した行を出力しません。
@@ -419,6 +420,7 @@ LS_INFO 固定であるため、verbose ログは出力されません。
 - 失敗理由ごとの接続数
 - メディアが止まった接続数
 - 接続確立までの所要時間の p50 / p95 / p99
+- 立ち上がり期間のため集計から除外した接続数
 
 接続の合否は、確立とメディアの観測から判定します。有効な種別のメディアが流れていない
 接続は失敗とし、統計サンプルが取れなかった接続と確立直後に終了した接続は判定不能として
@@ -455,8 +457,14 @@ $ ./target/release/zakuro \
     --summary-json summary.json \
     --threshold-success-rate 0.99 \
     --threshold-connect-time-p95-ms 3000 \
-    --threshold-stalled 2 ...
+    --threshold-stalled 2 \
+    --threshold-warmup 10 ...
 ```
+
+`--threshold-warmup` を指定すると、試験開始から指定した秒数が経過する前に終了した接続を
+集計から除外します。`--vcs-hatch-rate` で仮想クライアントを徐々に増やす場合、立ち上がり
+期間の接続は負荷が目標に達していないため、合否がぶれます。除外した接続は
+`warmup_excluded` に数え、DuckDB の `connection_lifecycle` には記録したままにします。
 
 しきい値を指定したのに判定に必要なデータが無い場合 (接続を 1 本も判定できなかった、
 確立できた接続が 1 本も無かったなど) は、満たしたとはみなしません。測定できなかった試験が

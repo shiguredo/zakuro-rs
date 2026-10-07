@@ -527,7 +527,13 @@ async fn async_main() -> Result<()> {
 
     let token = CancellationToken::new();
 
-    let stats = StatsCollector::new(total_vcs, instances_count, token.clone());
+    // 立ち上がり期間の除外は、試験の開始時点 (ここ) を起点に集約側で判定する
+    let stats = StatsCollector::new(
+        total_vcs,
+        instances_count,
+        Duration::from_secs_f64(common.threshold_warmup),
+        token.clone(),
+    );
     let stats_tx = stats.event_tx();
 
     // Ctrl+C ハンドラを先に起動 (DelayQueue poll 中のキャンセル経路を確保)
