@@ -1,7 +1,7 @@
 # 立ち上がり期間を集計から除外する
 
 - Created: 2026-10-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-07
 - Branch: feature/add-threshold-warmup
 - Polished: {YYYY-MM-DD}
 
@@ -46,3 +46,23 @@
 - `cargo fmt --all -- --check` が通ること
 - `cargo clippy --locked --workspace --all-targets --features fdk-aac -- -D warnings` が通ること
 - `cargo test --locked --workspace --features fdk-aac` が通ること
+
+## 解決方法
+
+- `StatsEvent::ConnectionEnded` に `ended_at` (`std::time::Instant`) を追加した。単調時計を
+  使うことで、系の時刻変更の影響を受けずに経過時間を判定できる
+- `StatsCollector::new` に除外期間 (`warmup`) を渡すようにし、集約タスクが
+  `is_counted` で「終了時刻が試験開始から `warmup` 以降か」を判定して、内側の接続を
+  集計から外すようにした。除外期間が 0 の場合は常に集計する
+- 除外した接続数は `StatsSummary::warmup_excluded` として持ち、ログと JSON に出す。
+  ログは 0 件のときは出さない
+- `--threshold-warmup <SECONDS>` を追加した (0 から 86400、デフォルト: 0)。既定で除外すると
+  短い試験で判定対象が 0 本になり、しきい値が必ず違反になるため、指定したときだけ有効にした。
+  JSONC の最上位でも指定できる
+- `zakuro-moq` は接続単位の合否を判定しないため、除外期間に 0 を渡す
+- 単体テストとして、`is_counted` の境界値 (内側 / ちょうど / 外側 / 除外期間 0) と、
+  集約タスクが立ち上がり期間の接続を除外して数えることを追加した
+- 到達できないシグナリング URL に対して `--threshold-warmup 60` を付けて起動し、
+  接続が除外されて `judged=0` / `warmup_excluded=1` になり、しきい値が
+  「判定できる接続が無い」として違反になり終了コード 1 で終わることを確認した
+- README に `--threshold-warmup` の説明を追記した
