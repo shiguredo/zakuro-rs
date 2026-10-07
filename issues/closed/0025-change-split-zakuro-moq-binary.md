@@ -80,7 +80,7 @@ JSONC もトップレベルに同じ名前のキーを書く (`sora` / `sora-moq
 - `zakuro` (Sora) の既存動作が変わらないこと (既存テストと起動確認)
 - `zakuro` から MOQ モードの実装・引数・検証が消えていること
 - `make ci` が通ること
-- `zakuro-moq` が実際の sora-moq relay に接続して publish できること (relay のホストは
+- `zakuro-moq` が実際の Sora MoQ のリレーに接続して publish できること (relay のホストは
   リポジトリに書かず実行時に渡す)
 
 ## 変更対象

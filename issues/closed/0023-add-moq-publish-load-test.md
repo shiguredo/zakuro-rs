@@ -1,4 +1,4 @@
-# MOQT publish の負荷試験 (sora-moq) を追加する
+# MOQT publish の負荷試験 (Sora MoQ) を追加する
 
 - Created: 2026-10-02
 - Completed: 2026-10-02
@@ -8,7 +8,7 @@
 ## 目的
 
 zakuro-rs は Sora WebRTC SFU の負荷試験ツールであり、仮想クライアントを大量に生成して SFU の性能を測る。
-sora-moq は Sora の Media over QUIC (MOQT) 実装であり、リレー機能を提供する。
+Sora MoQ (Media over QUIC 実装) は、MOQT のリレー機能を提供する。
 MOQT 経路の負荷試験手段が無いため、zakuro-rs から MOQT で publish できるようにする。
 
 C++ 版 zakuro に MOQ 対応は無く、zakuro-rs が最初の MOQ 負荷試験ツールになる。
@@ -57,7 +57,7 @@ C++ 版 zakuro に MOQ 対応は無く、zakuro-rs が最初の MOQ 負荷試験
 
 - `--sora-moq-url` を指定して起動すると、`--vcs` 個の QUIC 接続が確立し、MOQT の SETUP が完了し、PUBLISH が受理されて object が送信され続ける
 - `--duration` 経過で切断し、`--repeat-interval` で再接続する既存のライフサイクルが MOQ モードでも動く
-- 実際の sora-moq relay に対して疎通確認できる (relay のホストはリポジトリに書かない。実行時に引数で渡す)
+- 実際の Sora MoQ のリレーに対して疎通確認できる (relay のホストはリポジトリに書かない。実行時に引数で渡す)
 - Sora モードの既存動作が変わらない (既存テストが通る)
 - `make ci` が通る
 

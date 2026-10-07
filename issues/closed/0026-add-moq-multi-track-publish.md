@@ -51,7 +51,7 @@ publish できる必要がある。
 - 1 仮想クライアントが複数トラックを publish し、それぞれのトラックで指定レートの
   object が流れること
 - JSONC の `tracks` 配列と CLI の `--tracks` の両方で指定できること
-- 実際の sora-moq relay に対して複数トラックの publish が受理されること
+- 実際の Sora MoQ のリレーに対して複数トラックの publish が受理されること
   (relay のホストはリポジトリに書かない)
 - `make ci` が通ること
 

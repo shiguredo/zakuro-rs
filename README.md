@@ -20,7 +20,7 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 | バイナリ | ディレクトリ | 対象 | 主な依存 |
 |---|---|---|---|
 | `zakuro` | `zakuro/` | Sora WebRTC SFU | libwebrtc (Sora Rust SDK)・DuckDB |
-| `zakuro-moq` | `zakuro-moq/` | Sora の Media over QUIC 実装 (sora-moq) のリレー | s2n-quic・moqt-rs (`shiguredo_moqt`) |
+| `zakuro-moq` | `zakuro-moq/` | Sora MoQ (Media over QUIC 実装) のリレー | s2n-quic・moqt-rs (`shiguredo_moqt`) |
 
 両者で共有する基盤 (統計・HTTP サーバー・JSON-RPC) は `zakuro-core/` に置いています。
 
@@ -219,7 +219,7 @@ cargo run -- \
 
 ## MOQ 版 (`zakuro-moq`)
 
-Sora の Media over QUIC 実装 (sora-moq) のリレーに対する publish 負荷試験を行います。
+Sora MoQ (Media over QUIC 実装) のリレーに対する publish 負荷試験を行います。
 1 仮想クライアント = 1 QUIC 接続 = 1 MOQT セッションで、指定した複数トラックを同時に
 publish します。Track Name は `<トラック名>-<インスタンス>-<仮想クライアント>` として
 仮想クライアントごとに一意化します。
