@@ -578,10 +578,43 @@ async fn async_main() -> Result<()> {
 
     // instance 引数は起動時に 1 度だけ消費するため Option<InstanceArgs> でラップして take する
     let mut pending: Vec<Option<InstanceArgs>> = instance_args_vec.into_iter().map(Some).collect();
-    // JoinSet の Item を (instance_id, Result<()>) にすることで、正常終了 / Err 経路で
-    // instance_id を取り出せるようにする。JoinError 経路 (panic) は instance_id 取得不可。
-    // FakeAudioCapturer などの !Send 型を future が保持するため `spawn_local` を使う。
-    let mut instances: JoinSet<(u32, Result<()>)> = JoinSet::new();
+
+    // インスタンスは複数のワーカー (スレッド + runtime + LocalSet) に分けて実行する。
+    // ワーカー数はインスタンス数と CPU 数の小さい方にする。これより増やしても
+    // 遊ぶスレッドが増えるだけで、インスタンスごとの PeerConnectionFactory は
+    // 分かれたままなので、接続ごとの処理はワーカー数まで分散する。
+    let worker_count = (instances_count as usize)
+        .min(
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+        )
+        .max(1);
+    let worker_config = InstanceWorkerConfig {
+        common: common.clone(),
+        openh264_lib: openh264_lib.clone(),
+        client_cert_pem: client_cert_pem.clone(),
+        client_key_pem: client_key_pem.clone(),
+        token: token.clone(),
+        stats_tx: stats_tx.clone(),
+        duckdb_client: duckdb_client.clone(),
+        duckdb_interval: Duration::from_secs_f64(common.duckdb_interval),
+    };
+    let (instance_result_tx, mut instance_result_rx) =
+        mpsc::unbounded_channel::<(u32, Result<()>)>();
+    let mut workers = Vec::with_capacity(worker_count);
+    for worker_id in 0..worker_count {
+        workers.push(InstanceWorker::spawn(
+            worker_id,
+            worker_config.clone(),
+            instance_result_tx.clone(),
+        )?);
+    }
+    // 結果はワーカーが持つ sender から受け取るため、main 側の sender は畳んでおく
+    drop(instance_result_tx);
+
+    // ワーカーへ投入できたインスタンス数 (結果を待つ数)
+    let mut dispatched = 0usize;
 
     loop {
         tokio::select! {
@@ -599,29 +632,15 @@ async fn async_main() -> Result<()> {
                 let instance = pending[i as usize]
                     .take()
                     .expect("logical invariant: each instance_id is dispatched once via DelayQueue and taken on first dispatch");
-                let task_token = token.child_token();
-                let common_cloned = common.clone();
-                let openh264_lib_cloned = openh264_lib.clone();
-                let client_cert_pem_cloned = client_cert_pem.clone();
-                let client_key_pem_cloned = client_key_pem.clone();
-                let stats_tx_cloned = stats_tx.clone();
-                let duckdb_client_cloned = duckdb_client.clone();
-                let duckdb_interval = Duration::from_secs_f64(common.duckdb_interval);
-                instances.spawn_local(async move {
-                    let result = run_zakuro_instance(
-                        i,
-                        common_cloned,
-                        instance,
-                        openh264_lib_cloned,
-                        client_cert_pem_cloned,
-                        client_key_pem_cloned,
-                        task_token,
-                        stats_tx_cloned,
-                        duckdb_client_cloned,
-                        duckdb_interval,
-                    ).await;
-                    (i, result)
-                });
+                // インスタンスはラウンドロビンでワーカーへ割り当てる
+                let worker = &workers[i as usize % worker_count];
+                match worker.send(InstanceJob {
+                    instance_id: i,
+                    instance,
+                }) {
+                    Ok(()) => dispatched += 1,
+                    Err(e) => rtc_log_warning!("Failed to start zakuro instance {}: {}", i, e),
+                }
             }
         }
     }
@@ -633,14 +652,24 @@ async fn async_main() -> Result<()> {
     //       見て break する必要があるため、main 側の stats_tx を drop する。
     drop(stats_tx);
 
-    while let Some(joined) = instances.join_next().await {
-        match joined {
-            Ok((id, Ok(()))) => rtc_log_info!("Zakuro instance {} finished", id),
-            Ok((id, Err(e))) => {
+    // 投入したインスタンスの終了を待つ。ワーカーはインスタンスごとに結果を送るため、
+    // 投入した数だけ受け取る。ワーカーが異常終了してチャネルが閉じた場合は打ち切る。
+    for _ in 0..dispatched {
+        match instance_result_rx.recv().await {
+            Some((id, Ok(()))) => rtc_log_info!("Zakuro instance {} finished", id),
+            Some((id, Err(e))) => {
                 rtc_log_warning!("Zakuro instance {} failed: {}", id, e);
             }
-            Err(e) => rtc_log_warning!("Zakuro instance task panicked: {}", e),
+            None => {
+                rtc_log_warning!("Instance worker channel closed before all instances finished");
+                break;
+            }
         }
+    }
+
+    // ワーカーを畳む (チャネルを閉じてスレッドの終了を待つ)
+    for worker in workers {
+        worker.shutdown();
     }
 
     // 全インスタンスの終了後、集約タスクが残りのイベントを処理し終えるのを待つ。
@@ -699,6 +728,136 @@ async fn async_main() -> Result<()> {
     rtc_log_info!("zakuro: all Zakuro instances finished");
 
     Ok(())
+}
+
+/// ワーカーへ投入する 1 インスタンス分の仕事
+struct InstanceJob {
+    /// インスタンス番号 (ログと結果の対応付けに使う)
+    instance_id: u32,
+    /// このインスタンスの引数
+    instance: InstanceArgs,
+}
+
+/// インスタンスを実行するワーカー (1 スレッド + 1 runtime + 1 LocalSet)
+///
+/// インスタンスの future は libwebrtc 由来の !Send 型を保持するためスレッドをまたげない。
+/// そのためワーカーのスレッド上でインスタンスを生成して実行する。
+/// 1 つの runtime に全インスタンスを載せると、各接続のタスクがワーカースレッド 1 本に
+/// 偏ってボトルネックになるため、インスタンスを複数ワーカーに分けて負荷を分散させる。
+struct InstanceWorker {
+    /// インスタンスを投入するチャネル
+    sender: mpsc::UnboundedSender<InstanceJob>,
+    /// ワーカーのスレッド
+    handle: std::thread::JoinHandle<()>,
+}
+
+/// ワーカーが使う共通の設定
+///
+/// ワーカーのスレッドへ move するため、すべて Send な値で構成する。
+#[derive(Clone)]
+struct InstanceWorkerConfig {
+    common: CommonArgs,
+    openh264_lib: Option<Openh264Library>,
+    client_cert_pem: Option<String>,
+    client_key_pem: Option<String>,
+    token: CancellationToken,
+    stats_tx: mpsc::Sender<StatsEvent>,
+    duckdb_client: crate::duckdb_stats::DuckDBClient,
+    duckdb_interval: Duration,
+}
+
+impl InstanceWorker {
+    /// ワーカーを 1 本起動する
+    fn spawn(
+        worker_id: usize,
+        config: InstanceWorkerConfig,
+        result_tx: mpsc::UnboundedSender<(u32, Result<()>)>,
+    ) -> Result<Self> {
+        let (sender, mut receiver) = mpsc::unbounded_channel::<InstanceJob>();
+        let handle = std::thread::Builder::new()
+            .name(format!("zakuro-instance-{worker_id}"))
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        rtc_log_warning!("Failed to build runtime for instance worker: {e}");
+                        return;
+                    }
+                };
+                let local = tokio::task::LocalSet::new();
+                local.block_on(&rt, async move {
+                    while let Some(job) = receiver.recv().await {
+                        let instance_id = job.instance_id;
+                        // 1 インスタンスずつ JoinSet で受ける。インスタンスの future が
+                        // panic した場合も JoinError として拾い、結果を必ず返す
+                        // (返さないと main 側が結果を待ち続けてしまう)
+                        let mut set: JoinSet<Result<()>> = JoinSet::new();
+                        let common = config.common.clone();
+                        let openh264_lib = config.openh264_lib.clone();
+                        let client_cert_pem = config.client_cert_pem.clone();
+                        let client_key_pem = config.client_key_pem.clone();
+                        let token = config.token.child_token();
+                        let stats_tx = config.stats_tx.clone();
+                        let duckdb_client = config.duckdb_client.clone();
+                        let duckdb_interval = config.duckdb_interval;
+                        set.spawn_local(async move {
+                            run_zakuro_instance(
+                                instance_id,
+                                common,
+                                job.instance,
+                                openh264_lib,
+                                client_cert_pem,
+                                client_key_pem,
+                                token,
+                                stats_tx,
+                                duckdb_client,
+                                duckdb_interval,
+                            )
+                            .await
+                        });
+                        let result = match set.join_next().await {
+                            Some(Ok(result)) => result,
+                            Some(Err(e)) => {
+                                rtc_log_warning!(
+                                    "Zakuro instance {} task panicked: {}",
+                                    instance_id,
+                                    e
+                                );
+                                Err(ErrorMessage::new(format!("instance task panicked: {e}"))
+                                    .into())
+                            }
+                            None => continue,
+                        };
+                        let _ = result_tx.send((instance_id, result));
+                    }
+                });
+            })
+            .map_err(|e| ErrorMessage::new(format!("Failed to spawn instance worker: {e}")))?;
+        Ok(Self { sender, handle })
+    }
+
+    /// インスタンスを投入する
+    fn send(&self, job: InstanceJob) -> Result<()> {
+        self.sender
+            .send(job)
+            .map_err(|_| ErrorMessage::new("instance worker has stopped").into())
+    }
+
+    /// チャネルを閉じてスレッドの終了を待つ
+    ///
+    /// ワーカーは担当インスタンスの完了を待ってからスレッドを終えるため、
+    /// この呼び出しが返った時点で全インスタンスが終了している。
+    fn shutdown(self) {
+        let Self { sender, handle } = self;
+        drop(sender);
+        if let Err(e) = handle.join() {
+            rtc_log_warning!("Instance worker thread panicked: {e:?}");
+        }
+    }
 }
 
 /// 1 つの Zakuro インスタンスを実行する
