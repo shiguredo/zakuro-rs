@@ -21,6 +21,7 @@ use crate::duckdb_stats::{
     ConnectionIds, DuckDBClient, InsertConnectionLifecycleRow, InsertConnectionRow, WriteCommand,
     dispatch_stats, parse_offer_ids,
 };
+use crate::ice_server::{IceAddressFamily, configure_ice_server_urls};
 use crate::media_observer::MediaObserver;
 use crate::scenario::{Scenario, ScenarioEnd, ScenarioPlayer};
 use zakuro_core::stats::StatsEvent;
@@ -45,6 +46,8 @@ pub(crate) struct VirtualClientConfig {
     pub(crate) data_channel_signaling: Option<bool>,
     pub(crate) ignore_disconnect_websocket: Option<bool>,
     pub(crate) disconnect_wait_timeout: Option<Duration>,
+    /// Sora から通知された ICE サーバーの URL に使うアドレスファミリ (未指定ならすべて使う)
+    pub(crate) ice_address_family: Option<IceAddressFamily>,
     pub(crate) simulcast: Option<bool>,
     pub(crate) simulcast_request_rid: Option<String>,
     pub(crate) spotlight: Option<bool>,
@@ -822,6 +825,14 @@ fn build_client(
     }
     if let Some(timeout) = config.disconnect_wait_timeout {
         builder = builder.disconnect_wait_timeout(timeout);
+    }
+
+    // 指定したアドレスファミリだけを使う。Sora は TURN の URL をホスト名で通知するため、
+    // ホスト部を指定したファミリのアドレスに解決してから追加する
+    if let Some(family) = config.ice_address_family {
+        builder = builder.ice_server_url_configurer(move |server_entry, urls| {
+            configure_ice_server_urls(server_entry, urls, family);
+        });
     }
 
     if let Some(simulcast) = config.simulcast {

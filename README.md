@@ -343,6 +343,7 @@ reconnect シナリオは「切断してすぐ再接続 → 1-5 秒のランダ�
 | `--sora-signaling-notify-metadata` | シグナリング通知メタデータ (JSON) |
 | `--sora-ignore-disconnect-websocket` | WebSocket 切断を無視する (`true` / `false`) |
 | `--sora-disconnect-wait-timeout` | 切断待ちタイムアウト (秒) |
+| `--sora-ice-address-family` | Sora から通知された ICE サーバーの URL に使うアドレスファミリ (`ipv4` / `ipv6`、未指定ならすべて使う) |
 | `--vcs` | 仮想クライアント数 (`1` - `1000`) |
 | `--vcs-hatch-rate` | 仮想クライアントの起動レート |
 | `--instance-hatch-rate` | Zakuro インスタンスの起動レート (JSONC `instances` 配列と組み合わせて使用) |
@@ -405,6 +406,30 @@ zakuro --config zakuro.jsonc --log-suppress transport_feedback_adapter.cc
 
 `--log-level` に `verbose` を指定できますが、libwebrtc のログ sink の min severity が
 LS_INFO 固定であるため、verbose ログは出力されません。
+
+### ICE のアドレスファミリ
+
+Sora は ICE サーバー (TURN) の URL をホスト名で通知します。ホスト名が A と AAAA の両方を
+持つ場合、libwebrtc はローカルネットワークごとに IPv4 と IPv6 の relay 候補を作り、
+両方の経路が使える状態になります。両方の経路にメディアが届くと、ICE は「最後にデータが
+届いた方」へ選択を切り替え続けて発振し、パケット損失と再送が増えたすえに接続が切断される
+ことがあります。
+
+`--sora-ice-address-family ipv4` (または `ipv6`) を指定すると、通知された URL のホスト部を
+指定したアドレスファミリのアドレスに解決してリテラルに置き換えます。指定したファミリの
+アドレスを持たない URL と、TLS の URL (`turns:` / `stuns:`) は使いません。TLS の URL は
+ホスト名で証明書を検証するため、アドレスに置き換えると接続できなくなるためです。未指定の
+場合は通知された URL をそのまま使います (従来の動作)。
+
+JSONC では `sora` オブジェクトの中に書きます。
+
+```jsonc
+{
+  "sora": {
+    "ice-address-family": "ipv4"
+  }
+}
+```
 
 すべてのオプションは `--help` でも確認できます。
 

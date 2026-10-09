@@ -8,6 +8,7 @@ mod duckdb_stats;
 mod error;
 mod fake_audio_capturer;
 mod fake_video_capturer;
+mod ice_server;
 mod jsonc_fmt;
 mod log_bridge;
 mod log_filter;
@@ -968,6 +969,7 @@ async fn run_zakuro_instance(
         disconnect_wait_timeout: instance
             .disconnect_wait_timeout
             .map(Duration::from_secs_f64),
+        ice_address_family: instance.ice_address_family,
         simulcast: instance.simulcast,
         simulcast_request_rid: instance.simulcast_request_rid.clone(),
         spotlight: instance.spotlight,
@@ -1103,6 +1105,7 @@ mod tests {
             data_channel_signaling: None,
             ignore_disconnect_websocket: None,
             disconnect_wait_timeout: None,
+            ice_address_family: None,
             simulcast: None,
             simulcast_request_rid: None,
             spotlight: None,

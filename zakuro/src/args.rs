@@ -6,6 +6,7 @@ use sora_sdk::{
 };
 
 use crate::error::{ErrorMessage, Result};
+use crate::ice_server::IceAddressFamily;
 use crate::scenario::ScenarioType;
 
 /// プロセス全体で共有する設定 (HTTP サーバー / Ctrl+C ハンドラ / OpenH264 ライブラリ / mTLS / DuckDB 等)
@@ -88,6 +89,9 @@ pub(crate) struct InstanceArgs {
     pub(crate) data_channel_signaling: Option<bool>,
     pub(crate) ignore_disconnect_websocket: Option<bool>,
     pub(crate) disconnect_wait_timeout: Option<f64>,
+    /// Sora から通知された ICE サーバーの URL に使うアドレスファミリ
+    /// (`--sora-ice-address-family`、未指定なら通知された URL をそのまま使う)
+    pub(crate) ice_address_family: Option<IceAddressFamily>,
     pub(crate) simulcast: Option<bool>,
     pub(crate) simulcast_request_rid: Option<String>,
     pub(crate) spotlight: Option<bool>,
@@ -1502,6 +1506,15 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<f64>())?;
 
+    let ice_address_family: Option<IceAddressFamily> = noargs::opt("sora-ice-address-family")
+        .doc("Address family of the ICE server URLs notified by Sora (ipv4 / ipv6)")
+        .example("ipv4")
+        .take(&mut args)
+        .present_and_then(|o| {
+            IceAddressFamily::parse(o.value())
+                .ok_or("sora-ice-address-family は ipv4 または ipv6 で指定してください")
+        })?;
+
     let simulcast: Option<bool> = noargs::opt("sora-simulcast")
         .doc("Enable/disable simulcast (true/false)")
         .take(&mut args)
@@ -1592,6 +1605,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
                 data_channel_signaling,
                 ignore_disconnect_websocket,
                 disconnect_wait_timeout,
+                ice_address_family,
                 simulcast,
                 simulcast_request_rid,
                 spotlight,
@@ -1793,6 +1807,7 @@ fn parse_instance_args(program_name: &str, argv: Vec<String>) -> Result<(Instanc
             data_channel_signaling,
             ignore_disconnect_websocket,
             disconnect_wait_timeout,
+            ice_address_family,
             simulcast,
             simulcast_request_rid,
             spotlight,
