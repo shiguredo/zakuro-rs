@@ -400,11 +400,15 @@ async fn async_main() -> Result<()> {
         // `LogMessage::~LogMessage()` は stderr への出力と sink への配信を別経路で行う)。
         // そのため stderr への直接出力を止め、sink 側で再出力する。目的は dummy ADM が
         // 出す無害な "failed to retrieve the playout delay" と `--log-suppress` で指定された
-        // ログの抑制であり、詳細と制約は log_filter.rs のモジュールコメントを参照すること
+        // ログ、および既定で抑制する INFO 以下のログの抑制であり、詳細と制約は
+        // log_filter.rs のモジュールコメントを参照すること
         log_config.set_log_to_stderr(false);
         log_config.add_sink(log_filter::build_sink(
             early_log_config.level,
             &early_log_config.suppress,
+            // verbose は「抑制せず全部出す」の意味にする。sink の min severity が
+            // LS_INFO 固定のため verbose 行自体は出ないが、既定の抑制は外れる
+            early_log_config.level != log::Severity::Verbose,
         ));
         let _ = log::initialize_logging(log_config);
         // 共有クレート (zakuro-core) は log ファサードを使うため、その出力先も同じ

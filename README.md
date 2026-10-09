@@ -407,6 +407,24 @@ zakuro --config zakuro.jsonc --log-suppress transport_feedback_adapter.cc
 `--log-level` に `verbose` を指定できますが、libwebrtc のログ sink の min severity が
 LS_INFO 固定であるため、verbose ログは出力されません。
 
+### 既定で抑制するログ
+
+libwebrtc と sora-sdk は、接続ごと・ストリームごと・パケットごとに機械的な INFO ログを
+大量に出力します。負荷試験ではこれが全ログの 8 割近くを占め、整形と書き込みがそのまま
+負荷になるため (負荷が高いときほどログが増えて受信処理を圧迫します)、次の INFO 以下の
+ログは既定で抑制します。実障害の切り分けに使う WARNING / ERROR は抑制しません。
+
+- `basic_port_allocator.cc` (ネットワーク一覧とポート割り当ての経過)
+- `rtp_streams_synchronizer2.cc` (ストリームごとの同期統計)
+- `rtp_video_stream_receiver2.cc` (シグナリング確立前のパケット 1 個ごとのログ)
+- `webrtc_video_engine.cc` (ストリームごとの映像統計)
+- `turn_port.cc` (TURN のリクエスト 1 回ごとの経過)
+- WebSocket の keepalive (`[WebSocket] Received Pong`) と本文サイズだけの行
+
+抑制したログも含めて全部見たい場合は `--log-level verbose` を指定します。libwebrtc の
+ログ sink の min severity が LS_INFO 固定であるため verbose レベルの行は出力されませんが、
+この既定の抑制は外れます。
+
 ### ICE のアドレスファミリ
 
 Sora は ICE サーバー (TURN) の URL をホスト名で通知します。ホスト名が A と AAAA の両方を
