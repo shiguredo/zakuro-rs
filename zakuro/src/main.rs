@@ -47,7 +47,7 @@ use crate::error::{ErrorMessage, Result};
 use crate::fake_video_capturer::{FakeVideoCapturer, FakeVideoCapturerConfig};
 use crate::video_device_capturer::{VideoDeviceCapturer, VideoDeviceCapturerConfig};
 use crate::virtual_client::VirtualClientConfig;
-use zakuro_core::stats::{StatsCollector, StatsEvent};
+use zakuro_core::stats::{StatsCollector, StatsEvent, StatsSummary};
 
 /// デバイス名または ID からデバイス ID を解決する
 ///
@@ -650,6 +650,7 @@ async fn async_main() -> Result<()> {
     //       後続の drop(stats_tx) と token.cancel() は idempotent。
     //   (2) DelayQueue::next() が None (全 instance 起動完了): 以降は aggregator が channel close を
     //       見て break する必要があるため、main 側の stats_tx を drop する。
+    //       worker_config が持つ clone は shutdown_after_workers の先頭で drop する。
     drop(stats_tx);
 
     // 投入したインスタンスの終了を待つ。ワーカーはインスタンスごとに結果を送るため、
@@ -667,32 +668,14 @@ async fn async_main() -> Result<()> {
         }
     }
 
-    // ワーカーを畳む (チャネルを閉じてスレッドの終了を待つ)
+    // ワーカーを畳む (チャネルを閉じてスレッドの終了を待つ)。
+    // ワーカー側の stats / DuckDB sender はこの join が返った時点で drop 済み。
     for worker in workers {
         worker.shutdown();
     }
 
-    // 全インスタンスの終了後、集約タスクが残りのイベントを処理し終えるのを待つ。
-    // ここで受け取った集計結果が試験全体の合否になる。
-    let summary = stats.finalize().await;
-
-    // 経路 (2) で reporter (定期統計出力) を停止する。経路 (1) では既に cancel 済みだが
-    // token.cancel() は idempotent なため二度呼び出しても問題ない。
-    token.cancel();
-
-    // DuckDB writer の shutdown ハンドシェイク
-    // 1. stop_timestamp UPDATE を確実に送る (try_send だと満杯時に drop されるため send.await)
-    // 2. main 側の client を drop して全 Sender を drop (writer の recv が None を返す)
-    // 3. writer task の完了を待つ (stop_timestamp UPDATE 完了を保証)
-    if duckdb_client.is_enabled() {
-        duckdb_client
-            .send(WriteCommand::UpdateZakuroStop {
-                stop_timestamp: std::time::SystemTime::now(),
-            })
-            .await;
-    }
-    drop(duckdb_client);
-    duckdb_writer.join().await?;
+    let summary =
+        shutdown_after_workers(worker_config, stats, token, duckdb_client, duckdb_writer).await?;
 
     // 試験全体の集計結果を出し、指定があれば JSON ファイルへ書く
     summary::log_summary(&summary);
@@ -736,6 +719,50 @@ struct InstanceJob {
     instance_id: u32,
     /// このインスタンスの引数
     instance: InstanceArgs,
+}
+
+/// ワーカー終了後に集計を確定し、DuckDB writer を閉じる。
+///
+/// 呼び出し側は先に `InstanceWorker::shutdown` を終えていること。ワーカー側の
+/// sender clone はその時点で drop 済みである。
+///
+/// `worker_config` はワーカーへ配るテンプレートで、stats と DuckDB の sender を
+/// 持っている。このテンプレートを残すと `StatsCollector::finalize` がチャネル close を
+/// 待ち続け、続けて `DuckDBStatsWriter::join` も全 sender の drop を待ち続ける。
+/// そのため最初にテンプレートを drop する。
+async fn shutdown_after_workers(
+    worker_config: InstanceWorkerConfig,
+    stats: StatsCollector,
+    token: CancellationToken,
+    duckdb_client: crate::duckdb_stats::DuckDBClient,
+    duckdb_writer: crate::duckdb_stats::DuckDBStatsWriter,
+) -> Result<StatsSummary> {
+    drop(worker_config);
+
+    // 全インスタンスの終了後、集約タスクが残りのイベントを処理し終えるのを待つ。
+    // ここで受け取った集計結果が試験全体の合否になる。
+    let summary = stats.finalize().await;
+
+    // 経路 (2) で reporter (定期統計出力) を停止する。経路 (1) では既に cancel 済みだが
+    // token.cancel() は idempotent なため二度呼び出しても問題ない。
+    token.cancel();
+
+    // DuckDB writer の shutdown ハンドシェイク
+    // 1. stop_timestamp UPDATE を確実に送る (try_send だと満杯時に drop されるため send.await)
+    // 2. main 側の client を drop する。worker_config の client は関数先頭で drop 済みなので、
+    //    これで writer 以外の sender は閉じる。
+    // 3. writer task の完了を待つ (stop_timestamp UPDATE 完了を保証)。
+    //    join 自身が writer の持つ sender を drop し、recv が None になる。
+    if duckdb_client.is_enabled() {
+        duckdb_client
+            .send(WriteCommand::UpdateZakuroStop {
+                stop_timestamp: std::time::SystemTime::now(),
+            })
+            .await;
+    }
+    drop(duckdb_client);
+    duckdb_writer.join().await?;
+    Ok(summary)
 }
 
 /// インスタンスを実行するワーカー (1 スレッド + 1 runtime + 1 LocalSet)
@@ -1304,6 +1331,72 @@ mod tests {
             spotlight_unfocus_rid: None,
             scenario: None,
         }
+    }
+
+    fn minimal_common_args() -> CommonArgs {
+        CommonArgs {
+            instance_hatch_rate: 1.0,
+            http_host: None,
+            http_port: None,
+            openh264: None,
+            insecure: false,
+            client_cert: None,
+            client_key: None,
+            duckdb_output_dir: ".".into(),
+            duckdb_interval: 1.0,
+            no_duckdb_output: false,
+            summary_json: None,
+            threshold_success_rate: None,
+            threshold_connect_time_p95_ms: None,
+            threshold_stalled: None,
+            threshold_warmup: 0.0,
+            log_level: shiguredo_webrtc::log::Severity::Info,
+            log_suppress: Vec::new(),
+            fdk_aac_lib: None,
+        }
+    }
+
+    /// ワーカー終了後にテンプレートが stats / DuckDB の sender を持っていても終了処理が戻ること
+    ///
+    /// テンプレートを drop しないと finalize と join がチャネル close を待ち続け、
+    /// このテストはタイムアウトする。
+    #[tokio::test]
+    async fn shutdown_after_workers_returns_while_template_holds_senders() {
+        let dir = tempfile::TempDir::new().expect("一時ディレクトリの作成に失敗");
+        let db_path = dir.path().join("shutdown.db");
+        let (writer, _version) =
+            duckdb_stats::DuckDBStatsWriter::start(duckdb_stats::DuckDBWriterConfig {
+                db_path,
+                interval: Duration::from_secs(1),
+                enabled: true,
+            })
+            .await
+            .expect("DuckDBStatsWriter の起動に成功すること");
+        let duckdb_client = writer.client();
+        let token = CancellationToken::new();
+        let stats = StatsCollector::new(0, 0, Duration::ZERO, token.clone());
+        let stats_tx = stats.event_tx();
+        // 本番と同じく、main 側の sender は終了待ちの前に捨てる。
+        // テンプレート側の clone だけが残った状態で終了処理に入る。
+        let worker_config = InstanceWorkerConfig {
+            common: minimal_common_args(),
+            openh264_lib: None,
+            client_cert_pem: None,
+            client_key_pem: None,
+            token: token.clone(),
+            stats_tx: stats_tx.clone(),
+            duckdb_client: duckdb_client.clone(),
+            duckdb_interval: Duration::from_secs(1),
+        };
+        drop(stats_tx);
+
+        let finished = tokio::time::timeout(
+            Duration::from_secs(5),
+            shutdown_after_workers(worker_config, stats, token, duckdb_client, writer),
+        )
+        .await
+        .expect("ワーカーテンプレートが sender を持っていても終了処理が戻ること");
+        finished.expect("終了処理が成功すること");
     }
 
     #[test]
