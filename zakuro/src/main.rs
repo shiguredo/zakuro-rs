@@ -790,49 +790,77 @@ impl InstanceWorker {
                 };
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&rt, async move {
-                    while let Some(job) = receiver.recv().await {
-                        let instance_id = job.instance_id;
-                        // 1 インスタンスずつ JoinSet で受ける。インスタンスの future が
-                        // panic した場合も JoinError として拾い、結果を必ず返す
-                        // (返さないと main 側が結果を待ち続けてしまう)
-                        let mut set: JoinSet<Result<()>> = JoinSet::new();
-                        let common = config.common.clone();
-                        let openh264_lib = config.openh264_lib.clone();
-                        let client_cert_pem = config.client_cert_pem.clone();
-                        let client_key_pem = config.client_key_pem.clone();
-                        let token = config.token.child_token();
-                        let stats_tx = config.stats_tx.clone();
-                        let duckdb_client = config.duckdb_client.clone();
-                        let duckdb_interval = config.duckdb_interval;
-                        set.spawn_local(async move {
-                            run_zakuro_instance(
-                                instance_id,
-                                common,
-                                job.instance,
-                                openh264_lib,
-                                client_cert_pem,
-                                client_key_pem,
-                                token,
-                                stats_tx,
-                                duckdb_client,
-                                duckdb_interval,
-                            )
-                            .await
-                        });
-                        let result = match set.join_next().await {
-                            Some(Ok(result)) => result,
-                            Some(Err(e)) => {
-                                rtc_log_warning!(
-                                    "Zakuro instance {} task panicked: {}",
-                                    instance_id,
-                                    e
-                                );
-                                Err(ErrorMessage::new(format!("instance task panicked: {e}"))
-                                    .into())
+                    // 同じワーカーに割り当てられたインスタンスは同時に走らせる。
+                    // 直列に待つと、2 つ目のインスタンスが 1 つ目の終了 (数十分) まで
+                    // 始まらず、インスタンス数がワーカー数より多いときに起動しない
+                    // インスタンスが出る。
+                    let mut running: JoinSet<()> = JoinSet::new();
+                    loop {
+                        tokio::select! {
+                            maybe_job = receiver.recv() => {
+                                let Some(job) = maybe_job else { break };
+                                let instance_id = job.instance_id;
+                                let common = config.common.clone();
+                                let openh264_lib = config.openh264_lib.clone();
+                                let client_cert_pem = config.client_cert_pem.clone();
+                                let client_key_pem = config.client_key_pem.clone();
+                                let token = config.token.child_token();
+                                let stats_tx = config.stats_tx.clone();
+                                let duckdb_client = config.duckdb_client.clone();
+                                let duckdb_interval = config.duckdb_interval;
+                                let result_tx = result_tx.clone();
+                                running.spawn_local(async move {
+                                    // 1 インスタンスずつ JoinSet で受ける。インスタンスの
+                                    // future が panic した場合も JoinError として拾い、
+                                    // 結果を必ず返す (返さないと main 側が結果を
+                                    // 待ち続けてしまう)
+                                    let mut set: JoinSet<Result<()>> = JoinSet::new();
+                                    set.spawn_local(async move {
+                                        run_zakuro_instance(
+                                            instance_id,
+                                            common,
+                                            job.instance,
+                                            openh264_lib,
+                                            client_cert_pem,
+                                            client_key_pem,
+                                            token,
+                                            stats_tx,
+                                            duckdb_client,
+                                            duckdb_interval,
+                                        )
+                                        .await
+                                    });
+                                    let result = match set.join_next().await {
+                                        Some(Ok(result)) => result,
+                                        Some(Err(e)) => {
+                                            rtc_log_warning!(
+                                                "Zakuro instance {} task panicked: {}",
+                                                instance_id,
+                                                e
+                                            );
+                                            Err(ErrorMessage::new(format!(
+                                                "instance task panicked: {e}"
+                                            ))
+                                            .into())
+                                        }
+                                        None => return,
+                                    };
+                                    let _ = result_tx.send((instance_id, result));
+                                });
                             }
-                            None => continue,
-                        };
-                        let _ = result_tx.send((instance_id, result));
+                            // 終了したインスタンスを回収する (JoinSet を増やし続けない)
+                            Some(joined) = running.join_next(), if !running.is_empty() => {
+                                if let Err(e) = joined {
+                                    rtc_log_warning!("Instance task panicked: {e}");
+                                }
+                            }
+                        }
+                    }
+                    // 残りのインスタンスの完了を待ってからワーカーを終える
+                    while let Some(joined) = running.join_next().await {
+                        if let Err(e) = joined {
+                            rtc_log_warning!("Instance task panicked: {e}");
+                        }
                     }
                 });
             })
