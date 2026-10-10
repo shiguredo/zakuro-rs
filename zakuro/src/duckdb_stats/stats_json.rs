@@ -10,9 +10,10 @@ use shiguredo_webrtc::{log, rtc_log_warning};
 
 use super::module::unknown_types;
 use super::rows::{
-    ConnectionIds, RtcStatsCandidatePairRow, RtcStatsCodecRow, RtcStatsDataChannelRow,
-    RtcStatsInboundRtpRow, RtcStatsLocalCandidateRow, RtcStatsMediaSourceRow,
-    RtcStatsOutboundRtpRow, RtcStatsRemoteCandidateRow, RtcStatsRemoteInboundRtpRow,
+    ConnectionIds, RtcStatsCandidatePairRow, RtcStatsCertificateRow, RtcStatsCodecRow,
+    RtcStatsDataChannelRow, RtcStatsInboundRtpRow, RtcStatsLocalCandidateRow,
+    RtcStatsMediaPlayoutRow, RtcStatsMediaSourceRow, RtcStatsOutboundRtpRow,
+    RtcStatsPeerConnectionRow, RtcStatsRemoteCandidateRow, RtcStatsRemoteInboundRtpRow,
     RtcStatsRemoteOutboundRtpRow, RtcStatsTransportRow, StatsSample,
 };
 
@@ -80,6 +81,8 @@ pub(crate) struct ParsedRtcStats {
     pub(crate) local_candidates: Vec<RtcStatsLocalCandidateRow>,
     /// この tick に含まれていたリモート ICE 候補
     pub(crate) remote_candidates: Vec<RtcStatsRemoteCandidateRow>,
+    /// この tick に含まれていた DTLS 証明書の識別子
+    pub(crate) certificates: Vec<RtcStatsCertificateRow>,
     /// 毎サンプル書く統計行
     pub(crate) sample: StatsSample,
 }
@@ -123,6 +126,14 @@ impl CandidateIdentity {
             id: row.id.clone(),
         }
     }
+
+    /// 証明書から識別子を作る。キーの形は候補と同じ
+    pub(crate) fn from_certificate(row: &RtcStatsCertificateRow) -> Self {
+        Self {
+            connection_id: row.connection_id.clone(),
+            id: row.id.clone(),
+        }
+    }
 }
 
 impl CodecIdentity {
@@ -158,6 +169,7 @@ pub(crate) fn parse_rtc_stats(
         codecs: Vec::new(),
         local_candidates: Vec::new(),
         remote_candidates: Vec::new(),
+        certificates: Vec::new(),
         sample: StatsSample::empty(instance_id, vc_id),
     };
     let Ok(json) = RawJsonOwned::parse(stats_text) else {
@@ -286,6 +298,27 @@ pub(crate) fn parse_rtc_stats(
                 }
                 None => false,
             },
+            "peer-connection" => match parse_peer_connection(element, common) {
+                Some(row) => {
+                    parsed.sample.peer_connection.push(row);
+                    true
+                }
+                None => false,
+            },
+            "media-playout" => match parse_media_playout(element, common) {
+                Some(row) => {
+                    parsed.sample.media_playout.push(row);
+                    true
+                }
+                None => false,
+            },
+            "certificate" => match parse_certificate(element, common) {
+                Some(row) => {
+                    parsed.certificates.push(row);
+                    true
+                }
+                None => false,
+            },
             other => {
                 // 未知 type は初回のみ warn (抑制用集合で管理)
                 let mut set = unknown_types()
@@ -369,6 +402,7 @@ fn parse_codec(v: RawJsonValue<'_, '_>, c: StatsCommon) -> Option<RtcStatsCodecR
         clock_rate: get_i64(v, "clockRate"),
         channels: get_i64(v, "channels"),
         sdp_fmtp_line: get_string(v, "sdpFmtpLine"),
+        transport_id: get_string(v, "transportId"),
     })
 }
 
@@ -627,10 +661,16 @@ fn parse_transport(v: RawJsonValue<'_, '_>, c: StatsCommon) -> Option<RtcStatsTr
         bytes_sent: get_i64(v, "bytesSent"),
         bytes_received: get_i64(v, "bytesReceived"),
         ice_role: get_string(v, "iceRole"),
+        ice_state: get_string(v, "iceState"),
         dtls_state: get_string(v, "dtlsState"),
         dtls_role: get_string(v, "dtlsRole"),
         selected_candidate_pair_id: get_string(v, "selectedCandidatePairId"),
         selected_candidate_pair_changes: get_i64(v, "selectedCandidatePairChanges"),
+        local_certificate_id: get_string(v, "localCertificateId"),
+        remote_certificate_id: get_string(v, "remoteCertificateId"),
+        tls_version: get_string(v, "tlsVersion"),
+        dtls_cipher: get_string(v, "dtlsCipher"),
+        srtp_cipher: get_string(v, "srtpCipher"),
     })
 }
 
@@ -691,6 +731,9 @@ fn parse_local_candidate(
         relay_protocol: get_string(v, "relayProtocol"),
         url: get_string(v, "url"),
         network_type: get_string(v, "networkType"),
+        priority: get_i64(v, "priority"),
+        foundation: get_string(v, "foundation"),
+        tcp_type: get_string(v, "tcpType"),
     })
 }
 
@@ -712,6 +755,63 @@ fn parse_remote_candidate(
         port: get_i64(v, "port"),
         protocol: get_string(v, "protocol"),
         candidate_type: get_string(v, "candidateType"),
+        priority: get_i64(v, "priority"),
+        foundation: get_string(v, "foundation"),
+        tcp_type: get_string(v, "tcpType"),
+    })
+}
+
+fn parse_peer_connection(
+    v: RawJsonValue<'_, '_>,
+    c: StatsCommon,
+) -> Option<RtcStatsPeerConnectionRow> {
+    Some(RtcStatsPeerConnectionRow {
+        instance_id: c.instance_id,
+        timestamp: c.timestamp,
+        channel_id: c.channel_id,
+        session_id: c.session_id,
+        connection_id: c.connection_id,
+        rtc_timestamp: c.rtc_timestamp,
+        stats_type: c.stats_type,
+        id: c.id,
+        data_channels_opened: get_i64(v, "dataChannelsOpened"),
+        data_channels_closed: get_i64(v, "dataChannelsClosed"),
+    })
+}
+
+fn parse_media_playout(v: RawJsonValue<'_, '_>, c: StatsCommon) -> Option<RtcStatsMediaPlayoutRow> {
+    Some(RtcStatsMediaPlayoutRow {
+        instance_id: c.instance_id,
+        timestamp: c.timestamp,
+        channel_id: c.channel_id,
+        session_id: c.session_id,
+        connection_id: c.connection_id,
+        rtc_timestamp: c.rtc_timestamp,
+        stats_type: c.stats_type,
+        id: c.id,
+        kind: get_string(v, "kind"),
+        synthesized_samples_duration: get_f64(v, "synthesizedSamplesDuration"),
+        synthesized_samples_events: get_i64(v, "synthesizedSamplesEvents"),
+        total_samples_duration: get_f64(v, "totalSamplesDuration"),
+        total_playout_delay: get_f64(v, "totalPlayoutDelay"),
+        total_samples_count: get_i64(v, "totalSamplesCount"),
+    })
+}
+
+fn parse_certificate(v: RawJsonValue<'_, '_>, c: StatsCommon) -> Option<RtcStatsCertificateRow> {
+    // base64Certificate は証明書本体なので残さない。
+    Some(RtcStatsCertificateRow {
+        instance_id: c.instance_id,
+        timestamp: c.timestamp,
+        channel_id: c.channel_id,
+        session_id: c.session_id,
+        connection_id: c.connection_id,
+        rtc_timestamp: c.rtc_timestamp,
+        stats_type: c.stats_type,
+        id: c.id,
+        fingerprint: get_string(v, "fingerprint"),
+        fingerprint_algorithm: get_string(v, "fingerprintAlgorithm"),
+        issuer_certificate_id: get_string(v, "issuerCertificateId"),
     })
 }
 
@@ -1014,13 +1114,16 @@ mod tests {
             {"type":"candidate-pair","id":"P1","timestamp":1.0,"state":"succeeded","nominated":true,"currentRoundTripTime":0.02,"availableOutgoingBitrate":2500000},
             {"type":"local-candidate","id":"L1","timestamp":1.0,"candidateType":"host","protocol":"udp","port":50000},
             {"type":"remote-candidate","id":"R1","timestamp":1.0,"candidateType":"srflx","protocol":"udp","port":19302},
-            {"type":"certificate","id":"CERT1","timestamp":1.0}
+            {"type":"certificate","id":"CERT1","timestamp":1.0,"fingerprint":"AA:BB","fingerprintAlgorithm":"sha-256","base64Certificate":"SHOULD_NOT_BE_STORED"},
+            {"type":"peer-connection","id":"PC1","timestamp":1.0,"dataChannelsOpened":1,"dataChannelsClosed":0},
+            {"type":"media-playout","id":"MP1","timestamp":1.0,"kind":"audio","totalPlayoutDelay":0.4,"totalSamplesCount":48000},
+            {"type":"stream","id":"S1","timestamp":1.0}
         ]"#;
         clear_unknown_types_for_test();
         let parsed = parse_rtc_stats(0, 0, "ch", &ids, stats, SystemTime::now());
         assert_eq!(
-            parsed.known_count, 11,
-            "既知 type 11 種が投入されるべき (certificate は未対応)"
+            parsed.known_count, 14,
+            "既知 type 14 種が投入されるべき (stream は未対応)"
         );
 
         let mut controls: Vec<WriteCommand> = parsed
@@ -1040,6 +1143,12 @@ mod tests {
                 .into_iter()
                 .map(|row| WriteCommand::InsertRtcStatsRemoteCandidate(Box::new(row))),
         );
+        controls.extend(
+            parsed
+                .certificates
+                .into_iter()
+                .map(|row| WriteCommand::InsertRtcStatsCertificate(Box::new(row))),
+        );
         let mut pending = HashMap::new();
         pending.insert((0, 0), parsed.sample);
         flush_writes(&conn, &controls, &pending).expect("バルク INSERT に失敗");
@@ -1055,6 +1164,9 @@ mod tests {
             ("rtc_stats_candidate_pair", 1),
             ("rtc_stats_local_candidate", 1),
             ("rtc_stats_remote_candidate", 1),
+            ("rtc_stats_certificate", 1),
+            ("rtc_stats_peer_connection", 1),
+            ("rtc_stats_media_playout", 1),
         ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -1071,6 +1183,23 @@ mod tests {
             )
             .expect("available_outgoing_bitrate の取得に失敗");
         assert_eq!(bitrate, 2_500_000.0, "候補ペアの可用帯域が記録されること");
+        let stored_cert: String = conn
+            .query_row(
+                "SELECT COALESCE(fingerprint, '') FROM rtc_stats_certificate",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fingerprint の取得に失敗");
+        assert_eq!(stored_cert, "AA:BB", "証明書は fingerprint だけ残ること");
+        let cert_columns: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.columns \
+                 WHERE table_name = 'rtc_stats_certificate' AND column_name = 'base64_certificate'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("列一覧の取得に失敗");
+        assert_eq!(cert_columns, 0, "証明書本体の列は無いこと");
     }
 
     #[test]

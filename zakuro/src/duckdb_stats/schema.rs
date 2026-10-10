@@ -78,9 +78,20 @@ pub(crate) const INSERT_DATA_CHANNEL_SQL: &str = "INSERT INTO rtc_stats_data_cha
 
 pub(crate) const INSERT_TRANSPORT_SQL: &str = "INSERT INTO rtc_stats_transport (instance_id, \
   timestamp, channel_id, session_id, connection_id, rtc_timestamp, type, id, packets_sent, \
-  packets_received, bytes_sent, bytes_received, ice_role, dtls_state, dtls_role, \
-  selected_candidate_pair_id, selected_candidate_pair_changes) \
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+  packets_received, bytes_sent, bytes_received, ice_role, ice_state, dtls_state, dtls_role, \
+  selected_candidate_pair_id, selected_candidate_pair_changes, local_certificate_id, \
+  remote_certificate_id, tls_version, dtls_cipher, srtp_cipher) \
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+pub(crate) const INSERT_PEER_CONNECTION_SQL: &str = "INSERT INTO rtc_stats_peer_connection \
+  (instance_id, timestamp, channel_id, session_id, connection_id, rtc_timestamp, type, id, \
+  data_channels_opened, data_channels_closed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+pub(crate) const INSERT_MEDIA_PLAYOUT_SQL: &str = "INSERT INTO rtc_stats_media_playout \
+  (instance_id, timestamp, channel_id, session_id, connection_id, rtc_timestamp, type, id, \
+  kind, synthesized_samples_duration, synthesized_samples_events, total_samples_duration, \
+  total_playout_delay, total_samples_count) \
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
 pub(crate) const INSERT_CANDIDATE_PAIR_SQL: &str = "INSERT INTO rtc_stats_candidate_pair \
   (instance_id, timestamp, channel_id, session_id, connection_id, rtc_timestamp, type, id, \
@@ -125,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_creates_fifteen_tables() {
+    fn schema_creates_eighteen_tables() {
         let (_dir, conn) = setup_db();
         let count: i64 = conn
             .query_row(
@@ -134,11 +145,11 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("テーブル数の取得に失敗");
-        assert_eq!(count, 15, "テーブル数は 15 であるべき");
+        assert_eq!(count, 18, "テーブル数は 18 であるべき");
     }
 
     #[test]
-    fn schema_creates_thirteen_sequences() {
+    fn schema_creates_sixteen_sequences() {
         let (_dir, conn) = setup_db();
         let count: i64 = conn
             .query_row(
@@ -147,11 +158,11 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("シーケンス数の取得に失敗");
-        assert_eq!(count, 13, "シーケンス数は 13 であるべき");
+        assert_eq!(count, 16, "シーケンス数は 16 であるべき");
     }
 
     #[test]
-    fn schema_creates_fourteen_indexes() {
+    fn schema_creates_seventeen_indexes() {
         let (_dir, conn) = setup_db();
         let count: i64 = conn
             .query_row(
@@ -160,7 +171,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("インデックス数の取得に失敗");
-        assert_eq!(count, 14, "インデックス数は 14 であるべき");
+        assert_eq!(count, 17, "インデックス数は 17 であるべき");
     }
 
     #[test]
@@ -174,6 +185,8 @@ mod tests {
             super::INSERT_DATA_CHANNEL_SQL,
             super::INSERT_TRANSPORT_SQL,
             super::INSERT_CANDIDATE_PAIR_SQL,
+            super::INSERT_PEER_CONNECTION_SQL,
+            super::INSERT_MEDIA_PLAYOUT_SQL,
         ] {
             let columns = super::insert_sql_columns(sql);
             let placeholders = sql.matches('?').count();

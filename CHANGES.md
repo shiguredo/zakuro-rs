@@ -34,6 +34,8 @@
   - @voluntas
 - [ADD] 引数パースのバリデーションを改善する (空配列検出 / 次トークン検証 / 排他チェック / 環境変数置換エラー)
   - @voluntas
+- [ADD] DuckDB に peer-connection、media-playout、証明書 fingerprint、transport の暗号情報を追加する
+  - @voluntas
 - [ADD] DuckDB に transport と candidate-pair の時系列、ICE 候補の初回記録を追加する
   - @voluntas
 - [FIX] DuckDB の統計がチャネル満杯で一部の接続に偏って欠けるのを、制御コマンドの分離と Appender によるバルク INSERT で残すようにする

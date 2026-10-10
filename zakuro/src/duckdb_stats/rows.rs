@@ -27,6 +27,7 @@ pub(crate) enum WriteCommand {
     InsertRtcStatsCodec(Box<RtcStatsCodecRow>),
     InsertRtcStatsLocalCandidate(Box<RtcStatsLocalCandidateRow>),
     InsertRtcStatsRemoteCandidate(Box<RtcStatsRemoteCandidateRow>),
+    InsertRtcStatsCertificate(Box<RtcStatsCertificateRow>),
 }
 
 /// 接続 1 本の 1 回の `get_stats` から切り出した RTC 統計行
@@ -44,6 +45,8 @@ pub(crate) struct StatsSample {
     pub(crate) data_channel: Vec<RtcStatsDataChannelRow>,
     pub(crate) transport: Vec<RtcStatsTransportRow>,
     pub(crate) candidate_pair: Vec<RtcStatsCandidatePairRow>,
+    pub(crate) peer_connection: Vec<RtcStatsPeerConnectionRow>,
+    pub(crate) media_playout: Vec<RtcStatsMediaPlayoutRow>,
 }
 
 impl StatsSample {
@@ -60,6 +63,8 @@ impl StatsSample {
             data_channel: Vec::new(),
             transport: Vec::new(),
             candidate_pair: Vec::new(),
+            peer_connection: Vec::new(),
+            media_playout: Vec::new(),
         }
     }
 
@@ -78,6 +83,8 @@ impl StatsSample {
             + self.data_channel.len()
             + self.transport.len()
             + self.candidate_pair.len()
+            + self.peer_connection.len()
+            + self.media_playout.len()
     }
 }
 
@@ -178,6 +185,7 @@ pub(crate) struct RtcStatsCodecRow {
     pub(crate) clock_rate: Option<i64>,
     pub(crate) channels: Option<i64>,
     pub(crate) sdp_fmtp_line: Option<String>,
+    pub(crate) transport_id: Option<String>,
 }
 
 /// `rtc_stats_inbound_rtp` テーブルへの 1 行
@@ -430,10 +438,16 @@ pub(crate) struct RtcStatsTransportRow {
     pub(crate) bytes_sent: Option<i64>,
     pub(crate) bytes_received: Option<i64>,
     pub(crate) ice_role: Option<String>,
+    pub(crate) ice_state: Option<String>,
     pub(crate) dtls_state: Option<String>,
     pub(crate) dtls_role: Option<String>,
     pub(crate) selected_candidate_pair_id: Option<String>,
     pub(crate) selected_candidate_pair_changes: Option<i64>,
+    pub(crate) local_certificate_id: Option<String>,
+    pub(crate) remote_certificate_id: Option<String>,
+    pub(crate) tls_version: Option<String>,
+    pub(crate) dtls_cipher: Option<String>,
+    pub(crate) srtp_cipher: Option<String>,
 }
 
 /// `rtc_stats_candidate_pair` テーブルへの 1 行
@@ -488,6 +502,9 @@ pub(crate) struct RtcStatsLocalCandidateRow {
     pub(crate) relay_protocol: Option<String>,
     pub(crate) url: Option<String>,
     pub(crate) network_type: Option<String>,
+    pub(crate) priority: Option<i64>,
+    pub(crate) foundation: Option<String>,
+    pub(crate) tcp_type: Option<String>,
 }
 
 /// `rtc_stats_remote_candidate` テーブルへの 1 行
@@ -506,6 +523,61 @@ pub(crate) struct RtcStatsRemoteCandidateRow {
     pub(crate) port: Option<i64>,
     pub(crate) protocol: Option<String>,
     pub(crate) candidate_type: Option<String>,
+    pub(crate) priority: Option<i64>,
+    pub(crate) foundation: Option<String>,
+    pub(crate) tcp_type: Option<String>,
+}
+
+/// `rtc_stats_peer_connection` テーブルへの 1 行
+#[derive(Clone)]
+pub(crate) struct RtcStatsPeerConnectionRow {
+    pub(crate) instance_id: u32,
+    pub(crate) timestamp: SystemTime,
+    pub(crate) channel_id: String,
+    pub(crate) session_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) rtc_timestamp: Option<f64>,
+    pub(crate) stats_type: String,
+    pub(crate) id: String,
+    pub(crate) data_channels_opened: Option<i64>,
+    pub(crate) data_channels_closed: Option<i64>,
+}
+
+/// `rtc_stats_media_playout` テーブルへの 1 行
+#[derive(Clone)]
+pub(crate) struct RtcStatsMediaPlayoutRow {
+    pub(crate) instance_id: u32,
+    pub(crate) timestamp: SystemTime,
+    pub(crate) channel_id: String,
+    pub(crate) session_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) rtc_timestamp: Option<f64>,
+    pub(crate) stats_type: String,
+    pub(crate) id: String,
+    pub(crate) kind: Option<String>,
+    pub(crate) synthesized_samples_duration: Option<f64>,
+    pub(crate) synthesized_samples_events: Option<i64>,
+    pub(crate) total_samples_duration: Option<f64>,
+    pub(crate) total_playout_delay: Option<f64>,
+    pub(crate) total_samples_count: Option<i64>,
+}
+
+/// `rtc_stats_certificate` テーブルへの 1 行
+///
+/// 証明書本体は残さない。fingerprint で DTLS 証明書を識別する。
+#[derive(Clone)]
+pub(crate) struct RtcStatsCertificateRow {
+    pub(crate) instance_id: u32,
+    pub(crate) timestamp: SystemTime,
+    pub(crate) channel_id: String,
+    pub(crate) session_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) rtc_timestamp: Option<f64>,
+    pub(crate) stats_type: String,
+    pub(crate) id: String,
+    pub(crate) fingerprint: Option<String>,
+    pub(crate) fingerprint_algorithm: Option<String>,
+    pub(crate) issuer_certificate_id: Option<String>,
 }
 
 // ============================================================================
@@ -682,11 +754,13 @@ pub(crate) fn insert_rtc_stats_codec(
         &row.clock_rate,
         &row.channels,
         &row.sdp_fmtp_line,
+        &row.transport_id,
     ];
     conn.execute(
         "INSERT INTO rtc_stats_codec (instance_id, timestamp, channel_id, session_id, \
          connection_id, rtc_timestamp, type, id, mime_type, payload_type, clock_rate, \
-         channels, sdp_fmtp_line) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         channels, sdp_fmtp_line, transport_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT (connection_id, id, mime_type, payload_type, clock_rate, channels, \
          sdp_fmtp_line) DO NOTHING",
         params,
@@ -717,12 +791,16 @@ pub(crate) fn insert_rtc_stats_local_candidate(
         &row.relay_protocol,
         &row.url,
         &row.network_type,
+        &row.priority,
+        &row.foundation,
+        &row.tcp_type,
     ];
     conn.execute(
         "INSERT INTO rtc_stats_local_candidate (instance_id, timestamp, channel_id, \
          session_id, connection_id, rtc_timestamp, type, id, transport_id, address, port, \
-         protocol, candidate_type, relay_protocol, url, network_type) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         protocol, candidate_type, relay_protocol, url, network_type, priority, \
+         foundation, tcp_type) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT (connection_id, id) DO NOTHING",
         params,
     )?;
@@ -749,11 +827,15 @@ pub(crate) fn insert_rtc_stats_remote_candidate(
         &row.port,
         &row.protocol,
         &row.candidate_type,
+        &row.priority,
+        &row.foundation,
+        &row.tcp_type,
     ];
     conn.execute(
         "INSERT INTO rtc_stats_remote_candidate (instance_id, timestamp, channel_id, \
          session_id, connection_id, rtc_timestamp, type, id, transport_id, address, port, \
-         protocol, candidate_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         protocol, candidate_type, priority, foundation, tcp_type) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT (connection_id, id) DO NOTHING",
         params,
     )?;
@@ -1050,12 +1132,94 @@ pub(crate) fn append_rtc_stats_transport(
         &row.bytes_sent,
         &row.bytes_received,
         &row.ice_role,
+        &row.ice_state,
         &row.dtls_state,
         &row.dtls_role,
         &row.selected_candidate_pair_id,
         &row.selected_candidate_pair_changes,
+        &row.local_certificate_id,
+        &row.remote_certificate_id,
+        &row.tls_version,
+        &row.dtls_cipher,
+        &row.srtp_cipher,
     ];
     appender.append_row(params)
+}
+
+pub(crate) fn append_rtc_stats_peer_connection(
+    appender: &mut Appender<'_>,
+    row: &RtcStatsPeerConnectionRow,
+) -> duckdb::Result<()> {
+    let instance_id = i32::try_from(row.instance_id).unwrap_or(0);
+    let timestamp = system_time_to_duck(row.timestamp);
+    let params: &[&dyn ToSql] = &[
+        &instance_id,
+        &timestamp,
+        &row.channel_id,
+        &row.session_id,
+        &row.connection_id,
+        &row.rtc_timestamp,
+        &row.stats_type,
+        &row.id,
+        &row.data_channels_opened,
+        &row.data_channels_closed,
+    ];
+    appender.append_row(params)
+}
+
+pub(crate) fn append_rtc_stats_media_playout(
+    appender: &mut Appender<'_>,
+    row: &RtcStatsMediaPlayoutRow,
+) -> duckdb::Result<()> {
+    let instance_id = i32::try_from(row.instance_id).unwrap_or(0);
+    let timestamp = system_time_to_duck(row.timestamp);
+    let params: &[&dyn ToSql] = &[
+        &instance_id,
+        &timestamp,
+        &row.channel_id,
+        &row.session_id,
+        &row.connection_id,
+        &row.rtc_timestamp,
+        &row.stats_type,
+        &row.id,
+        &row.kind,
+        &row.synthesized_samples_duration,
+        &row.synthesized_samples_events,
+        &row.total_samples_duration,
+        &row.total_playout_delay,
+        &row.total_samples_count,
+    ];
+    appender.append_row(params)
+}
+
+pub(crate) fn insert_rtc_stats_certificate(
+    conn: &Connection,
+    row: RtcStatsCertificateRow,
+) -> duckdb::Result<()> {
+    let instance_id = i32::try_from(row.instance_id).unwrap_or(0);
+    let timestamp = system_time_to_duck(row.timestamp);
+    let params: &[&dyn ToSql] = &[
+        &instance_id,
+        &timestamp,
+        &row.channel_id,
+        &row.session_id,
+        &row.connection_id,
+        &row.rtc_timestamp,
+        &row.stats_type,
+        &row.id,
+        &row.fingerprint,
+        &row.fingerprint_algorithm,
+        &row.issuer_certificate_id,
+    ];
+    conn.execute(
+        "INSERT INTO rtc_stats_certificate (instance_id, timestamp, channel_id, \
+         session_id, connection_id, rtc_timestamp, type, id, fingerprint, \
+         fingerprint_algorithm, issuer_certificate_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (connection_id, id) DO NOTHING",
+        params,
+    )?;
+    Ok(())
 }
 
 pub(crate) fn append_rtc_stats_candidate_pair(
@@ -1133,6 +1297,7 @@ mod tests {
             clock_rate: Some(90000),
             channels: Some(2),
             sdp_fmtp_line: Some("profile-id=0".into()),
+            transport_id: None,
         };
         insert_rtc_stats_codec(&conn, row.clone()).expect("1 回目の INSERT 失敗");
         insert_rtc_stats_codec(&conn, row).expect("2 回目の INSERT 失敗");

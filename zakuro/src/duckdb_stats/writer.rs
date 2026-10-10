@@ -18,16 +18,18 @@ use crate::error::{AppError, ErrorMessage, Result};
 use super::module::STATS_CHANNEL_CAPACITY;
 use super::rows::{
     StatsSample, WriteCommand, append_rtc_stats_candidate_pair, append_rtc_stats_data_channel,
-    append_rtc_stats_inbound_rtp, append_rtc_stats_media_source, append_rtc_stats_outbound_rtp,
+    append_rtc_stats_inbound_rtp, append_rtc_stats_media_playout, append_rtc_stats_media_source,
+    append_rtc_stats_outbound_rtp, append_rtc_stats_peer_connection,
     append_rtc_stats_remote_inbound_rtp, append_rtc_stats_remote_outbound_rtp,
     append_rtc_stats_transport, insert_connection, insert_connection_lifecycle,
-    insert_rtc_stats_codec, insert_rtc_stats_local_candidate, insert_rtc_stats_remote_candidate,
-    insert_zakuro, insert_zakuro_scenario, update_zakuro_stop,
+    insert_rtc_stats_certificate, insert_rtc_stats_codec, insert_rtc_stats_local_candidate,
+    insert_rtc_stats_remote_candidate, insert_zakuro, insert_zakuro_scenario, update_zakuro_stop,
 };
 use super::schema::{
     INSERT_CANDIDATE_PAIR_SQL, INSERT_DATA_CHANNEL_SQL, INSERT_INBOUND_RTP_SQL,
-    INSERT_MEDIA_SOURCE_SQL, INSERT_OUTBOUND_RTP_SQL, INSERT_REMOTE_INBOUND_RTP_SQL,
-    INSERT_REMOTE_OUTBOUND_RTP_SQL, INSERT_TRANSPORT_SQL, SCHEMA_SQL, insert_sql_columns,
+    INSERT_MEDIA_PLAYOUT_SQL, INSERT_MEDIA_SOURCE_SQL, INSERT_OUTBOUND_RTP_SQL,
+    INSERT_PEER_CONNECTION_SQL, INSERT_REMOTE_INBOUND_RTP_SQL, INSERT_REMOTE_OUTBOUND_RTP_SQL,
+    INSERT_TRANSPORT_SQL, SCHEMA_SQL, insert_sql_columns,
 };
 
 /// 統計サンプルを 1 トランザクションにまとめる待ち時間
@@ -517,6 +519,9 @@ fn dispatch_command(conn: &Connection, cmd: &WriteCommand) -> duckdb::Result<()>
         WriteCommand::InsertRtcStatsRemoteCandidate(row) => {
             insert_rtc_stats_remote_candidate(conn, (**row).clone())?;
         }
+        WriteCommand::InsertRtcStatsCertificate(row) => {
+            insert_rtc_stats_certificate(conn, (**row).clone())?;
+        }
     }
     Ok(())
 }
@@ -591,6 +596,24 @@ fn append_samples(
             .values()
             .flat_map(|sample| sample.candidate_pair.iter()),
         append_rtc_stats_candidate_pair,
+    )?;
+    append_rows(
+        conn,
+        "rtc_stats_peer_connection",
+        INSERT_PEER_CONNECTION_SQL,
+        samples
+            .values()
+            .flat_map(|sample| sample.peer_connection.iter()),
+        append_rtc_stats_peer_connection,
+    )?;
+    append_rows(
+        conn,
+        "rtc_stats_media_playout",
+        INSERT_MEDIA_PLAYOUT_SQL,
+        samples
+            .values()
+            .flat_map(|sample| sample.media_playout.iter()),
+        append_rtc_stats_media_playout,
     )?;
     Ok(())
 }
@@ -856,6 +879,7 @@ mod tests {
                             clock_rate: None,
                             channels: None,
                             sdp_fmtp_line: None,
+                            transport_id: None,
                         },
                     )));
                 }

@@ -37,6 +37,9 @@ zakuro-rs は WebRTC の統計情報を DuckDB データベースファイルに
 - `rtc_stats_candidate_pair` - ICE candidate pair 統計 (RTT、可用帯域、nominated)
 - `rtc_stats_local_candidate` - ローカル ICE 候補 (接続ごとに 1 回)
 - `rtc_stats_remote_candidate` - リモート ICE 候補 (接続ごとに 1 回)
+- `rtc_stats_peer_connection` - PeerConnection 統計 (DataChannel の開閉数)
+- `rtc_stats_media_playout` - 音声再生統計
+- `rtc_stats_certificate` - DTLS 証明書の fingerprint (接続ごとに 1 回。証明書本体は残さない)
 
 ## 共通列
 
@@ -98,7 +101,7 @@ MOQ 版 (`zakuro-moq`) は DuckDB 出力を持ちません。
 
 ## シーケンスとインデックス
 
-各 stats テーブルの `pk` 列用に 13 個のシーケンスが作成されます。また、`connection_id` での検索と `(channel_id, connection_id, timestamp)` での複合検索用に 14 個のインデックスが作成されます。
+各 stats テーブルの `pk` 列用に 16 個のシーケンスが作成されます。また、`connection_id` での検索と `(channel_id, connection_id, timestamp)` での複合検索用に 17 個のインデックスが作成されます。
 
 ## サンプルクエリ
 

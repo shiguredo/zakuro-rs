@@ -23,6 +23,9 @@ CREATE SEQUENCE rtc_stats_transport_pk_seq;
 CREATE SEQUENCE rtc_stats_candidate_pair_pk_seq;
 CREATE SEQUENCE rtc_stats_local_candidate_pk_seq;
 CREATE SEQUENCE rtc_stats_remote_candidate_pk_seq;
+CREATE SEQUENCE rtc_stats_peer_connection_pk_seq;
+CREATE SEQUENCE rtc_stats_media_playout_pk_seq;
+CREATE SEQUENCE rtc_stats_certificate_pk_seq;
 
 -- zakuro: 起動情報 (1 行のみ、instance_id 列なし)
 CREATE TABLE zakuro (
@@ -121,6 +124,7 @@ CREATE TABLE rtc_stats_codec (
     clock_rate BIGINT,
     channels BIGINT,
     sdp_fmtp_line VARCHAR,
+    transport_id VARCHAR,
     UNIQUE(connection_id, id, mime_type, payload_type, clock_rate, channels, sdp_fmtp_line)
 );
 
@@ -375,10 +379,16 @@ CREATE TABLE rtc_stats_transport (
     bytes_sent BIGINT,
     bytes_received BIGINT,
     ice_role VARCHAR,
+    ice_state VARCHAR,
     dtls_state VARCHAR,
     dtls_role VARCHAR,
     selected_candidate_pair_id VARCHAR,
-    selected_candidate_pair_changes BIGINT
+    selected_candidate_pair_changes BIGINT,
+    local_certificate_id VARCHAR,
+    remote_certificate_id VARCHAR,
+    tls_version VARCHAR,
+    dtls_cipher VARCHAR,
+    srtp_cipher VARCHAR
 );
 
 -- rtc_stats_candidate_pair: ICE candidate pair 統計 (経路の RTT と可用帯域)
@@ -433,6 +443,9 @@ CREATE TABLE rtc_stats_local_candidate (
     relay_protocol VARCHAR,
     url VARCHAR,
     network_type VARCHAR,
+    priority BIGINT,
+    foundation VARCHAR,
+    tcp_type VARCHAR,
     UNIQUE(connection_id, id)
 );
 
@@ -452,6 +465,61 @@ CREATE TABLE rtc_stats_remote_candidate (
     port INTEGER,
     protocol VARCHAR,
     candidate_type VARCHAR,
+    priority BIGINT,
+    foundation VARCHAR,
+    tcp_type VARCHAR,
+    UNIQUE(connection_id, id)
+);
+
+-- rtc_stats_peer_connection: PeerConnection 統計 (DataChannel の開閉数)
+CREATE TABLE rtc_stats_peer_connection (
+    pk BIGINT PRIMARY KEY DEFAULT nextval('rtc_stats_peer_connection_pk_seq'),
+    instance_id INTEGER,
+    timestamp TIMESTAMP,
+    channel_id VARCHAR,
+    session_id VARCHAR,
+    connection_id VARCHAR,
+    rtc_timestamp DOUBLE,
+    type VARCHAR,
+    id VARCHAR,
+    data_channels_opened BIGINT,
+    data_channels_closed BIGINT
+);
+
+-- rtc_stats_media_playout: 音声再生統計
+CREATE TABLE rtc_stats_media_playout (
+    pk BIGINT PRIMARY KEY DEFAULT nextval('rtc_stats_media_playout_pk_seq'),
+    instance_id INTEGER,
+    timestamp TIMESTAMP,
+    channel_id VARCHAR,
+    session_id VARCHAR,
+    connection_id VARCHAR,
+    rtc_timestamp DOUBLE,
+    type VARCHAR,
+    id VARCHAR,
+    kind VARCHAR,
+    synthesized_samples_duration DOUBLE,
+    synthesized_samples_events BIGINT,
+    total_samples_duration DOUBLE,
+    total_playout_delay DOUBLE,
+    total_samples_count BIGINT
+);
+
+-- rtc_stats_certificate: DTLS 証明書の識別子 (接続ごとに 1 回)
+-- 証明書本体 (base64Certificate) は残さない。fingerprint で識別できる。
+CREATE TABLE rtc_stats_certificate (
+    pk BIGINT PRIMARY KEY DEFAULT nextval('rtc_stats_certificate_pk_seq'),
+    instance_id INTEGER,
+    timestamp TIMESTAMP,
+    channel_id VARCHAR,
+    session_id VARCHAR,
+    connection_id VARCHAR,
+    rtc_timestamp DOUBLE,
+    type VARCHAR,
+    id VARCHAR,
+    fingerprint VARCHAR,
+    fingerprint_algorithm VARCHAR,
+    issuer_certificate_id VARCHAR,
     UNIQUE(connection_id, id)
 );
 
@@ -470,5 +538,8 @@ CREATE INDEX idx_rtc_stats_transport_composite ON rtc_stats_transport(instance_i
 CREATE INDEX idx_rtc_stats_candidate_pair_composite ON rtc_stats_candidate_pair(instance_id, channel_id, connection_id, timestamp);
 CREATE INDEX idx_rtc_stats_local_candidate_composite ON rtc_stats_local_candidate(instance_id, channel_id, connection_id, timestamp);
 CREATE INDEX idx_rtc_stats_remote_candidate_composite ON rtc_stats_remote_candidate(instance_id, channel_id, connection_id, timestamp);
+CREATE INDEX idx_rtc_stats_peer_connection_composite ON rtc_stats_peer_connection(instance_id, channel_id, connection_id, timestamp);
+CREATE INDEX idx_rtc_stats_media_playout_composite ON rtc_stats_media_playout(instance_id, channel_id, connection_id, timestamp);
+CREATE INDEX idx_rtc_stats_certificate_composite ON rtc_stats_certificate(instance_id, channel_id, connection_id, timestamp);
 
 COMMIT;

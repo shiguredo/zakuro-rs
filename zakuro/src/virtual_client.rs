@@ -451,6 +451,7 @@ async fn run_stats_collection(
     let mut seen_codecs: HashSet<CodecIdentity> = HashSet::new();
     let mut seen_local_candidates: HashSet<CandidateIdentity> = HashSet::new();
     let mut seen_remote_candidates: HashSet<CandidateIdentity> = HashSet::new();
+    let mut seen_certificates: HashSet<CandidateIdentity> = HashSet::new();
     // 収集間隔が空いたとき (get_stats が遅い、tick を飛ばした) に分かるようにする。
     let mut last_collected: Option<Instant> = None;
     let mut tick = tokio::time::interval(interval);
@@ -554,6 +555,14 @@ async fn run_stats_collection(
                             client.send_control(WriteCommand::InsertRtcStatsRemoteCandidate(
                                 Box::new(candidate),
                             ));
+                        }
+                    }
+                    for certificate in parsed.certificates {
+                        if seen_certificates.insert(CandidateIdentity::from_certificate(&certificate))
+                        {
+                            client.send_control(WriteCommand::InsertRtcStatsCertificate(Box::new(
+                                certificate,
+                            )));
                         }
                     }
                     if parsed.sample.has_rows() {
