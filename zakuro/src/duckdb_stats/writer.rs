@@ -2,27 +2,38 @@
 // Config / Writer / Client
 // ============================================================================
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use duckdb::Connection;
+use duckdb::{Appender, Connection};
 use shiguredo_webrtc::{rtc_log_info, rtc_log_warning};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{AppError, ErrorMessage, Result};
 
-use super::module::CHANNEL_CAPACITY;
+use super::module::STATS_CHANNEL_CAPACITY;
 use super::rows::{
-    WriteCommand, insert_connection, insert_connection_lifecycle, insert_rtc_stats_codec,
-    insert_rtc_stats_data_channel, insert_rtc_stats_inbound_rtp, insert_rtc_stats_media_source,
-    insert_rtc_stats_outbound_rtp, insert_rtc_stats_remote_inbound_rtp,
-    insert_rtc_stats_remote_outbound_rtp, insert_zakuro, insert_zakuro_scenario,
+    StatsSample, WriteCommand, append_rtc_stats_data_channel, append_rtc_stats_inbound_rtp,
+    append_rtc_stats_media_source, append_rtc_stats_outbound_rtp,
+    append_rtc_stats_remote_inbound_rtp, append_rtc_stats_remote_outbound_rtp, insert_connection,
+    insert_connection_lifecycle, insert_rtc_stats_codec, insert_zakuro, insert_zakuro_scenario,
     update_zakuro_stop,
 };
-use super::schema::SCHEMA_SQL;
+use super::schema::{
+    INSERT_DATA_CHANNEL_SQL, INSERT_INBOUND_RTP_SQL, INSERT_MEDIA_SOURCE_SQL,
+    INSERT_OUTBOUND_RTP_SQL, INSERT_REMOTE_INBOUND_RTP_SQL, INSERT_REMOTE_OUTBOUND_RTP_SQL,
+    SCHEMA_SQL, insert_sql_columns,
+};
+
+/// 統計サンプルを 1 トランザクションにまとめる待ち時間
+///
+/// 1 秒間隔の tick を接続横断で 1 回のバルク INSERT にする。
+/// この窓より短い間隔で同じ接続のサンプルが 2 回到着することは通常ない。
+const FLUSH_INTERVAL: Duration = Duration::from_millis(200);
 
 /// DuckDB writer の起動設定
 #[derive(Debug, Clone)]
@@ -37,7 +48,7 @@ pub(crate) struct DuckDBWriterConfig {
 
 /// DuckDB 統計書き込みのライフサイクルを管理する
 ///
-/// `start` で writer task を起動し、`client` 経由で `WriteCommand` を送る。
+/// `start` で writer task を起動し、`client` 経由でコマンドを送る。
 /// disabled 時は `join_handle = None` で task を起動しない。
 pub(crate) struct DuckDBStatsWriter {
     join_handle: Option<tokio::task::JoinHandle<()>>,
@@ -66,9 +77,14 @@ impl DuckDBStatsWriter {
 
         let (init_tx, init_rx) =
             tokio::sync::oneshot::channel::<std::result::Result<String, AppError>>();
-        let (cmd_tx, cmd_rx) = mpsc::channel::<WriteCommand>(CHANNEL_CAPACITY);
+        // 制御コマンドは接続数に比例するだけなので、同期コンテキスト (シグナリングコールバック)
+        // から待たずに送れる unbounded にする。統計サンプルの洪水で埋まらない。
+        let (control_tx, control_rx) = mpsc::unbounded_channel::<WriteCommand>();
+        let (stats_tx, stats_rx) = mpsc::channel::<StatsSample>(STATS_CHANNEL_CAPACITY);
         let dropped_count = Arc::new(AtomicU64::new(0));
+        let dropped_for_writer = Arc::clone(&dropped_count);
         let db_path = config.db_path.clone();
+        let interval = config.interval;
 
         let join_handle = tokio::task::spawn_blocking(move || {
             // Connection::open + execute_batch でスキーマ投入 + version 取得
@@ -97,13 +113,18 @@ impl DuckDBStatsWriter {
             rtc_log_info!(
                 "[duckdb] writer started: path={:?}, interval={:.2}s",
                 db_path,
-                config.interval.as_secs_f64()
+                interval.as_secs_f64()
             );
 
             // writer 本体: Handle::current().block_on で recv ループを回す
             let handle = tokio::runtime::Handle::current();
             let _entered = handle.enter();
-            handle.block_on(writer_run_loop(conn, cmd_rx));
+            handle.block_on(writer_run_loop(
+                conn,
+                control_rx,
+                stats_rx,
+                dropped_for_writer,
+            ));
 
             rtc_log_info!("[duckdb] writer stopped");
         });
@@ -114,13 +135,14 @@ impl DuckDBStatsWriter {
         })??;
 
         let client = DuckDBClient {
-            sender: Some(cmd_tx),
+            control: Some(control_tx),
+            stats: Some(stats_tx),
             dropped_count,
         };
 
         // reporter task (dropped_count の定期 warn) は writer 本体とは別 task に分離する
         // (writer 本体 select に並べると最大スケール時に reporter が starvation するため)
-        let reporter_dropped = client.dropped_count.clone();
+        let reporter_dropped = Arc::clone(&client.dropped_count);
         let reporter_token = CancellationToken::new();
         let reporter_handle = tokio::spawn(reporter_loop(reporter_dropped, reporter_token.clone()));
 
@@ -142,7 +164,7 @@ impl DuckDBStatsWriter {
 
     /// shutdown ハンドシェイク後に writer task の完了を待つ
     ///
-    /// 呼び出し側は事前に `client.send(UpdateZakuroStop).await` で
+    /// 呼び出し側は事前に `client.send_control(UpdateZakuroStop)` で
     /// `stop_timestamp` UPDATE を送り、その後 `drop(client)` で
     /// main 側の Sender を drop してから呼ぶ。
     ///
@@ -171,11 +193,15 @@ impl DuckDBStatsWriter {
 
 /// VirtualClient / main 側から writer task へコマンドを送るハンドル
 ///
-/// `clone()` で複数箇所に配れる。`sender == None` のときは disabled
+/// `clone()` で複数箇所に配れる。`control == None` のときは disabled
 /// (`--no-duckdb-output`) で全操作が no-op になる。
 #[derive(Clone)]
 pub(crate) struct DuckDBClient {
-    pub(crate) sender: Option<mpsc::Sender<WriteCommand>>,
+    /// 接続行、ライフサイクル、codec、起動情報。unbounded。
+    pub(crate) control: Option<mpsc::UnboundedSender<WriteCommand>>,
+    /// 接続 1 本 × 1 tick の統計サンプル。
+    pub(crate) stats: Option<mpsc::Sender<StatsSample>>,
+    /// 書けなかった統計サンプル数 (tick 単位。行数ではない)
     pub(crate) dropped_count: Arc<AtomicU64>,
 }
 
@@ -183,38 +209,39 @@ impl DuckDBClient {
     /// disabled 状態の noop クライアントを生成する
     pub(crate) fn noop() -> Self {
         Self {
-            sender: None,
+            control: None,
+            stats: None,
             dropped_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// DuckDB 出力が有効かどうか
     pub(crate) fn is_enabled(&self) -> bool {
-        self.sender.is_some()
+        self.control.is_some()
     }
 
-    /// 満杯 / 無効時は drop し `dropped_count` をインクリメントする
-    pub(crate) fn try_send(&self, cmd: WriteCommand) {
-        if let Some(tx) = &self.sender {
-            match tx.try_send(cmd) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    self.dropped_count.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    self.dropped_count.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+    /// 制御コマンドを送る
+    ///
+    /// チャネルは unbounded なので、receiver が生きていれば欠落しない。
+    /// 無効時は何もしない。
+    pub(crate) fn send_control(&self, cmd: WriteCommand) {
+        if let Some(tx) = &self.control
+            && let Err(e) = tx.send(cmd)
+        {
+            rtc_log_warning!("[duckdb] control send failed: channel closed, error={e}");
         }
     }
 
-    /// shutdown 経路用: 確実に送る (満杯時に待機する)
-    /// 無効時は何もしない
-    pub(crate) async fn send(&self, cmd: WriteCommand) {
-        if let Some(tx) = &self.sender
-            && let Err(e) = tx.send(cmd).await
-        {
-            rtc_log_warning!("[duckdb] send failed: channel closed, error={e}");
+    /// 統計サンプルを 1 tick ぶん送る
+    ///
+    /// 満杯または receiver が閉じているときはサンプル全体を捨て、
+    /// `dropped_count` を 1 増やす。行単位では捨てない。
+    pub(crate) fn try_send_stats(&self, sample: StatsSample) {
+        let Some(tx) = &self.stats else {
+            return;
+        };
+        if tx.try_send(sample).is_err() {
+            self.dropped_count.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -222,19 +249,101 @@ impl DuckDBClient {
 /// INSERT 連続エラーの閾値。超えたら writer を停止する
 const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 
-/// writer task 本体の recv ループ
+/// writer task 本体の受信ループ
 ///
-/// `recv().await` が `Some(cmd)` なら処理、`None` で break (全 Sender drop)。
-/// break 後に `conn` は関数スコープ終了で自動 drop されファイルが close する
+/// 制御コマンドは欠落させない。統計サンプルは短い窓でまとめ、同じ接続の
+/// 未書き込みサンプルが複数あれば最新だけを残す。フラッシュはテーブルごとの
+/// Appender (バルク INSERT) で 1 トランザクションに入れる。
+///
+/// 両方の Sender が drop されるとループを抜ける。抜けたあと `conn` は
+/// 関数スコープ終了で自動 drop され、ファイルが close する
 /// (DuckDB は drop 時に自動 flush するため CHECKPOINT 明示不要)。
-async fn writer_run_loop(conn: Connection, mut cmd_rx: mpsc::Receiver<WriteCommand>) {
+async fn writer_run_loop(
+    conn: Connection,
+    mut control_rx: mpsc::UnboundedReceiver<WriteCommand>,
+    mut stats_rx: mpsc::Receiver<StatsSample>,
+    dropped_count: Arc<AtomicU64>,
+) {
     let mut consecutive_errors: u32 = 0;
+    let mut control_open = true;
+    let mut stats_open = true;
+
     loop {
-        let Some(cmd) = cmd_rx.recv().await else {
+        if !control_open && !stats_open {
             break;
-        };
-        if let Err(e) = dispatch_command(&conn, cmd) {
+        }
+
+        let mut controls: Vec<WriteCommand> = Vec::new();
+        let mut pending: HashMap<(u32, u32), StatsSample> = HashMap::new();
+        let mut replaced: u64 = 0;
+
+        tokio::select! {
+            biased;
+            cmd = control_rx.recv(), if control_open => {
+                push_control(&mut controls, &mut control_open, cmd);
+            }
+            sample = stats_rx.recv(), if stats_open => {
+                push_sample(&mut pending, &mut replaced, &mut stats_open, sample);
+            }
+        }
+
+        if controls.is_empty() && pending.is_empty() {
+            continue;
+        }
+
+        drain_available(
+            &mut control_rx,
+            &mut stats_rx,
+            &mut control_open,
+            &mut stats_open,
+            &mut controls,
+            &mut pending,
+            &mut replaced,
+        );
+
+        if control_open || stats_open {
+            let deadline = Instant::now() + FLUSH_INTERVAL;
+            loop {
+                let rest = deadline.saturating_duration_since(Instant::now());
+                if rest.is_zero() {
+                    break;
+                }
+                tokio::select! {
+                    biased;
+                    cmd = control_rx.recv(), if control_open => {
+                        push_control(&mut controls, &mut control_open, cmd);
+                    }
+                    sample = stats_rx.recv(), if stats_open => {
+                        push_sample(&mut pending, &mut replaced, &mut stats_open, sample);
+                    }
+                    _ = tokio::time::sleep(rest) => break,
+                }
+                if !control_open && !stats_open {
+                    break;
+                }
+            }
+            drain_available(
+                &mut control_rx,
+                &mut stats_rx,
+                &mut control_open,
+                &mut stats_open,
+                &mut controls,
+                &mut pending,
+                &mut replaced,
+            );
+        }
+
+        if controls.is_empty() && pending.values().all(|sample| !sample.has_rows()) {
+            continue;
+        }
+
+        if let Err(e) = flush_writes(&conn, &controls, &pending) {
             consecutive_errors += 1;
+            // フラッシュに失敗したサンプルは書き直さない。欠落として数える。
+            let lost = pending.len() as u64;
+            if lost > 0 {
+                dropped_count.fetch_add(lost, Ordering::Relaxed);
+            }
             rtc_log_warning!("[duckdb] write failed: error={e}, consecutive={consecutive_errors}");
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                 rtc_log_warning!(
@@ -245,50 +354,221 @@ async fn writer_run_loop(conn: Connection, mut cmd_rx: mpsc::Receiver<WriteComma
         } else {
             consecutive_errors = 0;
         }
+        if replaced > 0 {
+            dropped_count.fetch_add(replaced, Ordering::Relaxed);
+        }
     }
 }
 
-/// 1 コマンドを対応する INSERT / UPDATE に振り分ける
-pub(crate) fn dispatch_command(conn: &Connection, cmd: WriteCommand) -> duckdb::Result<()> {
+/// すでに届いているコマンドを、待たずに全部取り出す
+fn drain_available(
+    control_rx: &mut mpsc::UnboundedReceiver<WriteCommand>,
+    stats_rx: &mut mpsc::Receiver<StatsSample>,
+    control_open: &mut bool,
+    stats_open: &mut bool,
+    controls: &mut Vec<WriteCommand>,
+    pending: &mut HashMap<(u32, u32), StatsSample>,
+    replaced: &mut u64,
+) {
+    if *control_open {
+        loop {
+            match control_rx.try_recv() {
+                Ok(cmd) => controls.push(cmd),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    *control_open = false;
+                    break;
+                }
+            }
+        }
+    }
+    if *stats_open {
+        loop {
+            match stats_rx.try_recv() {
+                Ok(sample) => {
+                    if absorb_sample(pending, sample) {
+                        *replaced += 1;
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    *stats_open = false;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn push_control(
+    controls: &mut Vec<WriteCommand>,
+    control_open: &mut bool,
+    cmd: Option<WriteCommand>,
+) {
     match cmd {
-        WriteCommand::InsertZakuro(row) => {
-            insert_zakuro(conn, *row)?;
+        Some(cmd) => controls.push(cmd),
+        None => *control_open = false,
+    }
+}
+
+fn push_sample(
+    pending: &mut HashMap<(u32, u32), StatsSample>,
+    replaced: &mut u64,
+    stats_open: &mut bool,
+    sample: Option<StatsSample>,
+) {
+    match sample {
+        Some(sample) => {
+            if absorb_sample(pending, sample) {
+                *replaced += 1;
+            }
         }
-        WriteCommand::UpdateZakuroStop { stop_timestamp } => {
-            update_zakuro_stop(conn, stop_timestamp)?;
+        None => *stats_open = false,
+    }
+}
+
+/// 同じ接続の未書き込みサンプルを最新で置き換える
+///
+/// 戻り値は、置き換えで 1 サンプル捨てたか。
+fn absorb_sample(pending: &mut HashMap<(u32, u32), StatsSample>, sample: StatsSample) -> bool {
+    let key = (sample.instance_id, sample.vc_id);
+    pending.insert(key, sample).is_some()
+}
+
+/// 制御コマンドと統計サンプルを 1 トランザクションで書く
+///
+/// 統計テーブルは Appender でバルク INSERT する。`pk` は列リストから外し、
+/// シーケンスの DEFAULT に任せる。
+pub(crate) fn flush_writes(
+    conn: &Connection,
+    controls: &[WriteCommand],
+    samples: &HashMap<(u32, u32), StatsSample>,
+) -> duckdb::Result<()> {
+    if controls.is_empty() && samples.values().all(|sample| !sample.has_rows()) {
+        return Ok(());
+    }
+    conn.execute_batch("BEGIN TRANSACTION")?;
+    let result = (|| -> duckdb::Result<()> {
+        for command in controls {
+            dispatch_command(conn, command)?;
         }
-        WriteCommand::InsertZakuroScenario(row) => {
-            insert_zakuro_scenario(conn, *row)?;
-        }
-        WriteCommand::InsertConnection(row) => {
-            insert_connection(conn, *row)?;
-        }
-        WriteCommand::InsertConnectionLifecycle(row) => {
-            insert_connection_lifecycle(conn, *row)?;
-        }
-        WriteCommand::InsertRtcStatsCodec(row) => {
-            insert_rtc_stats_codec(conn, *row)?;
-        }
-        WriteCommand::InsertRtcStatsInboundRtp(row) => {
-            insert_rtc_stats_inbound_rtp(conn, *row)?;
-        }
-        WriteCommand::InsertRtcStatsOutboundRtp(row) => {
-            insert_rtc_stats_outbound_rtp(conn, *row)?;
-        }
-        WriteCommand::InsertRtcStatsMediaSource(row) => {
-            insert_rtc_stats_media_source(conn, *row)?;
-        }
-        WriteCommand::InsertRtcStatsRemoteInboundRtp(row) => {
-            insert_rtc_stats_remote_inbound_rtp(conn, *row)?;
-        }
-        WriteCommand::InsertRtcStatsRemoteOutboundRtp(row) => {
-            insert_rtc_stats_remote_outbound_rtp(conn, *row)?;
-        }
-        WriteCommand::InsertRtcStatsDataChannel(row) => {
-            insert_rtc_stats_data_channel(conn, *row)?;
+        append_samples(conn, samples)?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT")?,
+        Err(error) => {
+            if let Err(rollback_error) = conn.execute_batch("ROLLBACK") {
+                rtc_log_warning!("[duckdb] rollback failed: error={rollback_error}");
+            }
+            return Err(error);
         }
     }
     Ok(())
+}
+
+/// 1 コマンドを対応する INSERT / UPDATE に振り分ける
+fn dispatch_command(conn: &Connection, cmd: &WriteCommand) -> duckdb::Result<()> {
+    match cmd {
+        WriteCommand::InsertZakuro(row) => {
+            insert_zakuro(conn, (**row).clone())?;
+        }
+        WriteCommand::UpdateZakuroStop { stop_timestamp } => {
+            update_zakuro_stop(conn, *stop_timestamp)?;
+        }
+        WriteCommand::InsertZakuroScenario(row) => {
+            insert_zakuro_scenario(conn, (**row).clone())?;
+        }
+        WriteCommand::InsertConnection(row) => {
+            insert_connection(conn, (**row).clone())?;
+        }
+        WriteCommand::InsertConnectionLifecycle(row) => {
+            insert_connection_lifecycle(conn, (**row).clone())?;
+        }
+        WriteCommand::InsertRtcStatsCodec(row) => {
+            insert_rtc_stats_codec(conn, (**row).clone())?;
+        }
+    }
+    Ok(())
+}
+
+/// 統計サンプルをテーブルごとに Appender へ流す
+fn append_samples(
+    conn: &Connection,
+    samples: &HashMap<(u32, u32), StatsSample>,
+) -> duckdb::Result<()> {
+    append_rows(
+        conn,
+        "rtc_stats_inbound_rtp",
+        INSERT_INBOUND_RTP_SQL,
+        samples.values().flat_map(|sample| sample.inbound.iter()),
+        append_rtc_stats_inbound_rtp,
+    )?;
+    append_rows(
+        conn,
+        "rtc_stats_outbound_rtp",
+        INSERT_OUTBOUND_RTP_SQL,
+        samples.values().flat_map(|sample| sample.outbound.iter()),
+        append_rtc_stats_outbound_rtp,
+    )?;
+    append_rows(
+        conn,
+        "rtc_stats_media_source",
+        INSERT_MEDIA_SOURCE_SQL,
+        samples
+            .values()
+            .flat_map(|sample| sample.media_source.iter()),
+        append_rtc_stats_media_source,
+    )?;
+    append_rows(
+        conn,
+        "rtc_stats_remote_inbound_rtp",
+        INSERT_REMOTE_INBOUND_RTP_SQL,
+        samples
+            .values()
+            .flat_map(|sample| sample.remote_inbound.iter()),
+        append_rtc_stats_remote_inbound_rtp,
+    )?;
+    append_rows(
+        conn,
+        "rtc_stats_remote_outbound_rtp",
+        INSERT_REMOTE_OUTBOUND_RTP_SQL,
+        samples
+            .values()
+            .flat_map(|sample| sample.remote_outbound.iter()),
+        append_rtc_stats_remote_outbound_rtp,
+    )?;
+    append_rows(
+        conn,
+        "rtc_stats_data_channel",
+        INSERT_DATA_CHANNEL_SQL,
+        samples
+            .values()
+            .flat_map(|sample| sample.data_channel.iter()),
+        append_rtc_stats_data_channel,
+    )?;
+    Ok(())
+}
+
+/// 1 テーブル分を Appender で書く。行が無ければ何もしない
+fn append_rows<'a, T: 'a>(
+    conn: &Connection,
+    table: &str,
+    insert_sql: &str,
+    rows: impl Iterator<Item = &'a T>,
+    mut append_one: impl FnMut(&mut Appender<'_>, &T) -> duckdb::Result<()>,
+) -> duckdb::Result<()> {
+    let mut rows = rows.peekable();
+    if rows.peek().is_none() {
+        return Ok(());
+    }
+    let columns = insert_sql_columns(insert_sql);
+    let column_refs: Vec<&str> = columns.iter().map(String::as_str).collect();
+    let mut appender = conn.appender_with_columns(table, &column_refs)?;
+    for row in rows {
+        append_one(&mut appender, row)?;
+    }
+    appender.flush()
 }
 
 /// dropped_count を 5 秒ごとに warn 出力する reporter task
@@ -305,7 +585,7 @@ async fn reporter_loop(dropped_count: Arc<AtomicU64>, token: CancellationToken) 
                 last = total;
                 if delta > 0 {
                     rtc_log_warning!(
-                        "[duckdb] dropped commands: total={}, since_last={}",
+                        "[duckdb] dropped stats samples: total={}, since_last={}",
                         total,
                         delta
                     );
@@ -327,8 +607,9 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
-    use crate::duckdb_stats::rows::{RtcStatsCodecRow, WriteCommand};
+    use crate::duckdb_stats::rows::{ConnectionIds, RtcStatsCodecRow, WriteCommand};
     use crate::duckdb_stats::schema::SCHEMA_SQL;
+    use crate::duckdb_stats::stats_json::parse_rtc_stats;
 
     /// 一時ディレクトリに `.db` ファイルを作りスキーマを投入するヘルパー
     fn setup_db() -> (tempfile::TempDir, Connection) {
@@ -337,6 +618,26 @@ mod tests {
         let conn = Connection::open(&path).expect("DuckDB open に失敗");
         conn.execute_batch(SCHEMA_SQL).expect("スキーマ投入に失敗");
         (dir, conn)
+    }
+
+    /// packetsReceived だけ違う inbound-rtp サンプルを作る
+    fn inbound_sample(instance_id: u32, vc_id: u32, packets: i64) -> StatsSample {
+        let stats = format!(
+            r#"[{{"type":"inbound-rtp","id":"I1","timestamp":1.0,"ssrc":1,"kind":"video","packetsReceived":{packets}}}]"#
+        );
+        let ids = ConnectionIds {
+            connection_id: format!("c-{instance_id}-{vc_id}"),
+            session_id: "s".into(),
+        };
+        parse_rtc_stats(
+            instance_id,
+            vc_id,
+            "ch",
+            &ids,
+            &stats,
+            SystemTime::UNIX_EPOCH,
+        )
+        .sample
     }
 
     #[test]
@@ -354,22 +655,103 @@ mod tests {
     }
 
     #[test]
-    fn send_logs_error_on_closed_channel() {
-        let rt = tokio::runtime::Runtime::new().expect("runtime を作成できること");
-        rt.block_on(async {
-            let (tx, rx) = mpsc::channel::<WriteCommand>(1);
-            drop(rx);
-            let client = DuckDBClient {
-                sender: Some(tx),
-                dropped_count: Arc::new(AtomicU64::new(0)),
-            };
-            // パニックせず正常に終了すること
-            client
-                .send(WriteCommand::UpdateZakuroStop {
-                    stop_timestamp: SystemTime::now(),
-                })
-                .await;
+    fn send_control_logs_error_on_closed_channel() {
+        let (tx, rx) = mpsc::unbounded_channel::<WriteCommand>();
+        drop(rx);
+        let client = DuckDBClient {
+            control: Some(tx),
+            stats: None,
+            dropped_count: Arc::new(AtomicU64::new(0)),
+        };
+        // パニックせず正常に終了すること
+        client.send_control(WriteCommand::UpdateZakuroStop {
+            stop_timestamp: SystemTime::now(),
         });
+    }
+
+    /// 統計チャネルが満杯でも、制御コマンドは別チャネルなので送れる
+    #[test]
+    fn control_send_succeeds_while_stats_channel_is_full() {
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel::<WriteCommand>();
+        let (stats_tx, _stats_rx) = mpsc::channel::<StatsSample>(1);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let client = DuckDBClient {
+            control: Some(control_tx),
+            stats: Some(stats_tx),
+            dropped_count: Arc::clone(&dropped),
+        };
+        client.try_send_stats(StatsSample::empty(0, 0));
+        client.try_send_stats(StatsSample::empty(0, 1));
+        assert_eq!(
+            dropped.load(Ordering::Relaxed),
+            1,
+            "満杯で捨てる単位はサンプル 1 つであること"
+        );
+        client.send_control(WriteCommand::UpdateZakuroStop {
+            stop_timestamp: SystemTime::UNIX_EPOCH,
+        });
+        assert!(
+            control_rx.try_recv().is_ok(),
+            "統計チャネルが満杯でも制御コマンドは届くこと"
+        );
+    }
+
+    /// 同じ接続のサンプルを 2 つ渡すと、後の方だけが残る
+    #[test]
+    fn absorb_sample_keeps_the_latest_per_connection() {
+        let mut pending = HashMap::new();
+        assert!(
+            !absorb_sample(&mut pending, inbound_sample(0, 1, 10)),
+            "初回の挿入は置き換えではないこと"
+        );
+        assert!(
+            absorb_sample(&mut pending, inbound_sample(0, 1, 77)),
+            "同じ接続の 2 回目は置き換えであること"
+        );
+        assert!(
+            !absorb_sample(&mut pending, inbound_sample(0, 2, 5)),
+            "別の接続は置き換えではないこと"
+        );
+        assert_eq!(pending.len(), 2, "接続 2 本分が残ること");
+        let kept = pending.get(&(0, 1)).expect("接続 (0, 1) が残ること");
+        assert_eq!(
+            kept.inbound[0].packets_received,
+            Some(77),
+            "残るのは後から入れたサンプルであること"
+        );
+    }
+
+    /// 複数接続の inbound 行が 1 回のバルク INSERT で全部残る
+    #[test]
+    fn flush_writes_appends_every_connection() {
+        let (_dir, conn) = setup_db();
+        let mut pending = HashMap::new();
+        absorb_sample(&mut pending, inbound_sample(0, 1, 10));
+        absorb_sample(&mut pending, inbound_sample(0, 2, 20));
+        absorb_sample(&mut pending, inbound_sample(0, 1, 30));
+        flush_writes(&conn, &[], &pending).expect("バルク INSERT が成功すること");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM rtc_stats_inbound_rtp", [], |row| {
+                row.get(0)
+            })
+            .expect("行数の取得に失敗");
+        assert_eq!(count, 2, "置き換え後の 2 接続ぶんだけ書かれること");
+        let packets: i64 = conn
+            .query_row(
+                "SELECT packets_received FROM rtc_stats_inbound_rtp WHERE connection_id = 'c-0-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("packets_received の取得に失敗");
+        assert_eq!(packets, 30, "同じ接続は最新サンプルだけが書かれること");
+        let pk: i64 = conn
+            .query_row(
+                "SELECT pk FROM rtc_stats_inbound_rtp ORDER BY pk LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pk の取得に失敗");
+        assert!(pk > 0, "pk はシーケンスで採番されること");
     }
 
     /// `DuckDBStatsWriter` が保持する Sender を join 時に drop しないと
@@ -407,38 +789,77 @@ mod tests {
             // テーブルを削除して書き込みを失敗させる
             conn.execute_batch("DROP TABLE rtc_stats_codec")
                 .expect("DROP 失敗");
-            let (tx, rx) = mpsc::channel::<WriteCommand>(64);
-            // InsertZakuro は zakuro テーブル (削除していないので成功)、
-            // その後 InsertRtcStatsCodec を連続送信してエラーを蓄積させる
-            let tx_clone = tx.clone();
+            let (control_tx, control_rx) = mpsc::unbounded_channel::<WriteCommand>();
+            let (stats_tx, stats_rx) = mpsc::channel::<StatsSample>(8);
+            drop(stats_tx);
+            let tx_clone = control_tx.clone();
             tokio::spawn(async move {
-                // 連続エラー閾値 (MAX_CONSECUTIVE_ERRORS = 10) を超えるまで送る
+                // 同じフラッシュにまとまって 1 回失敗しても、ループが戻ることを見る。
                 for _ in 0..15 {
-                    let _ = tx_clone
-                        .send(WriteCommand::InsertRtcStatsCodec(Box::new(
-                            RtcStatsCodecRow {
-                                instance_id: 0,
-                                timestamp: SystemTime::now(),
-                                channel_id: "ch".into(),
-                                session_id: "s".into(),
-                                connection_id: "c".into(),
-                                rtc_timestamp: Some(1.0),
-                                stats_type: "codec".into(),
-                                id: "X".into(),
-                                mime_type: None,
-                                payload_type: None,
-                                clock_rate: None,
-                                channels: None,
-                                sdp_fmtp_line: None,
-                            },
-                        )))
-                        .await;
+                    let _ = tx_clone.send(WriteCommand::InsertRtcStatsCodec(Box::new(
+                        RtcStatsCodecRow {
+                            instance_id: 0,
+                            timestamp: SystemTime::now(),
+                            channel_id: "ch".into(),
+                            session_id: "s".into(),
+                            connection_id: "c".into(),
+                            rtc_timestamp: Some(1.0),
+                            stats_type: "codec".into(),
+                            id: "X".into(),
+                            mime_type: None,
+                            payload_type: None,
+                            clock_rate: None,
+                            channels: None,
+                            sdp_fmtp_line: None,
+                        },
+                    )));
                 }
                 drop(tx_clone);
             });
-            // drop で全 sender が消える前に writer 側が連続エラーで停止することを確認
-            writer_run_loop(conn, rx).await;
+            drop(control_tx);
+            writer_run_loop(conn, control_rx, stats_rx, Arc::new(AtomicU64::new(0))).await;
             // writer_run_loop から正常に抜ければパニックしていない
+        });
+    }
+
+    /// writer ループは、溜まった同一接続のサンプルを最新だけ書く
+    #[test]
+    fn writer_run_loop_coalesces_queued_samples() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime を作成できること");
+        rt.block_on(async {
+            let (dir, conn) = setup_db();
+            drop(conn);
+            let path = dir.path().join("coalesce.db");
+            // setup_db とは別ファイルにする。ループに渡した接続を閉じたあとに読み返す。
+            let conn = Connection::open(&path).expect("DuckDB open に失敗");
+            conn.execute_batch(SCHEMA_SQL).expect("スキーマ投入に失敗");
+            let (control_tx, control_rx) = mpsc::unbounded_channel::<WriteCommand>();
+            let (stats_tx, stats_rx) = mpsc::channel::<StatsSample>(8);
+            stats_tx
+                .try_send(inbound_sample(0, 1, 10))
+                .expect("1 つ目のサンプルを送れること");
+            stats_tx
+                .try_send(inbound_sample(0, 1, 77))
+                .expect("2 つ目のサンプルを送れること");
+            drop(stats_tx);
+            drop(control_tx);
+            writer_run_loop(conn, control_rx, stats_rx, Arc::new(AtomicU64::new(0))).await;
+
+            let conn = Connection::open(&path).expect("書き込み後の open に失敗");
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM rtc_stats_inbound_rtp", [], |row| {
+                    row.get(0)
+                })
+                .expect("行数の取得に失敗");
+            assert_eq!(count, 1, "同一接続のキューは 1 行に畳まれること");
+            let packets: i64 = conn
+                .query_row(
+                    "SELECT packets_received FROM rtc_stats_inbound_rtp",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("packets_received の取得に失敗");
+            assert_eq!(packets, 77, "残るのは後からキューしたサンプルであること");
         });
     }
 }

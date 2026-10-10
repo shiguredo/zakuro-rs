@@ -5,12 +5,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use duckdb::types::{TimeUnit, Value as DuckValue};
-use duckdb::{Connection, ToSql};
-
-use super::schema::{
-    INSERT_DATA_CHANNEL_SQL, INSERT_INBOUND_RTP_SQL, INSERT_MEDIA_SOURCE_SQL,
-    INSERT_OUTBOUND_RTP_SQL, INSERT_REMOTE_INBOUND_RTP_SQL, INSERT_REMOTE_OUTBOUND_RTP_SQL,
-};
+use duckdb::{Appender, Connection, ToSql};
 
 /// `type:offer` メッセージから抽出した接続識別子
 #[derive(Debug, Clone)]
@@ -19,7 +14,10 @@ pub(crate) struct ConnectionIds {
     pub(crate) session_id: String,
 }
 
-/// writer task へ送るコマンド
+/// writer の制御チャネルへ送るコマンド
+///
+/// 件数は接続数に比例し、試験時間には比例しない。統計サンプルとは別チャネルで、
+/// 満杯による欠落を起こさない。
 pub(crate) enum WriteCommand {
     InsertZakuro(Box<InsertZakuroRow>),
     UpdateZakuroStop { stop_timestamp: SystemTime },
@@ -27,12 +25,47 @@ pub(crate) enum WriteCommand {
     InsertConnection(Box<InsertConnectionRow>),
     InsertConnectionLifecycle(Box<InsertConnectionLifecycleRow>),
     InsertRtcStatsCodec(Box<RtcStatsCodecRow>),
-    InsertRtcStatsInboundRtp(Box<RtcStatsInboundRtpRow>),
-    InsertRtcStatsOutboundRtp(Box<RtcStatsOutboundRtpRow>),
-    InsertRtcStatsMediaSource(Box<RtcStatsMediaSourceRow>),
-    InsertRtcStatsRemoteInboundRtp(Box<RtcStatsRemoteInboundRtpRow>),
-    InsertRtcStatsRemoteOutboundRtp(Box<RtcStatsRemoteOutboundRtpRow>),
-    InsertRtcStatsDataChannel(Box<RtcStatsDataChannelRow>),
+}
+
+/// 接続 1 本の 1 回の `get_stats` から切り出した RTC 統計行
+///
+/// codec は含まない。codec は内容が変わらないため、接続ごとに 1 回だけ
+/// 制御チャネルへ送る。
+pub(crate) struct StatsSample {
+    pub(crate) instance_id: u32,
+    pub(crate) vc_id: u32,
+    pub(crate) inbound: Vec<RtcStatsInboundRtpRow>,
+    pub(crate) outbound: Vec<RtcStatsOutboundRtpRow>,
+    pub(crate) media_source: Vec<RtcStatsMediaSourceRow>,
+    pub(crate) remote_inbound: Vec<RtcStatsRemoteInboundRtpRow>,
+    pub(crate) remote_outbound: Vec<RtcStatsRemoteOutboundRtpRow>,
+    pub(crate) data_channel: Vec<RtcStatsDataChannelRow>,
+}
+
+impl StatsSample {
+    /// 行を持たないサンプルを作る
+    pub(crate) fn empty(instance_id: u32, vc_id: u32) -> Self {
+        Self {
+            instance_id,
+            vc_id,
+            inbound: Vec::new(),
+            outbound: Vec::new(),
+            media_source: Vec::new(),
+            remote_inbound: Vec::new(),
+            remote_outbound: Vec::new(),
+            data_channel: Vec::new(),
+        }
+    }
+
+    /// テーブルへ書く行が 1 つでもあるか
+    pub(crate) fn has_rows(&self) -> bool {
+        !self.inbound.is_empty()
+            || !self.outbound.is_empty()
+            || !self.media_source.is_empty()
+            || !self.remote_inbound.is_empty()
+            || !self.remote_outbound.is_empty()
+            || !self.data_channel.is_empty()
+    }
 }
 
 /// `zakuro` テーブルへの 1 行
@@ -554,13 +587,15 @@ pub(crate) fn insert_rtc_stats_codec(
     Ok(())
 }
 
-pub(crate) fn insert_rtc_stats_inbound_rtp(
-    conn: &Connection,
-    row: RtcStatsInboundRtpRow,
+pub(crate) fn append_rtc_stats_inbound_rtp(
+    appender: &mut Appender<'_>,
+    row: &RtcStatsInboundRtpRow,
 ) -> duckdb::Result<()> {
+    let instance_id = i32::try_from(row.instance_id).unwrap_or(0);
+    let timestamp = system_time_to_duck(row.timestamp);
     let params: &[&dyn ToSql] = &[
-        &(i32::try_from(row.instance_id).unwrap_or(0)),
-        &system_time_to_duck(row.timestamp),
+        &instance_id,
+        &timestamp,
         &row.channel_id,
         &row.session_id,
         &row.connection_id,
@@ -635,17 +670,18 @@ pub(crate) fn insert_rtc_stats_inbound_rtp(
         &row.total_squared_corruption_probability,
         &row.corruption_measurements,
     ];
-    conn.execute(INSERT_INBOUND_RTP_SQL, params)?;
-    Ok(())
+    appender.append_row(params)
 }
 
-pub(crate) fn insert_rtc_stats_outbound_rtp(
-    conn: &Connection,
-    row: RtcStatsOutboundRtpRow,
+pub(crate) fn append_rtc_stats_outbound_rtp(
+    appender: &mut Appender<'_>,
+    row: &RtcStatsOutboundRtpRow,
 ) -> duckdb::Result<()> {
+    let instance_id = i32::try_from(row.instance_id).unwrap_or(0);
+    let timestamp = system_time_to_duck(row.timestamp);
     let params: &[&dyn ToSql] = &[
-        &(i32::try_from(row.instance_id).unwrap_or(0)),
-        &system_time_to_duck(row.timestamp),
+        &instance_id,
+        &timestamp,
         &row.channel_id,
         &row.session_id,
         &row.connection_id,
@@ -694,17 +730,18 @@ pub(crate) fn insert_rtc_stats_outbound_rtp(
         &row.active,
         &row.scalability_mode,
     ];
-    conn.execute(INSERT_OUTBOUND_RTP_SQL, params)?;
-    Ok(())
+    appender.append_row(params)
 }
 
-pub(crate) fn insert_rtc_stats_media_source(
-    conn: &Connection,
-    row: RtcStatsMediaSourceRow,
+pub(crate) fn append_rtc_stats_media_source(
+    appender: &mut Appender<'_>,
+    row: &RtcStatsMediaSourceRow,
 ) -> duckdb::Result<()> {
+    let instance_id = i32::try_from(row.instance_id).unwrap_or(0);
+    let timestamp = system_time_to_duck(row.timestamp);
     let params: &[&dyn ToSql] = &[
-        &(i32::try_from(row.instance_id).unwrap_or(0)),
-        &system_time_to_duck(row.timestamp),
+        &instance_id,
+        &timestamp,
         &row.channel_id,
         &row.session_id,
         &row.connection_id,
@@ -723,17 +760,18 @@ pub(crate) fn insert_rtc_stats_media_source(
         &row.frames,
         &row.frames_per_second,
     ];
-    conn.execute(INSERT_MEDIA_SOURCE_SQL, params)?;
-    Ok(())
+    appender.append_row(params)
 }
 
-pub(crate) fn insert_rtc_stats_remote_inbound_rtp(
-    conn: &Connection,
-    row: RtcStatsRemoteInboundRtpRow,
+pub(crate) fn append_rtc_stats_remote_inbound_rtp(
+    appender: &mut Appender<'_>,
+    row: &RtcStatsRemoteInboundRtpRow,
 ) -> duckdb::Result<()> {
+    let instance_id = i32::try_from(row.instance_id).unwrap_or(0);
+    let timestamp = system_time_to_duck(row.timestamp);
     let params: &[&dyn ToSql] = &[
-        &(i32::try_from(row.instance_id).unwrap_or(0)),
-        &system_time_to_duck(row.timestamp),
+        &instance_id,
+        &timestamp,
         &row.channel_id,
         &row.session_id,
         &row.connection_id,
@@ -758,17 +796,18 @@ pub(crate) fn insert_rtc_stats_remote_inbound_rtp(
         &row.round_trip_time_measurements,
         &row.packets_with_bleached_ect1_marking,
     ];
-    conn.execute(INSERT_REMOTE_INBOUND_RTP_SQL, params)?;
-    Ok(())
+    appender.append_row(params)
 }
 
-pub(crate) fn insert_rtc_stats_remote_outbound_rtp(
-    conn: &Connection,
-    row: RtcStatsRemoteOutboundRtpRow,
+pub(crate) fn append_rtc_stats_remote_outbound_rtp(
+    appender: &mut Appender<'_>,
+    row: &RtcStatsRemoteOutboundRtpRow,
 ) -> duckdb::Result<()> {
+    let instance_id = i32::try_from(row.instance_id).unwrap_or(0);
+    let timestamp = system_time_to_duck(row.timestamp);
     let params: &[&dyn ToSql] = &[
-        &(i32::try_from(row.instance_id).unwrap_or(0)),
-        &system_time_to_duck(row.timestamp),
+        &instance_id,
+        &timestamp,
         &row.channel_id,
         &row.session_id,
         &row.connection_id,
@@ -788,17 +827,18 @@ pub(crate) fn insert_rtc_stats_remote_outbound_rtp(
         &row.total_round_trip_time,
         &row.round_trip_time_measurements,
     ];
-    conn.execute(INSERT_REMOTE_OUTBOUND_RTP_SQL, params)?;
-    Ok(())
+    appender.append_row(params)
 }
 
-pub(crate) fn insert_rtc_stats_data_channel(
-    conn: &Connection,
-    row: RtcStatsDataChannelRow,
+pub(crate) fn append_rtc_stats_data_channel(
+    appender: &mut Appender<'_>,
+    row: &RtcStatsDataChannelRow,
 ) -> duckdb::Result<()> {
+    let instance_id = i32::try_from(row.instance_id).unwrap_or(0);
+    let timestamp = system_time_to_duck(row.timestamp);
     let params: &[&dyn ToSql] = &[
-        &(i32::try_from(row.instance_id).unwrap_or(0)),
-        &system_time_to_duck(row.timestamp),
+        &instance_id,
+        &timestamp,
         &row.channel_id,
         &row.session_id,
         &row.connection_id,
@@ -814,8 +854,7 @@ pub(crate) fn insert_rtc_stats_data_channel(
         &row.messages_received,
         &row.bytes_received,
     ];
-    conn.execute(INSERT_DATA_CHANNEL_SQL, params)?;
-    Ok(())
+    appender.append_row(params)
 }
 
 #[cfg(test)]

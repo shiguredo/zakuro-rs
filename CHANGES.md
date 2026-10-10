@@ -34,6 +34,8 @@
   - @voluntas
 - [ADD] 引数パースのバリデーションを改善する (空配列検出 / 次トークン検証 / 排他チェック / 環境変数置換エラー)
   - @voluntas
+- [FIX] DuckDB の統計がチャネル満杯で一部の接続に偏って欠けるのを、制御コマンドの分離と Appender によるバルク INSERT で残すようにする
+  - @voluntas
 - [FIX] `--input-y4m` で Y4M ファイルを指定しても映像が再生されないバグを修正する
   - @voluntas
 - [FIX] FFI 境界越えの Mutex poison による未定義動作リスクを除去する

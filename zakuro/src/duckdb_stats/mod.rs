@@ -5,12 +5,15 @@
 //!
 //! 書き込みは VirtualClient (= 1 Sora connection) ごとに
 //! `sora_sdk::SoraConnectionHandle::get_stats()` を `--duckdb-interval` 秒間隔で呼び、
-//! 戻り JSON の `type` で振り分けて対応テーブルに INSERT する。
+//! 戻り JSON の `type` で振り分けて対応テーブルに入れる。
+//!
+//! 制御コマンド (起動情報、接続行、ライフサイクル、codec) は unbounded チャネルで欠落させない。
+//! 統計サンプルは接続 1 本 × 1 tick を 1 メッセージにし、writer がテーブルごとの
+//! Appender でバルク INSERT する。同じ接続の未書き込みサンプルは最新だけを残す。
 //!
 //! `Connection` は `Send` だが `!Sync` のため複数 task から共有できない。
 //! そのため 1 つの `spawn_blocking` OS スレッド内で `Handle::current().block_on`
-//! して mpsc 受信ループを回し、VirtualClient 側からは `DuckDBClient::try_send` で
-//! `Send` 可能な `WriteCommand` を投げる構成とする。
+//! して mpsc 受信ループを回す。
 
 pub(crate) mod module;
 pub(crate) mod rows;
@@ -25,6 +28,6 @@ pub(crate) use rows::{
     InsertZakuroScenarioRow, WriteCommand,
 };
 pub(crate) use stats_json::{
-    build_config_json, dispatch_stats, generate_filename, parse_offer_ids,
+    CodecIdentity, build_config_json, generate_filename, parse_offer_ids, parse_rtc_stats,
 };
 pub(crate) use writer::{DuckDBClient, DuckDBStatsWriter, DuckDBWriterConfig};

@@ -76,6 +76,25 @@ pub(crate) const INSERT_DATA_CHANNEL_SQL: &str = "INSERT INTO rtc_stats_data_cha
   protocol, data_channel_identifier, state, messages_sent, bytes_sent, messages_received, \
   bytes_received) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
+/// INSERT 文の列リストを、Appender に渡す列名へ分解する
+///
+/// 列の正本は INSERT SQL 側にあり、ここはそれを読み取るだけにする。
+/// `pk` は SQL に含まれない (シーケンスの DEFAULT に任せる)。
+pub(crate) fn insert_sql_columns(sql: &str) -> Vec<String> {
+    let start = sql
+        .find('(')
+        .expect("INSERT SQL must contain a column list");
+    let values_at = sql.find("VALUES").expect("INSERT SQL must contain VALUES");
+    let mut list = sql[start + 1..values_at].trim();
+    if let Some(stripped) = list.strip_suffix(')') {
+        list = stripped.trim();
+    }
+    list.split(',')
+        .map(|column| column.trim().to_string())
+        .filter(|column| !column.is_empty())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use duckdb::Connection;
@@ -127,6 +146,26 @@ mod tests {
             )
             .expect("インデックス数の取得に失敗");
         assert_eq!(count, 10, "インデックス数は 10 であるべき");
+    }
+
+    #[test]
+    fn insert_sql_column_count_matches_placeholders() {
+        for sql in [
+            super::INSERT_INBOUND_RTP_SQL,
+            super::INSERT_OUTBOUND_RTP_SQL,
+            super::INSERT_MEDIA_SOURCE_SQL,
+            super::INSERT_REMOTE_INBOUND_RTP_SQL,
+            super::INSERT_REMOTE_OUTBOUND_RTP_SQL,
+            super::INSERT_DATA_CHANNEL_SQL,
+        ] {
+            let columns = super::insert_sql_columns(sql);
+            let placeholders = sql.matches('?').count();
+            assert_eq!(
+                columns.len(),
+                placeholders,
+                "列数とプレースホルダ数が一致すること"
+            );
+        }
     }
 
     #[test]

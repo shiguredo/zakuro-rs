@@ -333,7 +333,7 @@ WebRTC 負荷試験として見たときに、zakuro に足りていないもの
 | 成功 / 失敗の集計 | `StatsCollector` は connected / retrying / stopped の現在値のみを持ち、失敗理由別の累計や接続成功率を出さない (zakuro-core/src/stats.rs:49-62) | srs-bench のパケット数しきい値と終了コード、webrtcperf のアラート出力 |
 | 接続チャーン耐性 | 到着率一定で接続と切断を繰り返すモデルが無い。`--repeat-interval` は全 VC が同じタイミングで動く | livekit-cli の `--num-per-second`、moxygen の `--subscriber_ramp` のような開いたモデル |
 | 時間軸での集計 | `--duckdb-interval` ごとの生サンプルはあるが、任意区間の p95 などを試験中に出す仕組みが無い | webrtcperf の集約表 (count / sum / mean / stddev / 5p / 95p / min / max) |
-| サンプリング欠落 | DuckDB 書き込みチャネルは容量 8192 で、大規模試験では drop しうる (zakuro/src/duckdb_stats/module.rs:4-8)。drop 件数は warn に出る | 欠落件数を結果の指標として扱う (moq-bench は無効サンプルを失敗として扱う) |
+| サンプリング欠落 | 統計サンプルのチャネル容量は 8192 tick で、超えた分は接続単位で捨てる。遅延中の同一接続は最新 tick だけを残す。欠落件数は `[duckdb] dropped stats samples` に出る。接続行、ライフサイクル、codec は欠落しない | 欠落件数を結果の指標として扱う (moq-bench は無効サンプルを失敗として扱う) |
 
 ### メディア品質の評価
 

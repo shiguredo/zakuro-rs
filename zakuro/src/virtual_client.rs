@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -18,8 +19,8 @@ use crate::connection_lifecycle::{
 };
 use crate::data_channel::MessageChannel;
 use crate::duckdb_stats::{
-    ConnectionIds, DuckDBClient, InsertConnectionLifecycleRow, InsertConnectionRow, WriteCommand,
-    dispatch_stats, parse_offer_ids,
+    CodecIdentity, ConnectionIds, DuckDBClient, InsertConnectionLifecycleRow, InsertConnectionRow,
+    WriteCommand, parse_offer_ids, parse_rtc_stats,
 };
 use crate::ice_server::{IceAddressFamily, configure_ice_server_urls};
 use crate::media_observer::MediaObserver;
@@ -430,7 +431,8 @@ async fn duration_timer(duration: Option<f64>) {
 ///
 /// `--duckdb-interval` 秒ごとに `handle.get_stats()` を呼び、戻り JSON から
 /// メディアの送受信を観測してライフサイクルへ反映する。DuckDB 出力が有効な場合は
-/// 同じサンプルを `dispatch_stats` で各テーブルへ振り分ける。
+/// 同じサンプルを 1 tick ぶんの統計サンプルとして writer へ渡す。
+/// codec は接続ごとに最初の 1 回だけ制御チャネルへ送る。
 /// connection_id 確定前の初回 tick はスキップし、確定後にログを出す。
 #[expect(clippy::too_many_arguments)]
 async fn run_stats_collection(
@@ -445,6 +447,8 @@ async fn run_stats_collection(
     interval: Duration,
 ) {
     let mut observer = MediaObserver::new();
+    // 同じ codec 行を毎秒書かない。識別子は UNIQUE 制約と同じ列。
+    let mut seen_codecs: HashSet<CodecIdentity> = HashSet::new();
     let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // 初回 tick は即座に発火するが、connection_id 未確定の可能性が高いため
@@ -457,7 +461,7 @@ async fn run_stats_collection(
             biased;
             _ = token.cancelled() => break,
             _ = ticks.next() => {
-                let Some(parsed) = ({
+                let Some(connection_ids) = ({
                     let Ok(guard) = ids.lock() else {
                         rtc_log_warning!(
                             "[i{}/vc-{}][duckdb] connection_ids mutex poisoned in stats_collection",
@@ -506,7 +510,22 @@ async fn run_stats_collection(
                     ),
                 }
                 if client.is_enabled() {
-                    dispatch_stats(instance_id, vc_id, &channel_id, &parsed, &client, &stats_text, now);
+                    let parsed = parse_rtc_stats(
+                        instance_id,
+                        vc_id,
+                        &channel_id,
+                        &connection_ids,
+                        &stats_text,
+                        now,
+                    );
+                    for codec in parsed.codecs {
+                        if seen_codecs.insert(CodecIdentity::from_row(&codec)) {
+                            client.send_control(WriteCommand::InsertRtcStatsCodec(Box::new(codec)));
+                        }
+                    }
+                    if parsed.sample.has_rows() {
+                        client.try_send_stats(parsed.sample);
+                    }
                 }
             }
         }
@@ -545,7 +564,7 @@ impl SoraConnectionEventHandler for VirtualClientEventHandler {
         let Some(parsed) = parse_offer_ids(text) else {
             return;
         };
-        // poison 時に try_send と ids 更新の両方をスキップするため、先に lock を取る
+        // poison 時に制御コマンド送信と ids 更新の両方をスキップするため、先に lock を取る
         let Ok(mut guard) = self.ids.lock() else {
             rtc_log_warning!(
                 "[i{}/vc-{}] connection_ids mutex poisoned in on_signaling_message",
@@ -555,7 +574,7 @@ impl SoraConnectionEventHandler for VirtualClientEventHandler {
             return;
         };
         self.duckdb_client
-            .try_send(WriteCommand::InsertConnection(Box::new(
+            .send_control(WriteCommand::InsertConnection(Box::new(
                 InsertConnectionRow {
                     instance_id: self.instance_id,
                     vc_id: self.vc_id,
@@ -629,7 +648,7 @@ struct ConnectionResult {
 ///
 /// 接続を終えるすべての経路から呼び、1 接続につき 1 行を残す。構築に失敗した接続は
 /// connection_id / session_id が無いまま 1 行を書く (試行そのものを記録に残す)。
-/// 統計の書き込みと同じく `try_send` を使うため、チャネルが満杯のときは行が欠落しうる。
+/// 制御チャネルは統計サンプルとは別にし、満杯では落とさない。
 /// ライフサイクルのロックが poison されている場合は記録せず None を返す。
 #[expect(clippy::too_many_arguments)]
 fn write_connection_lifecycle(
@@ -692,7 +711,7 @@ fn write_connection_lifecycle(
         connect_duration,
     );
 
-    client.try_send(WriteCommand::InsertConnectionLifecycle(Box::new(
+    client.send_control(WriteCommand::InsertConnectionLifecycle(Box::new(
         InsertConnectionLifecycleRow {
             instance_id,
             vc_id,
@@ -1061,9 +1080,10 @@ mod tests {
     /// ライフサイクルが 1 行として writer へ渡されること
     #[test]
     fn test_write_connection_lifecycle_sends_one_row() {
-        let (tx, mut rx) = mpsc::channel::<WriteCommand>(4);
+        let (tx, mut rx) = mpsc::unbounded_channel::<WriteCommand>();
         let client = DuckDBClient {
-            sender: Some(tx),
+            control: Some(tx),
+            stats: None,
             dropped_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let lifecycle = Arc::new(std::sync::Mutex::new(ConnectionLifecycle::new(at(100))));

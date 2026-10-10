@@ -12,9 +12,8 @@ use super::module::unknown_types;
 use super::rows::{
     ConnectionIds, RtcStatsCodecRow, RtcStatsDataChannelRow, RtcStatsInboundRtpRow,
     RtcStatsMediaSourceRow, RtcStatsOutboundRtpRow, RtcStatsRemoteInboundRtpRow,
-    RtcStatsRemoteOutboundRtpRow, WriteCommand,
+    RtcStatsRemoteOutboundRtpRow, StatsSample,
 };
-use super::writer::DuckDBClient;
 
 /// DuckDB ファイル名 `zakuro_{YYYYMMDD}_{HHMMSS}_{mmm}.db` を UTC で生成する
 ///
@@ -68,28 +67,72 @@ pub(crate) fn parse_offer_ids(text: &str) -> Option<ConnectionIds> {
 // RTCStats JSON 振り分け (VirtualClient 側から呼ぶ)
 // ============================================================================
 
-/// get_stats の戻り JSON をパースして各 `WriteCommand` に振り分け、`try_send` で投げる
+/// `get_stats` 1 回分を、codec 行とそれ以外の統計サンプルに分ける
+///
+/// 送信は呼び出し側が行う。codec は接続ごとに 1 回、統計サンプルは 1 tick を 1 メッセージにする。
+pub(crate) struct ParsedRtcStats {
+    /// 既知 type の件数 (codec を含む。未知 type は含まない)
+    pub(crate) known_count: usize,
+    /// この tick に含まれていた codec 行
+    pub(crate) codecs: Vec<RtcStatsCodecRow>,
+    /// codec 以外の統計行
+    pub(crate) sample: StatsSample,
+}
+
+/// codec 行を UNIQUE 制約と同じ列で識別する
+///
+/// 同じ接続で同じ codec が毎秒届いても、最初の 1 回だけ書けばよい。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CodecIdentity {
+    connection_id: String,
+    id: String,
+    mime_type: Option<String>,
+    payload_type: Option<i64>,
+    clock_rate: Option<i64>,
+    channels: Option<i64>,
+    sdp_fmtp_line: Option<String>,
+}
+
+impl CodecIdentity {
+    /// 行から識別子を作る
+    pub(crate) fn from_row(row: &RtcStatsCodecRow) -> Self {
+        Self {
+            connection_id: row.connection_id.clone(),
+            id: row.id.clone(),
+            mime_type: row.mime_type.clone(),
+            payload_type: row.payload_type,
+            clock_rate: row.clock_rate,
+            channels: row.channels,
+            sdp_fmtp_line: row.sdp_fmtp_line.clone(),
+        }
+    }
+}
+
+/// get_stats の戻り JSON をパースして [`ParsedRtcStats`] にする
 ///
 /// `instance_id` / `vc_id` / `channel_id` は呼び出し側 (= VirtualClient) の固定値。
 /// `ids` は offer 受信時に確定した `connection_id` / `session_id`。
-///
-/// 戻り値は投入した stats エントリ数 (未対応 type は含まない)。
-pub(crate) fn dispatch_stats(
+/// パースに失敗したときは空のサンプルを返す。
+pub(crate) fn parse_rtc_stats(
     instance_id: u32,
     vc_id: u32,
     channel_id: &str,
     ids: &ConnectionIds,
-    client: &DuckDBClient,
     stats_text: &str,
     now: SystemTime,
-) -> usize {
+) -> ParsedRtcStats {
+    let mut parsed = ParsedRtcStats {
+        known_count: 0,
+        codecs: Vec::new(),
+        sample: StatsSample::empty(instance_id, vc_id),
+    };
     let Ok(json) = RawJsonOwned::parse(stats_text) else {
         rtc_log_warning!(
             "[i{}/vc-{}][duckdb] get_stats JSON parse failed",
             instance_id,
             vc_id
         );
-        return 0;
+        return parsed;
     };
     // RTCStats は配列の形で返る (Sora SDK の get_stats 仕様)
     let Ok(arr) = json.value().to_array() else {
@@ -98,10 +141,9 @@ pub(crate) fn dispatch_stats(
             instance_id,
             vc_id
         );
-        return 0;
+        return parsed;
     };
 
-    let mut count: usize = 0;
     for element in arr {
         let ty: Option<String> = element
             .to_member("type")
@@ -132,22 +174,56 @@ pub(crate) fn dispatch_stats(
             id,
         };
 
-        let cmd: Option<WriteCommand> = match ty.as_str() {
-            "codec" => {
-                parse_codec(element, common).map(|r| WriteCommand::InsertRtcStatsCodec(Box::new(r)))
-            }
-            "inbound-rtp" => parse_inbound_rtp(element, common)
-                .map(|r| WriteCommand::InsertRtcStatsInboundRtp(Box::new(r))),
-            "outbound-rtp" => parse_outbound_rtp(element, common)
-                .map(|r| WriteCommand::InsertRtcStatsOutboundRtp(Box::new(r))),
-            "media-source" => parse_media_source(element, common)
-                .map(|r| WriteCommand::InsertRtcStatsMediaSource(Box::new(r))),
-            "remote-inbound-rtp" => parse_remote_inbound_rtp(element, common)
-                .map(|r| WriteCommand::InsertRtcStatsRemoteInboundRtp(Box::new(r))),
-            "remote-outbound-rtp" => parse_remote_outbound_rtp(element, common)
-                .map(|r| WriteCommand::InsertRtcStatsRemoteOutboundRtp(Box::new(r))),
-            "data-channel" => parse_data_channel(element, common)
-                .map(|r| WriteCommand::InsertRtcStatsDataChannel(Box::new(r))),
+        let accepted = match ty.as_str() {
+            "codec" => match parse_codec(element, common) {
+                Some(row) => {
+                    parsed.codecs.push(row);
+                    true
+                }
+                None => false,
+            },
+            "inbound-rtp" => match parse_inbound_rtp(element, common) {
+                Some(row) => {
+                    parsed.sample.inbound.push(row);
+                    true
+                }
+                None => false,
+            },
+            "outbound-rtp" => match parse_outbound_rtp(element, common) {
+                Some(row) => {
+                    parsed.sample.outbound.push(row);
+                    true
+                }
+                None => false,
+            },
+            "media-source" => match parse_media_source(element, common) {
+                Some(row) => {
+                    parsed.sample.media_source.push(row);
+                    true
+                }
+                None => false,
+            },
+            "remote-inbound-rtp" => match parse_remote_inbound_rtp(element, common) {
+                Some(row) => {
+                    parsed.sample.remote_inbound.push(row);
+                    true
+                }
+                None => false,
+            },
+            "remote-outbound-rtp" => match parse_remote_outbound_rtp(element, common) {
+                Some(row) => {
+                    parsed.sample.remote_outbound.push(row);
+                    true
+                }
+                None => false,
+            },
+            "data-channel" => match parse_data_channel(element, common) {
+                Some(row) => {
+                    parsed.sample.data_channel.push(row);
+                    true
+                }
+                None => false,
+            },
             other => {
                 // 未知 type は初回のみ warn (抑制用集合で管理)
                 let mut set = unknown_types()
@@ -156,15 +232,14 @@ pub(crate) fn dispatch_stats(
                 if set.insert(other.to_string()) {
                     rtc_log_warning!("[duckdb] unknown rtc stats type seen first time: {}", other);
                 }
-                None
+                false
             }
         };
-        if let Some(c) = cmd {
-            client.try_send(c);
-            count += 1;
+        if accepted {
+            parsed.known_count += 1;
         }
     }
-    count
+    parsed
 }
 
 /// 共通列の組み立て用ヘルパー
@@ -725,15 +800,13 @@ fn instance_json(i: &crate::args::InstanceArgs) -> impl DisplayJson + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
+    use std::collections::HashMap;
     use std::time::SystemTime;
 
     use duckdb::Connection;
-    use tokio::sync::mpsc;
 
     use crate::duckdb_stats::{
-        clear_unknown_types_for_test, schema::SCHEMA_SQL, writer::dispatch_command,
+        WriteCommand, clear_unknown_types_for_test, schema::SCHEMA_SQL, writer::flush_writes,
     };
 
     /// 未知 RTCStats type の集合 (UNKNOWN_TYPES) を触るテストを直列化するミューテックス
@@ -755,16 +828,11 @@ mod tests {
     // ---- B. RTCStats JSON 振り分け ----
 
     #[test]
-    fn dispatch_stats_inserts_known_types() {
+    fn parse_rtc_stats_inserts_known_types() {
         let _guard = UNKNOWN_TYPES_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let (_dir, conn) = setup_db();
-        let (tx, rx) = mpsc::channel::<WriteCommand>(64);
-        let client = DuckDBClient {
-            sender: Some(tx),
-            dropped_count: Arc::new(AtomicU64::new(0)),
-        };
         let ids = ConnectionIds {
             connection_id: "c1".into(),
             session_id: "s1".into(),
@@ -780,19 +848,20 @@ mod tests {
             {"type":"transport","id":"T1","timestamp":1.0}
         ]"#;
         clear_unknown_types_for_test();
-        let count = dispatch_stats(0, 0, "ch", &ids, &client, stats, SystemTime::now());
+        let parsed = parse_rtc_stats(0, 0, "ch", &ids, stats, SystemTime::now());
         assert_eq!(
-            count, 7,
+            parsed.known_count, 7,
             "既知 type 7 種が投入されるべき (transport は未対応)"
         );
 
-        // writer 側で消費して各テーブルに 1 行ずつ入ることを確認
-        // (tokio runtime 無しの同期テストなので blocking_recv は使えない。
-        //  try_recv でチャネルが空になるまで消費する)
-        let mut rx = rx;
-        while let Ok(cmd) = rx.try_recv() {
-            dispatch_command(&conn, cmd).expect("INSERT 失敗");
-        }
+        let controls: Vec<WriteCommand> = parsed
+            .codecs
+            .into_iter()
+            .map(|row| WriteCommand::InsertRtcStatsCodec(Box::new(row)))
+            .collect();
+        let mut pending = HashMap::new();
+        pending.insert((0, 0), parsed.sample);
+        flush_writes(&conn, &controls, &pending).expect("バルク INSERT に失敗");
         for (table, n) in [
             ("rtc_stats_codec", 1),
             ("rtc_stats_inbound_rtp", 1),
@@ -812,15 +881,10 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_stats_unknown_type_logged_once() {
+    fn parse_rtc_stats_unknown_type_logged_once() {
         let _guard = UNKNOWN_TYPES_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let (tx, _rx) = mpsc::channel::<WriteCommand>(64);
-        let client = DuckDBClient {
-            sender: Some(tx),
-            dropped_count: Arc::new(AtomicU64::new(0)),
-        };
         let ids = ConnectionIds {
             connection_id: "c1".into(),
             session_id: "s1".into(),
@@ -831,7 +895,7 @@ mod tests {
         // clear 後に投入して集合のサイズで「1 つだけ追加される (警告は 1 回のみ)」を検証できる
         clear_unknown_types_for_test();
         for _ in 0..100 {
-            dispatch_stats(0, 0, "ch", &ids, &client, &stats, SystemTime::now());
+            parse_rtc_stats(0, 0, "ch", &ids, &stats, SystemTime::now());
         }
         let unknown_types = unknown_types();
         let set = unknown_types.lock().expect("UNKNOWN_TYPES mutex poisoned");

@@ -10,6 +10,14 @@ zakuro-rs は WebRTC の統計情報を DuckDB データベースファイルに
 - `--duckdb-interval <SEC>` で統計の書き込み間隔を指定します (デフォルトは 1.0 秒)
 - `--no-duckdb-output` で DuckDB 出力を無効化できます
 
+## 書き込み
+
+- 起動情報、シナリオ、`connection`、`connection_lifecycle`、`rtc_stats_codec` は制御コマンドとして送り、統計の書き込みが遅れても欠落しません
+- `rtc_stats_codec` は接続ごとに同じ内容が続くため、最初の 1 回だけ書きます
+- それ以外の RTC 統計は、接続 1 本の `get_stats` 1 回を 1 サンプルとしてまとめ、DuckDB の Appender でテーブルごとにバルク INSERT します
+- writer が追いつかない間に同じ接続のサンプルが複数溜まった場合は、最新の 1 回だけを残します。特定の接続の時系列だけが残ることはありません
+- サンプル用チャネルの容量を超えた tick は、その接続のその 1 回ぶんを捨てます。ログは `[duckdb] dropped stats samples` です
+
 ## テーブル一覧
 
 - `zakuro` - Zakuro 起動情報 (1 行のみ)
@@ -180,4 +188,4 @@ GROUP BY instance_id;
 - `rtc_stats_outbound_rtp` の `psnrSum` / `psnrMeasurements` は `record<DOMString, double>` 型のため未対応です
 - `--no-duckdb-output` 指定時は DuckDB ファイルは生成されず、writer task も起動しません
 - `--no-duckdb-output` と他の `--duckdb-*` 引数を併用した場合、`--no-duckdb-output` が優先されます
-- 大規模試験 (`instances=64 × vcs=1000`) では mpsc バッファ満杯により統計のサンプリング欠落が発生しうます。`dropped_count > 0` の試験では `SELECT DISTINCT connection_id FROM rtc_stats_codec EXCEPT SELECT connection_id FROM connection` で orphan を検出可能です
+- 統計サンプルは接続 1 本の 1 tick を 1 メッセージにして Appender でまとめて書く。writer が遅れると、同じ接続の未書き込み分は最新の 1 tick だけが残る。チャネル容量 (8192 サンプル) を超えた tick は捨て、`[duckdb] dropped stats samples` に件数が出る。`connection`、`connection_lifecycle`、`rtc_stats_codec` はこの欠落の対象にならない

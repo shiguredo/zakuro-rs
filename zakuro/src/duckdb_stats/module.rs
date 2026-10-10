@@ -1,11 +1,12 @@
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
-/// mpsc チャネルのバッファサイズ
-/// 典型運用 (instances <= 4 × vcs <= 100) で 1 秒あたり ~2,800 commands を
-/// 2 秒分超バッファできるサイズ。最大スケールでは drop が発生しうるが
-/// 「サンプリング欠落の許容」を運用ポリシーとする
-pub(crate) const CHANNEL_CAPACITY: usize = 8192;
+/// 統計サンプル (接続 1 本 × `get_stats` 1 回) を運ぶチャネルの容量
+///
+/// 1 メッセージが 1 接続の 1 tick なので、8192 は 100 接続でも約 80 秒分。
+/// writer は取り出した分を接続ごとに最新の 1 サンプルへ畳む。容量を超えた tick だけ落とす。
+/// 制御コマンド (接続行、ライフサイクル、codec) はこのチャネルを使わない。
+pub(crate) const STATS_CHANNEL_CAPACITY: usize = 8192;
 
 /// 未知 RTCStats type の warn を初回のみ出すための全局集合
 /// (transport / candidate-pair 等の未対応 type が毎秒 warn で洪水化するのを防ぐ)

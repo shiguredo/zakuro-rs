@@ -499,7 +499,7 @@ async fn async_main() -> Result<()> {
             "ARGS"
         };
         let config_json = duckdb_stats::build_config_json(&common, &instance_args_vec);
-        duckdb_client.try_send(WriteCommand::InsertZakuro(Box::new(
+        duckdb_client.send_control(WriteCommand::InsertZakuro(Box::new(
             duckdb_stats::InsertZakuroRow {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 sora_sdk_version: None, // sora_sdk に公開 version() 関数が無いため NULL
@@ -514,7 +514,7 @@ async fn async_main() -> Result<()> {
         )));
         // 各 InstanceArgs ごとに zakuro_scenario へ 1 行 INSERT
         for (i, inst) in instance_args_vec.iter().enumerate() {
-            duckdb_client.try_send(WriteCommand::InsertZakuroScenario(Box::new(
+            duckdb_client.send_control(WriteCommand::InsertZakuroScenario(Box::new(
                 duckdb_stats::InsertZakuroScenarioRow {
                     instance_id: i as u32,
                     vcs: inst.vcs,
@@ -748,17 +748,15 @@ async fn shutdown_after_workers(
     token.cancel();
 
     // DuckDB writer の shutdown ハンドシェイク
-    // 1. stop_timestamp UPDATE を確実に送る (try_send だと満杯時に drop されるため send.await)
+    // 1. stop_timestamp UPDATE を制御チャネルへ送る (統計サンプルの満杯では落ちない)
     // 2. main 側の client を drop する。worker_config の client は関数先頭で drop 済みなので、
     //    これで writer 以外の sender は閉じる。
     // 3. writer task の完了を待つ (stop_timestamp UPDATE 完了を保証)。
     //    join 自身が writer の持つ sender を drop し、recv が None になる。
     if duckdb_client.is_enabled() {
-        duckdb_client
-            .send(WriteCommand::UpdateZakuroStop {
-                stop_timestamp: std::time::SystemTime::now(),
-            })
-            .await;
+        duckdb_client.send_control(WriteCommand::UpdateZakuroStop {
+            stop_timestamp: std::time::SystemTime::now(),
+        });
     }
     drop(duckdb_client);
     duckdb_writer.join().await?;
