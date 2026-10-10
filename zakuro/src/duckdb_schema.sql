@@ -19,6 +19,10 @@ CREATE SEQUENCE rtc_stats_media_source_pk_seq;
 CREATE SEQUENCE rtc_stats_remote_inbound_rtp_pk_seq;
 CREATE SEQUENCE rtc_stats_remote_outbound_rtp_pk_seq;
 CREATE SEQUENCE rtc_stats_data_channel_pk_seq;
+CREATE SEQUENCE rtc_stats_transport_pk_seq;
+CREATE SEQUENCE rtc_stats_candidate_pair_pk_seq;
+CREATE SEQUENCE rtc_stats_local_candidate_pk_seq;
+CREATE SEQUENCE rtc_stats_remote_candidate_pk_seq;
 
 -- zakuro: 起動情報 (1 行のみ、instance_id 列なし)
 CREATE TABLE zakuro (
@@ -355,6 +359,102 @@ CREATE TABLE rtc_stats_data_channel (
     bytes_received BIGINT
 );
 
+-- rtc_stats_transport: トランスポート統計 (接続あたり通常 1 本、毎サンプル)
+CREATE TABLE rtc_stats_transport (
+    pk BIGINT PRIMARY KEY DEFAULT nextval('rtc_stats_transport_pk_seq'),
+    instance_id INTEGER,
+    timestamp TIMESTAMP,
+    channel_id VARCHAR,
+    session_id VARCHAR,
+    connection_id VARCHAR,
+    rtc_timestamp DOUBLE,
+    type VARCHAR,
+    id VARCHAR,
+    packets_sent BIGINT,
+    packets_received BIGINT,
+    bytes_sent BIGINT,
+    bytes_received BIGINT,
+    ice_role VARCHAR,
+    dtls_state VARCHAR,
+    dtls_role VARCHAR,
+    selected_candidate_pair_id VARCHAR,
+    selected_candidate_pair_changes BIGINT
+);
+
+-- rtc_stats_candidate_pair: ICE candidate pair 統計 (経路の RTT と可用帯域)
+CREATE TABLE rtc_stats_candidate_pair (
+    pk BIGINT PRIMARY KEY DEFAULT nextval('rtc_stats_candidate_pair_pk_seq'),
+    instance_id INTEGER,
+    timestamp TIMESTAMP,
+    channel_id VARCHAR,
+    session_id VARCHAR,
+    connection_id VARCHAR,
+    rtc_timestamp DOUBLE,
+    type VARCHAR,
+    id VARCHAR,
+    transport_id VARCHAR,
+    local_candidate_id VARCHAR,
+    remote_candidate_id VARCHAR,
+    state VARCHAR,
+    nominated BOOLEAN,
+    packets_sent BIGINT,
+    packets_received BIGINT,
+    bytes_sent BIGINT,
+    bytes_received BIGINT,
+    current_round_trip_time DOUBLE,
+    total_round_trip_time DOUBLE,
+    available_outgoing_bitrate DOUBLE,
+    available_incoming_bitrate DOUBLE,
+    requests_sent BIGINT,
+    requests_received BIGINT,
+    responses_sent BIGINT,
+    responses_received BIGINT,
+    consent_requests_sent BIGINT,
+    packets_discarded_on_send BIGINT,
+    bytes_discarded_on_send BIGINT
+);
+
+-- rtc_stats_local_candidate: ローカル ICE 候補 (内容は変わらないので接続ごとに 1 回)
+CREATE TABLE rtc_stats_local_candidate (
+    pk BIGINT PRIMARY KEY DEFAULT nextval('rtc_stats_local_candidate_pk_seq'),
+    instance_id INTEGER,
+    timestamp TIMESTAMP,
+    channel_id VARCHAR,
+    session_id VARCHAR,
+    connection_id VARCHAR,
+    rtc_timestamp DOUBLE,
+    type VARCHAR,
+    id VARCHAR,
+    transport_id VARCHAR,
+    address VARCHAR,
+    port INTEGER,
+    protocol VARCHAR,
+    candidate_type VARCHAR,
+    relay_protocol VARCHAR,
+    url VARCHAR,
+    network_type VARCHAR,
+    UNIQUE(connection_id, id)
+);
+
+-- rtc_stats_remote_candidate: リモート ICE 候補 (内容は変わらないので接続ごとに 1 回)
+CREATE TABLE rtc_stats_remote_candidate (
+    pk BIGINT PRIMARY KEY DEFAULT nextval('rtc_stats_remote_candidate_pk_seq'),
+    instance_id INTEGER,
+    timestamp TIMESTAMP,
+    channel_id VARCHAR,
+    session_id VARCHAR,
+    connection_id VARCHAR,
+    rtc_timestamp DOUBLE,
+    type VARCHAR,
+    id VARCHAR,
+    transport_id VARCHAR,
+    address VARCHAR,
+    port INTEGER,
+    protocol VARCHAR,
+    candidate_type VARCHAR,
+    UNIQUE(connection_id, id)
+);
+
 -- インデックス
 CREATE INDEX idx_connection_id ON connection(connection_id);
 CREATE INDEX idx_connection_composite ON connection(channel_id, timestamp);
@@ -366,5 +466,9 @@ CREATE INDEX idx_rtc_stats_media_source_composite ON rtc_stats_media_source(inst
 CREATE INDEX idx_rtc_stats_remote_inbound_rtp_composite ON rtc_stats_remote_inbound_rtp(instance_id, channel_id, connection_id, timestamp);
 CREATE INDEX idx_rtc_stats_remote_outbound_rtp_composite ON rtc_stats_remote_outbound_rtp(instance_id, channel_id, connection_id, timestamp);
 CREATE INDEX idx_rtc_stats_data_channel_composite ON rtc_stats_data_channel(instance_id, channel_id, connection_id, timestamp);
+CREATE INDEX idx_rtc_stats_transport_composite ON rtc_stats_transport(instance_id, channel_id, connection_id, timestamp);
+CREATE INDEX idx_rtc_stats_candidate_pair_composite ON rtc_stats_candidate_pair(instance_id, channel_id, connection_id, timestamp);
+CREATE INDEX idx_rtc_stats_local_candidate_composite ON rtc_stats_local_candidate(instance_id, channel_id, connection_id, timestamp);
+CREATE INDEX idx_rtc_stats_remote_candidate_composite ON rtc_stats_remote_candidate(instance_id, channel_id, connection_id, timestamp);
 
 COMMIT;

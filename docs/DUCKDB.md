@@ -12,11 +12,13 @@ zakuro-rs は WebRTC の統計情報を DuckDB データベースファイルに
 
 ## 書き込み
 
-- 起動情報、シナリオ、`connection`、`connection_lifecycle`、`rtc_stats_codec` は制御コマンドとして送り、統計の書き込みが遅れても欠落しません
-- `rtc_stats_codec` は接続ごとに同じ内容が続くため、最初の 1 回だけ書きます
+- 起動情報、シナリオ、`connection`、`connection_lifecycle`、`rtc_stats_codec`、ICE 候補は制御コマンドとして送り、統計の書き込みが遅れても欠落しません
+- `rtc_stats_codec` と ICE 候補は接続ごとに同じ内容が続くため、最初の 1 回だけ書きます
 - それ以外の RTC 統計は、接続 1 本の `get_stats` 1 回を 1 サンプルとしてまとめ、DuckDB の Appender でテーブルごとにバルク INSERT します
 - writer が追いつかない間に同じ接続のサンプルが複数溜まった場合は、最新の 1 回だけを残します。特定の接続の時系列だけが残ることはありません
 - サンプル用チャネルの容量を超えた tick は、その接続のその 1 回ぶんを捨てます。ログは `[duckdb] dropped stats samples` です
+- 30 秒ごとに `[duckdb] wrote samples=... rows=... dropped_total=...` を出します
+- 収集間隔が設定の 2 倍を超えて空いた接続は `[duckdb] stats collection gap` を出します
 
 ## テーブル一覧
 
@@ -31,6 +33,10 @@ zakuro-rs は WebRTC の統計情報を DuckDB データベースファイルに
 - `rtc_stats_remote_inbound_rtp` - リモート受信 RTP 統計
 - `rtc_stats_remote_outbound_rtp` - リモート送信 RTP 統計
 - `rtc_stats_data_channel` - データチャネル統計
+- `rtc_stats_transport` - トランスポート統計 (選択中の candidate pair、DTLS 状態、送受信バイト)
+- `rtc_stats_candidate_pair` - ICE candidate pair 統計 (RTT、可用帯域、nominated)
+- `rtc_stats_local_candidate` - ローカル ICE 候補 (接続ごとに 1 回)
+- `rtc_stats_remote_candidate` - リモート ICE 候補 (接続ごとに 1 回)
 
 ## 共通列
 
@@ -92,7 +98,7 @@ MOQ 版 (`zakuro-moq`) は DuckDB 出力を持ちません。
 
 ## シーケンスとインデックス
 
-各 stats テーブルの `pk` 列用に 9 個のシーケンスが作成されます。また、`connection_id` での検索と `(channel_id, connection_id, timestamp)` での複合検索用に 10 個のインデックスが作成されます。
+各 stats テーブルの `pk` 列用に 13 個のシーケンスが作成されます。また、`connection_id` での検索と `(channel_id, connection_id, timestamp)` での複合検索用に 14 個のインデックスが作成されます。
 
 ## サンプルクエリ
 
@@ -188,4 +194,5 @@ GROUP BY instance_id;
 - `rtc_stats_outbound_rtp` の `psnrSum` / `psnrMeasurements` は `record<DOMString, double>` 型のため未対応です
 - `--no-duckdb-output` 指定時は DuckDB ファイルは生成されず、writer task も起動しません
 - `--no-duckdb-output` と他の `--duckdb-*` 引数を併用した場合、`--no-duckdb-output` が優先されます
-- 統計サンプルは接続 1 本の 1 tick を 1 メッセージにして Appender でまとめて書く。writer が遅れると、同じ接続の未書き込み分は最新の 1 tick だけが残る。チャネル容量 (8192 サンプル) を超えた tick は捨て、`[duckdb] dropped stats samples` に件数が出る。`connection`、`connection_lifecycle`、`rtc_stats_codec` はこの欠落の対象にならない
+- 統計サンプルは接続 1 本の 1 tick を 1 メッセージにして Appender でまとめて書く。writer が遅れると、同じ接続の未書き込み分は最新の 1 tick だけが残る。チャネル容量 (8192 サンプル) を超えた tick は捨て、`[duckdb] dropped stats samples` に件数が出る。`connection`、`connection_lifecycle`、`rtc_stats_codec`、ICE 候補はこの欠落の対象にならない
+- `rtc_stats_candidate_pair` の `nominated = true` がその時点の経路。`available_outgoing_bitrate` と `current_round_trip_time` で送信レートを見る

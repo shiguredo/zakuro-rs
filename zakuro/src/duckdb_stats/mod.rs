@@ -28,6 +28,7 @@ pub(crate) use rows::{
     InsertZakuroScenarioRow, WriteCommand,
 };
 pub(crate) use stats_json::{
-    CodecIdentity, build_config_json, generate_filename, parse_offer_ids, parse_rtc_stats,
+    CandidateIdentity, CodecIdentity, build_config_json, generate_filename, parse_offer_ids,
+    parse_rtc_stats,
 };
 pub(crate) use writer::{DuckDBClient, DuckDBStatsWriter, DuckDBWriterConfig};

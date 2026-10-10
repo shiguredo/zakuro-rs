@@ -17,16 +17,17 @@ use crate::error::{AppError, ErrorMessage, Result};
 
 use super::module::STATS_CHANNEL_CAPACITY;
 use super::rows::{
-    StatsSample, WriteCommand, append_rtc_stats_data_channel, append_rtc_stats_inbound_rtp,
-    append_rtc_stats_media_source, append_rtc_stats_outbound_rtp,
-    append_rtc_stats_remote_inbound_rtp, append_rtc_stats_remote_outbound_rtp, insert_connection,
-    insert_connection_lifecycle, insert_rtc_stats_codec, insert_zakuro, insert_zakuro_scenario,
-    update_zakuro_stop,
+    StatsSample, WriteCommand, append_rtc_stats_candidate_pair, append_rtc_stats_data_channel,
+    append_rtc_stats_inbound_rtp, append_rtc_stats_media_source, append_rtc_stats_outbound_rtp,
+    append_rtc_stats_remote_inbound_rtp, append_rtc_stats_remote_outbound_rtp,
+    append_rtc_stats_transport, insert_connection, insert_connection_lifecycle,
+    insert_rtc_stats_codec, insert_rtc_stats_local_candidate, insert_rtc_stats_remote_candidate,
+    insert_zakuro, insert_zakuro_scenario, update_zakuro_stop,
 };
 use super::schema::{
-    INSERT_DATA_CHANNEL_SQL, INSERT_INBOUND_RTP_SQL, INSERT_MEDIA_SOURCE_SQL,
-    INSERT_OUTBOUND_RTP_SQL, INSERT_REMOTE_INBOUND_RTP_SQL, INSERT_REMOTE_OUTBOUND_RTP_SQL,
-    SCHEMA_SQL, insert_sql_columns,
+    INSERT_CANDIDATE_PAIR_SQL, INSERT_DATA_CHANNEL_SQL, INSERT_INBOUND_RTP_SQL,
+    INSERT_MEDIA_SOURCE_SQL, INSERT_OUTBOUND_RTP_SQL, INSERT_REMOTE_INBOUND_RTP_SQL,
+    INSERT_REMOTE_OUTBOUND_RTP_SQL, INSERT_TRANSPORT_SQL, SCHEMA_SQL, insert_sql_columns,
 };
 
 /// 統計サンプルを 1 トランザクションにまとめる待ち時間
@@ -34,6 +35,9 @@ use super::schema::{
 /// 1 秒間隔の tick を接続横断で 1 回のバルク INSERT にする。
 /// この窓より短い間隔で同じ接続のサンプルが 2 回到着することは通常ない。
 const FLUSH_INTERVAL: Duration = Duration::from_millis(200);
+
+/// 書き込んだサンプル数と行数をログに出す間隔
+const WRITE_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// DuckDB writer の起動設定
 #[derive(Debug, Clone)]
@@ -267,6 +271,9 @@ async fn writer_run_loop(
     let mut consecutive_errors: u32 = 0;
     let mut control_open = true;
     let mut stats_open = true;
+    let mut reported_at = Instant::now();
+    let mut samples_since_report: u64 = 0;
+    let mut rows_since_report: u64 = 0;
 
     loop {
         if !control_open && !stats_open {
@@ -353,9 +360,25 @@ async fn writer_run_loop(
             }
         } else {
             consecutive_errors = 0;
+            samples_since_report += pending.len() as u64;
+            rows_since_report += pending
+                .values()
+                .map(|sample| sample.row_count() as u64)
+                .sum::<u64>();
         }
         if replaced > 0 {
             dropped_count.fetch_add(replaced, Ordering::Relaxed);
+        }
+        if reported_at.elapsed() >= WRITE_REPORT_INTERVAL && samples_since_report > 0 {
+            rtc_log_info!(
+                "[duckdb] wrote samples={} rows={} dropped_total={}",
+                samples_since_report,
+                rows_since_report,
+                dropped_count.load(Ordering::Relaxed)
+            );
+            samples_since_report = 0;
+            rows_since_report = 0;
+            reported_at = Instant::now();
         }
     }
 }
@@ -488,6 +511,12 @@ fn dispatch_command(conn: &Connection, cmd: &WriteCommand) -> duckdb::Result<()>
         WriteCommand::InsertRtcStatsCodec(row) => {
             insert_rtc_stats_codec(conn, (**row).clone())?;
         }
+        WriteCommand::InsertRtcStatsLocalCandidate(row) => {
+            insert_rtc_stats_local_candidate(conn, (**row).clone())?;
+        }
+        WriteCommand::InsertRtcStatsRemoteCandidate(row) => {
+            insert_rtc_stats_remote_candidate(conn, (**row).clone())?;
+        }
     }
     Ok(())
 }
@@ -546,6 +575,22 @@ fn append_samples(
             .values()
             .flat_map(|sample| sample.data_channel.iter()),
         append_rtc_stats_data_channel,
+    )?;
+    append_rows(
+        conn,
+        "rtc_stats_transport",
+        INSERT_TRANSPORT_SQL,
+        samples.values().flat_map(|sample| sample.transport.iter()),
+        append_rtc_stats_transport,
+    )?;
+    append_rows(
+        conn,
+        "rtc_stats_candidate_pair",
+        INSERT_CANDIDATE_PAIR_SQL,
+        samples
+            .values()
+            .flat_map(|sample| sample.candidate_pair.iter()),
+        append_rtc_stats_candidate_pair,
     )?;
     Ok(())
 }

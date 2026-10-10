@@ -329,7 +329,7 @@ WebRTC 負荷試験として見たときに、zakuro に足りていないもの
 
 | 不足 | 内容 | 参考になる機能 |
 | --- | --- | --- |
-| 接続確立時間 | シグナリング開始から接続完了までの時間をメトリクス化していない。RTCStats の `candidate-pair` などは未対応 type で DuckDB に記録しない (zakuro/src/duckdb_stats/module.rs:11) | pion/webrtc-bench のフェーズ分解 (signaling / SDP / ICE gathering / ICE connection / DTLS) |
+| 接続確立時間 | シグナリング成立と WebRTC 確立は `connection_lifecycle` に分かれて記録される。経路の RTT と可用帯域は `rtc_stats_candidate_pair`、選択中ペアは `rtc_stats_transport` に毎サンプル残る。フェーズごとの所要時間を 1 行にまとめたメトリクスは無い | pion/webrtc-bench のフェーズ分解 (signaling / SDP / ICE gathering / ICE connection / DTLS) |
 | 成功 / 失敗の集計 | `StatsCollector` は connected / retrying / stopped の現在値のみを持ち、失敗理由別の累計や接続成功率を出さない (zakuro-core/src/stats.rs:49-62) | srs-bench のパケット数しきい値と終了コード、webrtcperf のアラート出力 |
 | 接続チャーン耐性 | 到着率一定で接続と切断を繰り返すモデルが無い。`--repeat-interval` は全 VC が同じタイミングで動く | livekit-cli の `--num-per-second`、moxygen の `--subscriber_ramp` のような開いたモデル |
 | 時間軸での集計 | `--duckdb-interval` ごとの生サンプルはあるが、任意区間の p95 などを試験中に出す仕組みが無い | webrtcperf の集約表 (count / sum / mean / stddev / 5p / 95p / min / max) |

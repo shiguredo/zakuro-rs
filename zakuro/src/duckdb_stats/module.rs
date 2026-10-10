@@ -9,7 +9,7 @@ use std::sync::{Mutex, OnceLock};
 pub(crate) const STATS_CHANNEL_CAPACITY: usize = 8192;
 
 /// 未知 RTCStats type の warn を初回のみ出すための全局集合
-/// (transport / candidate-pair 等の未対応 type が毎秒 warn で洪水化するのを防ぐ)
+/// (certificate 等の未対応 type が毎秒 warn で洪水化するのを防ぐ)
 static UNKNOWN_TYPES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 pub(crate) fn unknown_types() -> &'static Mutex<HashSet<String>> {

@@ -25,12 +25,14 @@ pub(crate) enum WriteCommand {
     InsertConnection(Box<InsertConnectionRow>),
     InsertConnectionLifecycle(Box<InsertConnectionLifecycleRow>),
     InsertRtcStatsCodec(Box<RtcStatsCodecRow>),
+    InsertRtcStatsLocalCandidate(Box<RtcStatsLocalCandidateRow>),
+    InsertRtcStatsRemoteCandidate(Box<RtcStatsRemoteCandidateRow>),
 }
 
 /// 接続 1 本の 1 回の `get_stats` から切り出した RTC 統計行
 ///
-/// codec は含まない。codec は内容が変わらないため、接続ごとに 1 回だけ
-/// 制御チャネルへ送る。
+/// codec と ICE 候補そのものは含まない。それらは内容が変わらないため、
+/// 接続ごとに 1 回だけ制御チャネルへ送る。
 pub(crate) struct StatsSample {
     pub(crate) instance_id: u32,
     pub(crate) vc_id: u32,
@@ -40,6 +42,8 @@ pub(crate) struct StatsSample {
     pub(crate) remote_inbound: Vec<RtcStatsRemoteInboundRtpRow>,
     pub(crate) remote_outbound: Vec<RtcStatsRemoteOutboundRtpRow>,
     pub(crate) data_channel: Vec<RtcStatsDataChannelRow>,
+    pub(crate) transport: Vec<RtcStatsTransportRow>,
+    pub(crate) candidate_pair: Vec<RtcStatsCandidatePairRow>,
 }
 
 impl StatsSample {
@@ -54,17 +58,26 @@ impl StatsSample {
             remote_inbound: Vec::new(),
             remote_outbound: Vec::new(),
             data_channel: Vec::new(),
+            transport: Vec::new(),
+            candidate_pair: Vec::new(),
         }
     }
 
     /// テーブルへ書く行が 1 つでもあるか
     pub(crate) fn has_rows(&self) -> bool {
-        !self.inbound.is_empty()
-            || !self.outbound.is_empty()
-            || !self.media_source.is_empty()
-            || !self.remote_inbound.is_empty()
-            || !self.remote_outbound.is_empty()
-            || !self.data_channel.is_empty()
+        self.row_count() > 0
+    }
+
+    /// このサンプルに含まれる統計行数
+    pub(crate) fn row_count(&self) -> usize {
+        self.inbound.len()
+            + self.outbound.len()
+            + self.media_source.len()
+            + self.remote_inbound.len()
+            + self.remote_outbound.len()
+            + self.data_channel.len()
+            + self.transport.len()
+            + self.candidate_pair.len()
     }
 }
 
@@ -401,6 +414,100 @@ pub(crate) struct RtcStatsDataChannelRow {
     pub(crate) bytes_received: Option<i64>,
 }
 
+/// `rtc_stats_transport` テーブルへの 1 行
+#[derive(Clone)]
+pub(crate) struct RtcStatsTransportRow {
+    pub(crate) instance_id: u32,
+    pub(crate) timestamp: SystemTime,
+    pub(crate) channel_id: String,
+    pub(crate) session_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) rtc_timestamp: Option<f64>,
+    pub(crate) stats_type: String,
+    pub(crate) id: String,
+    pub(crate) packets_sent: Option<i64>,
+    pub(crate) packets_received: Option<i64>,
+    pub(crate) bytes_sent: Option<i64>,
+    pub(crate) bytes_received: Option<i64>,
+    pub(crate) ice_role: Option<String>,
+    pub(crate) dtls_state: Option<String>,
+    pub(crate) dtls_role: Option<String>,
+    pub(crate) selected_candidate_pair_id: Option<String>,
+    pub(crate) selected_candidate_pair_changes: Option<i64>,
+}
+
+/// `rtc_stats_candidate_pair` テーブルへの 1 行
+#[derive(Clone)]
+pub(crate) struct RtcStatsCandidatePairRow {
+    pub(crate) instance_id: u32,
+    pub(crate) timestamp: SystemTime,
+    pub(crate) channel_id: String,
+    pub(crate) session_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) rtc_timestamp: Option<f64>,
+    pub(crate) stats_type: String,
+    pub(crate) id: String,
+    pub(crate) transport_id: Option<String>,
+    pub(crate) local_candidate_id: Option<String>,
+    pub(crate) remote_candidate_id: Option<String>,
+    pub(crate) state: Option<String>,
+    pub(crate) nominated: Option<bool>,
+    pub(crate) packets_sent: Option<i64>,
+    pub(crate) packets_received: Option<i64>,
+    pub(crate) bytes_sent: Option<i64>,
+    pub(crate) bytes_received: Option<i64>,
+    pub(crate) current_round_trip_time: Option<f64>,
+    pub(crate) total_round_trip_time: Option<f64>,
+    pub(crate) available_outgoing_bitrate: Option<f64>,
+    pub(crate) available_incoming_bitrate: Option<f64>,
+    pub(crate) requests_sent: Option<i64>,
+    pub(crate) requests_received: Option<i64>,
+    pub(crate) responses_sent: Option<i64>,
+    pub(crate) responses_received: Option<i64>,
+    pub(crate) consent_requests_sent: Option<i64>,
+    pub(crate) packets_discarded_on_send: Option<i64>,
+    pub(crate) bytes_discarded_on_send: Option<i64>,
+}
+
+/// `rtc_stats_local_candidate` テーブルへの 1 行
+#[derive(Clone)]
+pub(crate) struct RtcStatsLocalCandidateRow {
+    pub(crate) instance_id: u32,
+    pub(crate) timestamp: SystemTime,
+    pub(crate) channel_id: String,
+    pub(crate) session_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) rtc_timestamp: Option<f64>,
+    pub(crate) stats_type: String,
+    pub(crate) id: String,
+    pub(crate) transport_id: Option<String>,
+    pub(crate) address: Option<String>,
+    pub(crate) port: Option<i64>,
+    pub(crate) protocol: Option<String>,
+    pub(crate) candidate_type: Option<String>,
+    pub(crate) relay_protocol: Option<String>,
+    pub(crate) url: Option<String>,
+    pub(crate) network_type: Option<String>,
+}
+
+/// `rtc_stats_remote_candidate` テーブルへの 1 行
+#[derive(Clone)]
+pub(crate) struct RtcStatsRemoteCandidateRow {
+    pub(crate) instance_id: u32,
+    pub(crate) timestamp: SystemTime,
+    pub(crate) channel_id: String,
+    pub(crate) session_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) rtc_timestamp: Option<f64>,
+    pub(crate) stats_type: String,
+    pub(crate) id: String,
+    pub(crate) transport_id: Option<String>,
+    pub(crate) address: Option<String>,
+    pub(crate) port: Option<i64>,
+    pub(crate) protocol: Option<String>,
+    pub(crate) candidate_type: Option<String>,
+}
+
 // ============================================================================
 // INSERT / UPDATE 実装
 // ============================================================================
@@ -582,6 +689,72 @@ pub(crate) fn insert_rtc_stats_codec(
          channels, sdp_fmtp_line) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT (connection_id, id, mime_type, payload_type, clock_rate, channels, \
          sdp_fmtp_line) DO NOTHING",
+        params,
+    )?;
+    Ok(())
+}
+
+pub(crate) fn insert_rtc_stats_local_candidate(
+    conn: &Connection,
+    row: RtcStatsLocalCandidateRow,
+) -> duckdb::Result<()> {
+    let instance_id = i32::try_from(row.instance_id).unwrap_or(0);
+    let timestamp = system_time_to_duck(row.timestamp);
+    let params: &[&dyn ToSql] = &[
+        &instance_id,
+        &timestamp,
+        &row.channel_id,
+        &row.session_id,
+        &row.connection_id,
+        &row.rtc_timestamp,
+        &row.stats_type,
+        &row.id,
+        &row.transport_id,
+        &row.address,
+        &row.port,
+        &row.protocol,
+        &row.candidate_type,
+        &row.relay_protocol,
+        &row.url,
+        &row.network_type,
+    ];
+    conn.execute(
+        "INSERT INTO rtc_stats_local_candidate (instance_id, timestamp, channel_id, \
+         session_id, connection_id, rtc_timestamp, type, id, transport_id, address, port, \
+         protocol, candidate_type, relay_protocol, url, network_type) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (connection_id, id) DO NOTHING",
+        params,
+    )?;
+    Ok(())
+}
+
+pub(crate) fn insert_rtc_stats_remote_candidate(
+    conn: &Connection,
+    row: RtcStatsRemoteCandidateRow,
+) -> duckdb::Result<()> {
+    let instance_id = i32::try_from(row.instance_id).unwrap_or(0);
+    let timestamp = system_time_to_duck(row.timestamp);
+    let params: &[&dyn ToSql] = &[
+        &instance_id,
+        &timestamp,
+        &row.channel_id,
+        &row.session_id,
+        &row.connection_id,
+        &row.rtc_timestamp,
+        &row.stats_type,
+        &row.id,
+        &row.transport_id,
+        &row.address,
+        &row.port,
+        &row.protocol,
+        &row.candidate_type,
+    ];
+    conn.execute(
+        "INSERT INTO rtc_stats_remote_candidate (instance_id, timestamp, channel_id, \
+         session_id, connection_id, rtc_timestamp, type, id, transport_id, address, port, \
+         protocol, candidate_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (connection_id, id) DO NOTHING",
         params,
     )?;
     Ok(())
@@ -853,6 +1026,73 @@ pub(crate) fn append_rtc_stats_data_channel(
         &row.bytes_sent,
         &row.messages_received,
         &row.bytes_received,
+    ];
+    appender.append_row(params)
+}
+
+pub(crate) fn append_rtc_stats_transport(
+    appender: &mut Appender<'_>,
+    row: &RtcStatsTransportRow,
+) -> duckdb::Result<()> {
+    let instance_id = i32::try_from(row.instance_id).unwrap_or(0);
+    let timestamp = system_time_to_duck(row.timestamp);
+    let params: &[&dyn ToSql] = &[
+        &instance_id,
+        &timestamp,
+        &row.channel_id,
+        &row.session_id,
+        &row.connection_id,
+        &row.rtc_timestamp,
+        &row.stats_type,
+        &row.id,
+        &row.packets_sent,
+        &row.packets_received,
+        &row.bytes_sent,
+        &row.bytes_received,
+        &row.ice_role,
+        &row.dtls_state,
+        &row.dtls_role,
+        &row.selected_candidate_pair_id,
+        &row.selected_candidate_pair_changes,
+    ];
+    appender.append_row(params)
+}
+
+pub(crate) fn append_rtc_stats_candidate_pair(
+    appender: &mut Appender<'_>,
+    row: &RtcStatsCandidatePairRow,
+) -> duckdb::Result<()> {
+    let instance_id = i32::try_from(row.instance_id).unwrap_or(0);
+    let timestamp = system_time_to_duck(row.timestamp);
+    let params: &[&dyn ToSql] = &[
+        &instance_id,
+        &timestamp,
+        &row.channel_id,
+        &row.session_id,
+        &row.connection_id,
+        &row.rtc_timestamp,
+        &row.stats_type,
+        &row.id,
+        &row.transport_id,
+        &row.local_candidate_id,
+        &row.remote_candidate_id,
+        &row.state,
+        &row.nominated,
+        &row.packets_sent,
+        &row.packets_received,
+        &row.bytes_sent,
+        &row.bytes_received,
+        &row.current_round_trip_time,
+        &row.total_round_trip_time,
+        &row.available_outgoing_bitrate,
+        &row.available_incoming_bitrate,
+        &row.requests_sent,
+        &row.requests_received,
+        &row.responses_sent,
+        &row.responses_received,
+        &row.consent_requests_sent,
+        &row.packets_discarded_on_send,
+        &row.bytes_discarded_on_send,
     ];
     appender.append_row(params)
 }

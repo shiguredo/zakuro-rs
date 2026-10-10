@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use shiguredo_webrtc::{
     IceConnectionState, IceGatheringState, PeerConnectionState, SignalingState, VideoTrackSource,
@@ -19,8 +19,8 @@ use crate::connection_lifecycle::{
 };
 use crate::data_channel::MessageChannel;
 use crate::duckdb_stats::{
-    CodecIdentity, ConnectionIds, DuckDBClient, InsertConnectionLifecycleRow, InsertConnectionRow,
-    WriteCommand, parse_offer_ids, parse_rtc_stats,
+    CandidateIdentity, CodecIdentity, ConnectionIds, DuckDBClient, InsertConnectionLifecycleRow,
+    InsertConnectionRow, WriteCommand, parse_offer_ids, parse_rtc_stats,
 };
 use crate::ice_server::{IceAddressFamily, configure_ice_server_urls};
 use crate::media_observer::MediaObserver;
@@ -447,8 +447,12 @@ async fn run_stats_collection(
     interval: Duration,
 ) {
     let mut observer = MediaObserver::new();
-    // 同じ codec 行を毎秒書かない。識別子は UNIQUE 制約と同じ列。
+    // codec と ICE 候補は内容が変わらないので、識別子ごとに 1 回だけ書く。
     let mut seen_codecs: HashSet<CodecIdentity> = HashSet::new();
+    let mut seen_local_candidates: HashSet<CandidateIdentity> = HashSet::new();
+    let mut seen_remote_candidates: HashSet<CandidateIdentity> = HashSet::new();
+    // 収集間隔が空いたとき (get_stats が遅い、tick を飛ばした) に分かるようにする。
+    let mut last_collected: Option<Instant> = None;
     let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // 初回 tick は即座に発火するが、connection_id 未確定の可能性が高いため
@@ -500,6 +504,20 @@ async fn run_stats_collection(
                 // (sora_sdk に as_raw() / into_raw() が無いため)
                 let stats_text = stats.to_string();
                 let now = SystemTime::now();
+                let collected_at = Instant::now();
+                if let Some(prev) = last_collected {
+                    let gap = collected_at.saturating_duration_since(prev);
+                    if gap > interval.saturating_mul(2) {
+                        rtc_log_warning!(
+                            "[i{}/vc-{}][duckdb] stats collection gap: {:.2}s interval={:.2}s",
+                            instance_id,
+                            vc_id,
+                            gap.as_secs_f64(),
+                            interval.as_secs_f64(),
+                        );
+                    }
+                }
+                last_collected = Some(collected_at);
                 // メディアの観測は DuckDB 出力の有無にかかわらず行う (合否判定の材料)
                 match lifecycle.lock() {
                     Ok(mut lifecycle) => observer.observe(&mut lifecycle, &stats_text, now),
@@ -521,6 +539,21 @@ async fn run_stats_collection(
                     for codec in parsed.codecs {
                         if seen_codecs.insert(CodecIdentity::from_row(&codec)) {
                             client.send_control(WriteCommand::InsertRtcStatsCodec(Box::new(codec)));
+                        }
+                    }
+                    for candidate in parsed.local_candidates {
+                        if seen_local_candidates.insert(CandidateIdentity::from_local(&candidate)) {
+                            client.send_control(WriteCommand::InsertRtcStatsLocalCandidate(
+                                Box::new(candidate),
+                            ));
+                        }
+                    }
+                    for candidate in parsed.remote_candidates {
+                        if seen_remote_candidates.insert(CandidateIdentity::from_remote(&candidate))
+                        {
+                            client.send_control(WriteCommand::InsertRtcStatsRemoteCandidate(
+                                Box::new(candidate),
+                            ));
                         }
                     }
                     if parsed.sample.has_rows() {

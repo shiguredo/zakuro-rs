@@ -76,6 +76,21 @@ pub(crate) const INSERT_DATA_CHANNEL_SQL: &str = "INSERT INTO rtc_stats_data_cha
   protocol, data_channel_identifier, state, messages_sent, bytes_sent, messages_received, \
   bytes_received) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
+pub(crate) const INSERT_TRANSPORT_SQL: &str = "INSERT INTO rtc_stats_transport (instance_id, \
+  timestamp, channel_id, session_id, connection_id, rtc_timestamp, type, id, packets_sent, \
+  packets_received, bytes_sent, bytes_received, ice_role, dtls_state, dtls_role, \
+  selected_candidate_pair_id, selected_candidate_pair_changes) \
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+pub(crate) const INSERT_CANDIDATE_PAIR_SQL: &str = "INSERT INTO rtc_stats_candidate_pair \
+  (instance_id, timestamp, channel_id, session_id, connection_id, rtc_timestamp, type, id, \
+  transport_id, local_candidate_id, remote_candidate_id, state, nominated, packets_sent, \
+  packets_received, bytes_sent, bytes_received, current_round_trip_time, \
+  total_round_trip_time, available_outgoing_bitrate, available_incoming_bitrate, \
+  requests_sent, requests_received, responses_sent, responses_received, \
+  consent_requests_sent, packets_discarded_on_send, bytes_discarded_on_send) \
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
 /// INSERT 文の列リストを、Appender に渡す列名へ分解する
 ///
 /// 列の正本は INSERT SQL 側にあり、ここはそれを読み取るだけにする。
@@ -110,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_creates_eleven_tables() {
+    fn schema_creates_fifteen_tables() {
         let (_dir, conn) = setup_db();
         let count: i64 = conn
             .query_row(
@@ -119,11 +134,11 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("テーブル数の取得に失敗");
-        assert_eq!(count, 11, "テーブル数は 11 であるべき");
+        assert_eq!(count, 15, "テーブル数は 15 であるべき");
     }
 
     #[test]
-    fn schema_creates_nine_sequences() {
+    fn schema_creates_thirteen_sequences() {
         let (_dir, conn) = setup_db();
         let count: i64 = conn
             .query_row(
@@ -132,11 +147,11 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("シーケンス数の取得に失敗");
-        assert_eq!(count, 9, "シーケンス数は 9 であるべき");
+        assert_eq!(count, 13, "シーケンス数は 13 であるべき");
     }
 
     #[test]
-    fn schema_creates_ten_indexes() {
+    fn schema_creates_fourteen_indexes() {
         let (_dir, conn) = setup_db();
         let count: i64 = conn
             .query_row(
@@ -145,7 +160,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("インデックス数の取得に失敗");
-        assert_eq!(count, 10, "インデックス数は 10 であるべき");
+        assert_eq!(count, 14, "インデックス数は 14 であるべき");
     }
 
     #[test]
@@ -157,6 +172,8 @@ mod tests {
             super::INSERT_REMOTE_INBOUND_RTP_SQL,
             super::INSERT_REMOTE_OUTBOUND_RTP_SQL,
             super::INSERT_DATA_CHANNEL_SQL,
+            super::INSERT_TRANSPORT_SQL,
+            super::INSERT_CANDIDATE_PAIR_SQL,
         ] {
             let columns = super::insert_sql_columns(sql);
             let placeholders = sql.matches('?').count();

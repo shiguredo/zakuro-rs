@@ -10,9 +10,10 @@ use shiguredo_webrtc::{log, rtc_log_warning};
 
 use super::module::unknown_types;
 use super::rows::{
-    ConnectionIds, RtcStatsCodecRow, RtcStatsDataChannelRow, RtcStatsInboundRtpRow,
-    RtcStatsMediaSourceRow, RtcStatsOutboundRtpRow, RtcStatsRemoteInboundRtpRow,
-    RtcStatsRemoteOutboundRtpRow, StatsSample,
+    ConnectionIds, RtcStatsCandidatePairRow, RtcStatsCodecRow, RtcStatsDataChannelRow,
+    RtcStatsInboundRtpRow, RtcStatsLocalCandidateRow, RtcStatsMediaSourceRow,
+    RtcStatsOutboundRtpRow, RtcStatsRemoteCandidateRow, RtcStatsRemoteInboundRtpRow,
+    RtcStatsRemoteOutboundRtpRow, RtcStatsTransportRow, StatsSample,
 };
 
 /// DuckDB ファイル名 `zakuro_{YYYYMMDD}_{HHMMSS}_{mmm}.db` を UTC で生成する
@@ -75,7 +76,11 @@ pub(crate) struct ParsedRtcStats {
     pub(crate) known_count: usize,
     /// この tick に含まれていた codec 行
     pub(crate) codecs: Vec<RtcStatsCodecRow>,
-    /// codec 以外の統計行
+    /// この tick に含まれていたローカル ICE 候補
+    pub(crate) local_candidates: Vec<RtcStatsLocalCandidateRow>,
+    /// この tick に含まれていたリモート ICE 候補
+    pub(crate) remote_candidates: Vec<RtcStatsRemoteCandidateRow>,
+    /// 毎サンプル書く統計行
     pub(crate) sample: StatsSample,
 }
 
@@ -91,6 +96,33 @@ pub(crate) struct CodecIdentity {
     clock_rate: Option<i64>,
     channels: Option<i64>,
     sdp_fmtp_line: Option<String>,
+}
+
+/// ICE 候補を `connection_id` と stats id で識別する
+///
+/// 候補の中身は接続中ほぼ変わらないので、最初の 1 回だけ書く。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CandidateIdentity {
+    connection_id: String,
+    id: String,
+}
+
+impl CandidateIdentity {
+    /// ローカル候補から識別子を作る
+    pub(crate) fn from_local(row: &RtcStatsLocalCandidateRow) -> Self {
+        Self {
+            connection_id: row.connection_id.clone(),
+            id: row.id.clone(),
+        }
+    }
+
+    /// リモート候補から識別子を作る
+    pub(crate) fn from_remote(row: &RtcStatsRemoteCandidateRow) -> Self {
+        Self {
+            connection_id: row.connection_id.clone(),
+            id: row.id.clone(),
+        }
+    }
 }
 
 impl CodecIdentity {
@@ -124,6 +156,8 @@ pub(crate) fn parse_rtc_stats(
     let mut parsed = ParsedRtcStats {
         known_count: 0,
         codecs: Vec::new(),
+        local_candidates: Vec::new(),
+        remote_candidates: Vec::new(),
         sample: StatsSample::empty(instance_id, vc_id),
     };
     let Ok(json) = RawJsonOwned::parse(stats_text) else {
@@ -220,6 +254,34 @@ pub(crate) fn parse_rtc_stats(
             "data-channel" => match parse_data_channel(element, common) {
                 Some(row) => {
                     parsed.sample.data_channel.push(row);
+                    true
+                }
+                None => false,
+            },
+            "transport" => match parse_transport(element, common) {
+                Some(row) => {
+                    parsed.sample.transport.push(row);
+                    true
+                }
+                None => false,
+            },
+            "candidate-pair" => match parse_candidate_pair(element, common) {
+                Some(row) => {
+                    parsed.sample.candidate_pair.push(row);
+                    true
+                }
+                None => false,
+            },
+            "local-candidate" => match parse_local_candidate(element, common) {
+                Some(row) => {
+                    parsed.local_candidates.push(row);
+                    true
+                }
+                None => false,
+            },
+            "remote-candidate" => match parse_remote_candidate(element, common) {
+                Some(row) => {
+                    parsed.remote_candidates.push(row);
                     true
                 }
                 None => false,
@@ -550,6 +612,109 @@ fn parse_data_channel(v: RawJsonValue<'_, '_>, c: StatsCommon) -> Option<RtcStat
     })
 }
 
+fn parse_transport(v: RawJsonValue<'_, '_>, c: StatsCommon) -> Option<RtcStatsTransportRow> {
+    Some(RtcStatsTransportRow {
+        instance_id: c.instance_id,
+        timestamp: c.timestamp,
+        channel_id: c.channel_id,
+        session_id: c.session_id,
+        connection_id: c.connection_id,
+        rtc_timestamp: c.rtc_timestamp,
+        stats_type: c.stats_type,
+        id: c.id,
+        packets_sent: get_i64(v, "packetsSent"),
+        packets_received: get_i64(v, "packetsReceived"),
+        bytes_sent: get_i64(v, "bytesSent"),
+        bytes_received: get_i64(v, "bytesReceived"),
+        ice_role: get_string(v, "iceRole"),
+        dtls_state: get_string(v, "dtlsState"),
+        dtls_role: get_string(v, "dtlsRole"),
+        selected_candidate_pair_id: get_string(v, "selectedCandidatePairId"),
+        selected_candidate_pair_changes: get_i64(v, "selectedCandidatePairChanges"),
+    })
+}
+
+fn parse_candidate_pair(
+    v: RawJsonValue<'_, '_>,
+    c: StatsCommon,
+) -> Option<RtcStatsCandidatePairRow> {
+    Some(RtcStatsCandidatePairRow {
+        instance_id: c.instance_id,
+        timestamp: c.timestamp,
+        channel_id: c.channel_id,
+        session_id: c.session_id,
+        connection_id: c.connection_id,
+        rtc_timestamp: c.rtc_timestamp,
+        stats_type: c.stats_type,
+        id: c.id,
+        transport_id: get_string(v, "transportId"),
+        local_candidate_id: get_string(v, "localCandidateId"),
+        remote_candidate_id: get_string(v, "remoteCandidateId"),
+        state: get_string(v, "state"),
+        nominated: get_bool(v, "nominated"),
+        packets_sent: get_i64(v, "packetsSent"),
+        packets_received: get_i64(v, "packetsReceived"),
+        bytes_sent: get_i64(v, "bytesSent"),
+        bytes_received: get_i64(v, "bytesReceived"),
+        current_round_trip_time: get_f64(v, "currentRoundTripTime"),
+        total_round_trip_time: get_f64(v, "totalRoundTripTime"),
+        available_outgoing_bitrate: get_f64(v, "availableOutgoingBitrate"),
+        available_incoming_bitrate: get_f64(v, "availableIncomingBitrate"),
+        requests_sent: get_i64(v, "requestsSent"),
+        requests_received: get_i64(v, "requestsReceived"),
+        responses_sent: get_i64(v, "responsesSent"),
+        responses_received: get_i64(v, "responsesReceived"),
+        consent_requests_sent: get_i64(v, "consentRequestsSent"),
+        packets_discarded_on_send: get_i64(v, "packetsDiscardedOnSend"),
+        bytes_discarded_on_send: get_i64(v, "bytesDiscardedOnSend"),
+    })
+}
+
+fn parse_local_candidate(
+    v: RawJsonValue<'_, '_>,
+    c: StatsCommon,
+) -> Option<RtcStatsLocalCandidateRow> {
+    Some(RtcStatsLocalCandidateRow {
+        instance_id: c.instance_id,
+        timestamp: c.timestamp,
+        channel_id: c.channel_id,
+        session_id: c.session_id,
+        connection_id: c.connection_id,
+        rtc_timestamp: c.rtc_timestamp,
+        stats_type: c.stats_type,
+        id: c.id,
+        transport_id: get_string(v, "transportId"),
+        address: get_string(v, "address"),
+        port: get_i64(v, "port"),
+        protocol: get_string(v, "protocol"),
+        candidate_type: get_string(v, "candidateType"),
+        relay_protocol: get_string(v, "relayProtocol"),
+        url: get_string(v, "url"),
+        network_type: get_string(v, "networkType"),
+    })
+}
+
+fn parse_remote_candidate(
+    v: RawJsonValue<'_, '_>,
+    c: StatsCommon,
+) -> Option<RtcStatsRemoteCandidateRow> {
+    Some(RtcStatsRemoteCandidateRow {
+        instance_id: c.instance_id,
+        timestamp: c.timestamp,
+        channel_id: c.channel_id,
+        session_id: c.session_id,
+        connection_id: c.connection_id,
+        rtc_timestamp: c.rtc_timestamp,
+        stats_type: c.stats_type,
+        id: c.id,
+        transport_id: get_string(v, "transportId"),
+        address: get_string(v, "address"),
+        port: get_i64(v, "port"),
+        protocol: get_string(v, "protocol"),
+        candidate_type: get_string(v, "candidateType"),
+    })
+}
+
 // ============================================================================
 // config_json 構築 (DisplayJson 手書き + 機密情報マスク)
 // ============================================================================
@@ -845,20 +1010,36 @@ mod tests {
             {"type":"remote-inbound-rtp","id":"RI1","timestamp":1.0,"ssrc":123,"localId":"O1"},
             {"type":"remote-outbound-rtp","id":"RO1","timestamp":1.0,"ssrc":456,"localId":"I1"},
             {"type":"data-channel","id":"D1","timestamp":1.0,"label":"spam","state":"open"},
-            {"type":"transport","id":"T1","timestamp":1.0}
+            {"type":"transport","id":"T1","timestamp":1.0,"bytesSent":1000,"selectedCandidatePairId":"P1","dtlsState":"connected"},
+            {"type":"candidate-pair","id":"P1","timestamp":1.0,"state":"succeeded","nominated":true,"currentRoundTripTime":0.02,"availableOutgoingBitrate":2500000},
+            {"type":"local-candidate","id":"L1","timestamp":1.0,"candidateType":"host","protocol":"udp","port":50000},
+            {"type":"remote-candidate","id":"R1","timestamp":1.0,"candidateType":"srflx","protocol":"udp","port":19302},
+            {"type":"certificate","id":"CERT1","timestamp":1.0}
         ]"#;
         clear_unknown_types_for_test();
         let parsed = parse_rtc_stats(0, 0, "ch", &ids, stats, SystemTime::now());
         assert_eq!(
-            parsed.known_count, 7,
-            "既知 type 7 種が投入されるべき (transport は未対応)"
+            parsed.known_count, 11,
+            "既知 type 11 種が投入されるべき (certificate は未対応)"
         );
 
-        let controls: Vec<WriteCommand> = parsed
+        let mut controls: Vec<WriteCommand> = parsed
             .codecs
             .into_iter()
             .map(|row| WriteCommand::InsertRtcStatsCodec(Box::new(row)))
             .collect();
+        controls.extend(
+            parsed
+                .local_candidates
+                .into_iter()
+                .map(|row| WriteCommand::InsertRtcStatsLocalCandidate(Box::new(row))),
+        );
+        controls.extend(
+            parsed
+                .remote_candidates
+                .into_iter()
+                .map(|row| WriteCommand::InsertRtcStatsRemoteCandidate(Box::new(row))),
+        );
         let mut pending = HashMap::new();
         pending.insert((0, 0), parsed.sample);
         flush_writes(&conn, &controls, &pending).expect("バルク INSERT に失敗");
@@ -870,6 +1051,10 @@ mod tests {
             ("rtc_stats_remote_inbound_rtp", 1),
             ("rtc_stats_remote_outbound_rtp", 1),
             ("rtc_stats_data_channel", 1),
+            ("rtc_stats_transport", 1),
+            ("rtc_stats_candidate_pair", 1),
+            ("rtc_stats_local_candidate", 1),
+            ("rtc_stats_remote_candidate", 1),
         ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -878,6 +1063,14 @@ mod tests {
                 .expect("カウント取得に失敗");
             assert_eq!(count, n, "{table} に {n} 行あるべき");
         }
+        let bitrate: f64 = conn
+            .query_row(
+                "SELECT available_outgoing_bitrate FROM rtc_stats_candidate_pair",
+                [],
+                |row| row.get(0),
+            )
+            .expect("available_outgoing_bitrate の取得に失敗");
+        assert_eq!(bitrate, 2_500_000.0, "候補ペアの可用帯域が記録されること");
     }
 
     #[test]
