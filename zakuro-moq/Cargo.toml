@@ -56,7 +56,7 @@ features = [
 # crates.io には未公開のため git 依存とし、再現性のため rev を固定する
 [dependencies.shiguredo_moqt]
 git = "https://github.com/shiguredo/moqt-rs"
-rev = "f36009d45bfa373b693642630b8f355b4d0aaed4"
+rev = "f91baf3be4f9946ddcf08cfacf4cc493795285f5"
 
 # 非同期ランタイム
 [dependencies.tokio]

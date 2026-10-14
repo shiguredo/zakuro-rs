@@ -514,7 +514,9 @@ impl Publisher {
         stream_id: DataStreamId,
         cause: std::io::Error,
     ) -> Result<()> {
-        let _ = session.recv_data_stream_stop_sending(stream_id);
+        // 第 2 引数は peer が STOP_SENDING に載せたアプリケーションエラーコードである。
+        // 上記のとおり観測できないため `None` (アプリケーションエラーコード無し) を渡す
+        let _ = session.recv_data_stream_stop_sending(stream_id, None);
         self.stream = None;
         self.stream_id = None;
         self.group_id += 1;
@@ -759,14 +761,20 @@ pub(crate) async fn run(
                                 // 受信 object の帰属 (どのトラックか) を判定するために覚えておく
                                 stream_aliases.insert(stream_id, header.track_alias);
                             }
-                            // 未知の Track Alias は relay 側の都合 (購読前の残留など) で起こり得る。
-                            // セッションは閉じずにこの stream を捨てる
+                            // 受信 uni stream の SUBGROUP_HEADER を Session が拒否した
+                            // (stream が未登録・header の重複・fetch stream への header など
+                            // プロトコル違反)。セッションは閉じずにこの stream を読み捨てる。
+                            // 受信を打ち切って読み取りタスクに受信方向へ STOP_SENDING を
+                            // 送らせるには、そのタスクへ指示を渡す経路が必要であり、
+                            // 現状は peer の終端まで読み切る。Session へ受信停止を通知する
+                            // API は `Session::send_data_stream_stop_sending` である
+                            // (自側が開いた stream に peer から届いた STOP_SENDING を通知する
+                            // `recv_data_stream_stop_sending` は受信 stream の id では必ず失敗する)
                             Err(e) => {
                                 tracing::warn!(
                                     "MOQT: SUBGROUP_HEADER rejected (track_alias={}): {e:?}",
                                     header.track_alias,
                                 );
-                                let _ = session.recv_data_stream_stop_sending(stream_id);
                             }
                         }
                     }
@@ -1645,6 +1653,23 @@ async fn drain_events(
             SessionEvent::StopSendingRequestStream { request_id, .. } => {
                 // 自側が受け取る request stream は読みタスクが保持しているため何もしない
                 tracing::warn!("MOQT: STOP_SENDING for request_id={request_id} is ignored");
+            }
+            SessionEvent::StopSendingDataStream {
+                stream_id,
+                error_code,
+            } => {
+                // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes): open な
+                // subgroup stream で object header を待って DATA_STREAM_TIMEOUT が満了すると、
+                // Session はセッションを閉じずに受信方向への STOP_SENDING を指示する。
+                // このイベントは `Session::set_data_stream_timeout_ms` でタイムアウトを
+                // 設定したときだけ発火し、zakuro-moq は設定しないため到達しない。
+                // 到達させる場合は、stream を読むタスクがこの指示を観測して受信方向へ
+                // STOP_SENDING を送出する経路 (例: stream ごとの watch チャネル) を実装すること
+                tracing::warn!(
+                    "MOQT: STOP_SENDING for data stream is not supported: stream_id={} error_code={:#x}",
+                    stream_id.0,
+                    error_code,
+                );
             }
             SessionEvent::GoawayReceived { timeout, .. } => {
                 tracing::warn!("MOQT: GOAWAY received (timeout={timeout}ms)");
