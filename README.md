@@ -271,7 +271,8 @@ cargo run -p zakuro-moq -- --url moqt://relay.example.com:4433 --namespace zakur
 
 `--subscribe-tracks` を指定して `--tracks` を省略した場合は publish しません
 (購読専用で起動できます)。両方を指定すると 1 つの仮想クライアントが publish と subscribe を
-同時に行います。
+同時に行います。このとき、relay に PUBLISH が受理されてから SUBSCRIBE を送ります
+(relay が publisher を登録する前に SUBSCRIBE を受けると拒否されるため)。
 
 トラック名に `{instance}` / `{vc}` を書くと仮想クライアントの値で置換します。プレースホルダを
 書かない場合は publish と同じ `<名前>-<インスタンス>-<仮想クライアント>` になります。

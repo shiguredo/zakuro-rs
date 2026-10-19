@@ -570,6 +570,17 @@ impl Publisher {
     }
 }
 
+/// すべての publication が受理されるか、PUBLISH をまだ送っていない状態か
+///
+/// relay が publisher を登録する前に同じトラックへの SUBSCRIBE を受けると
+/// REQUEST_ERROR (publisher なし) で拒否されるため、SUBSCRIBE を送る前に
+/// この条件を満たしているか確認する。
+fn publishers_ready_for_subscribe(publishers: &[Publisher]) -> bool {
+    publishers
+        .iter()
+        .all(|publisher| publisher.request_id.is_none() || publisher.accepted)
+}
+
 /// SUBGROUP_OBJECT に載せる Object ID Delta を求める
 ///
 /// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header): 最初の Object は絶対 ID を送り、
@@ -700,6 +711,8 @@ pub(crate) async fn run(
     let start = tokio::time::Instant::now();
     let establish_deadline = tokio::time::sleep(ESTABLISH_TIMEOUT);
     tokio::pin!(establish_deadline);
+    // PUBLISH の受理待ちをログに出すのは 1 回だけにする
+    let mut logged_publish_wait = false;
 
     loop {
         // GOAWAY を観測済みの場合 (SETUP 直後の drain など) は、次の select を待たずに
@@ -970,45 +983,58 @@ pub(crate) async fn run(
                 }
             }
 
-            // 購読するトラックの SUBSCRIBE を送る
-            let mut subscribed = false;
-            for subscription in subscriptions.iter_mut() {
-                if subscription.request_id.is_some() {
-                    continue;
-                }
-                // SUBSCRIBE_OK が返らないままセッションが残らないよう、応答待ちタイムアウトを
-                // 設定する (PUBLISH と同じ扱い)
-                session.set_control_message_timeout_ms(Some(PUBLISH_ACCEPT_TIMEOUT_MS));
-                let request_id = session
-                    .send_subscribe(
-                        TrackNamespace::new(vec![config.namespace.as_bytes().to_vec()]).map_err(
-                            |e| ErrorMessage::new(format!("Track Namespace が不正です: {e:?}")),
-                        )?,
-                        subscription.name.as_bytes().to_vec(),
-                        MessageParameters::new(),
-                    )
-                    .map_err(|e| {
-                        ErrorMessage::new(format!("SUBSCRIBE の送信に失敗しました: {e:?}"))
-                    })?;
-                tracing::info!(
-                    "MOQT subscribe sent: track={} request_id={}",
-                    subscription.name,
-                    request_id,
-                );
-                subscription.request_id = Some(request_id);
-                subscription.accepted = false;
-                subscribed = true;
+            // relay が publisher を登録する前に SUBSCRIBE を受けると REQUEST_ERROR
+            // (publisher なし) で拒否されるため、全 PUBLISH の受理を待ってから
+            // SUBSCRIBE を送る。無応答は制御メッセージのタイムアウト (10 秒) が
+            // セッションエラーとして検出するため、ここで待ち続けることはない
+            let publishers_ready = publishers_ready_for_subscribe(&publishers);
+            if !publishers_ready && !subscriptions.is_empty() && !logged_publish_wait {
+                tracing::info!("MOQT waiting for publish acceptance before sending SUBSCRIBE");
+                logged_publish_wait = true;
             }
-            if subscribed {
-                drain_events(
-                    &mut session,
-                    &mut state,
-                    Some(&mut publishers),
-                    Some(&mut subscriptions),
-                    &request_tx,
-                    token,
-                )
-                .await?;
+
+            // 購読するトラックの SUBSCRIBE を送る
+            if publishers_ready {
+                let mut subscribed = false;
+                for subscription in subscriptions.iter_mut() {
+                    if subscription.request_id.is_some() {
+                        continue;
+                    }
+                    // SUBSCRIBE_OK が返らないままセッションが残らないよう、応答待ちタイムアウトを
+                    // 設定する (PUBLISH と同じ扱い)
+                    session.set_control_message_timeout_ms(Some(PUBLISH_ACCEPT_TIMEOUT_MS));
+                    let request_id = session
+                        .send_subscribe(
+                            TrackNamespace::new(vec![config.namespace.as_bytes().to_vec()])
+                                .map_err(|e| {
+                                    ErrorMessage::new(format!("Track Namespace が不正です: {e:?}"))
+                                })?,
+                            subscription.name.as_bytes().to_vec(),
+                            MessageParameters::new(),
+                        )
+                        .map_err(|e| {
+                            ErrorMessage::new(format!("SUBSCRIBE の送信に失敗しました: {e:?}"))
+                        })?;
+                    tracing::info!(
+                        "MOQT subscribe sent: track={} request_id={}",
+                        subscription.name,
+                        request_id,
+                    );
+                    subscription.request_id = Some(request_id);
+                    subscription.accepted = false;
+                    subscribed = true;
+                }
+                if subscribed {
+                    drain_events(
+                        &mut session,
+                        &mut state,
+                        Some(&mut publishers),
+                        Some(&mut subscriptions),
+                        &request_tx,
+                        token,
+                    )
+                    .await?;
+                }
             }
         }
 
@@ -2048,6 +2074,39 @@ mod tests {
             publisher.deadline().is_none(),
             "Forward State 0 では送信予定が無いこと"
         );
+    }
+
+    /// PUBLISH の受理前は SUBSCRIBE を送らない判定になること
+    #[test]
+    fn publishers_ready_for_subscribe_waits_for_acceptance() {
+        // PUBLISH を送っていなければ購読を開始できる
+        assert!(publishers_ready_for_subscribe(&[]));
+
+        let mut publisher = Publisher::new(
+            TrackConfig {
+                name: "video".to_string(),
+                object_rate: 30.0,
+                object_size: 100,
+            },
+            1,
+            tokio::time::Instant::now(),
+        );
+        // PUBLISH の送信前は受理待ちの対象外
+        assert!(publishers_ready_for_subscribe(std::slice::from_ref(
+            &publisher
+        )));
+
+        // PUBLISH の送信後、受理前は SUBSCRIBE を送らない
+        publisher.request_id = Some(1);
+        assert!(!publishers_ready_for_subscribe(std::slice::from_ref(
+            &publisher
+        )));
+
+        // PUBLISH が受理されたら SUBSCRIBE を送れる
+        publisher.accepted = true;
+        assert!(publishers_ready_for_subscribe(std::slice::from_ref(
+            &publisher
+        )));
     }
 
     /// GOAWAY 受信時の移行可否の判定
