@@ -243,6 +243,16 @@ MOQT では、購読者がいないトラックの送信を止めるよう relay
 `[stats] objects-sent=... send-rate=.../s objects-received=... recv-rate=.../s bytes-received=... payload-mismatches=...`
 としてログに出ます。
 
+relay の再起動やローリング更新では、relay から GOAWAY と New Session URI が届きます。
+zakuro-moq は既定で New Session URI のセッションへ接続し直し、負荷を継続します
+(`--reconnect-on-goaway=false` で無効にできます)。セッション移行の対象は制御ストリームの
+GOAWAY です。request stream の GOAWAY (request 単位の移行) は未対応です。
+New Session URI が空の場合は接続中の URI へ再接続します。旧セッションを閉じてから新セッションを
+張るため、移行時に再接続のハンドシェイク時間程度の配信ギャップが生じます (長さは環境依存)。
+移行自体は接続失敗ではないため `--max-retry` を消費せず、`--retry-interval` も待ちません
+(移行先への接続失敗は既存のリトライ予算を消費します)。`--duration` は接続 (セッション) 単位の
+ため、移行すると新しい接続としてタイマーがリセットされます。
+
 ### 購読する (`--subscribe-tracks`)
 
 `--subscribe-tracks` を指定すると、そのトラックを購読して object を受信します。
@@ -296,6 +306,7 @@ relay へ接続する場合は誤検知になるため既定では無効です�
 | `--duration` | 接続維持秒数 (未指定なら無制限) |
 | `--repeat-interval` | `--duration` 経過後の再接続間隔 (秒) |
 | `--max-retry` / `--retry-interval` | 接続失敗時のリトライ回数と間隔 (デフォルト: 0 / 60.0) |
+| `--reconnect-on-goaway` | GOAWAY 受信時に New Session URI へ再接続する (true/false、デフォルト: true) |
 | `--insecure` | TLS 証明書の検証をスキップ |
 | `--log-level` | ログレベル (`verbose` / `info` / `warning` / `error` / `none`、デフォルト: `info`) |
 | `--http-host` / `--http-port` | HTTP API (`GET /.ok` / `POST /rpc`) を有効化 |
@@ -316,6 +327,7 @@ relay へ接続する場合は誤検知になるため既定では無効です�
   "vcs": 50,
   "vcs-hatch-rate": 10,
   "duration": 60,
+  "reconnect-on-goaway": true,
   "subscribe-tracks": ["video", "audio"]
 }
 ```

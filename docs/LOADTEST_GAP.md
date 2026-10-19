@@ -184,6 +184,7 @@
 | 起動レート | `--vcs-hatch-rate` / `--instance-hatch-rate`。VC 起動後は本数が増えない |
 | 持続時間 | `--duration`。経過でセッションを閉じ、`--repeat-interval` で再接続 |
 | リトライ | `--max-retry` (既定 0) / `--retry-interval` (既定 60 秒) |
+| GOAWAY 移行 | 制御ストリームの GOAWAY 受信時に New Session URI へセッションを移行する (`--reconnect-on-goaway`、既定 true)。request stream の GOAWAY (per-request migration) は未対応 |
 | 停止 | Ctrl+C 1 回目で FIN / GOAWAY を最大 3 秒待つ graceful shutdown、2 回目で強制終了 |
 
 閉じたモデルのみで、到着率一定の開いたモデル・ランプダウン・終了時の猶予は無い。
@@ -193,24 +194,24 @@
 | 項目 | 現状 |
 | --- | --- |
 | publish | `--tracks 名前[:レート[:サイズ]]`。VC 1 本が全トラックを publish |
-| Track Name | `<指定名>-<インスタンス>-<VC>` で一意化 (zakuro-moq/src/moq_client.rs:93-104) |
+| Track Name | `<指定名>-<インスタンス>-<VC>` で一意化 (moq_client::run の Track Name 解決) |
 | Track Alias | セッション内で 1 からトラック順に払い出し |
 | Group / Subgroup | Group は約 1 秒分の object で FIN して次へ。Subgroup は Group 内 1 本固定 (`SubgroupIdMode::Zero`) |
-| 優先度 | `publisher_priority: None` 固定。CLI / JSONC からの指定は無い (zakuro-moq/src/moq_client/session.rs:372-373) |
+| 優先度 | `publisher_priority: None` 固定。CLI / JSONC からの指定は無い (`Publisher::new`) |
 | ペーシング | トラックごとに `period = 1.0 / object_rate` で送信。10 object 分を超える遅れは切り捨てて現在時刻から再開 |
-| LOC プロパティ | Timescale と Timestamp (送信数 / レートから算出した合成値) を付与 (zakuro-moq/src/moq_client/session.rs:1366-1382) |
-| REQUEST_UPDATE | FORWARD=0 で該当トラックの送信を停止、FORWARD=1 で再開 (zakuro-moq/src/moq_client/session.rs:322-334) |
+| LOC プロパティ | Timescale と Timestamp (送信数 / レートから算出した合成値) を付与 (`build_loc_properties`) |
+| REQUEST_UPDATE | FORWARD=0 で該当トラックの送信を停止、FORWARD=1 で再開 (`drain_events` の `SessionEvent::RequestUpdateReceived`) |
 | subscribe | `--subscribe-tracks`。`{instance}` / `{vc}` のプレースホルダで 1 publish に対して N subscribe を構成できる |
 | 受信検証 | `--verify-payload` で `位置 % 251` パターンとの一致のみ検査 (既定は無効) |
-| 欠落 / 順序 / 遅延 | 計測しない。受信側で Object ID / Group ID を記録していない (zakuro-moq/src/moq_client/session.rs:1049-1083) |
-| DATAGRAM | endpoint は有効化しているが、object は subgroup stream のみで送る (zakuro-moq/src/moq_client/transport.rs:298-311) |
+| 欠落 / 順序 / 遅延 | 計測しない。受信側で Object ID / Group ID を記録していない (`record_received_object`) |
+| DATAGRAM | endpoint は有効化しているが、object は subgroup stream のみで送る (transport.rs の build_client の DATAGRAM endpoint) |
 
 #### メトリクス
 
 | 項目 | 現状 |
 | --- | --- |
 | 計測項目 | `objects-sent` / `send-rate` / `objects-received` / `recv-rate` / `bytes-received` / `payload-mismatches` の累積値と区間レート |
-| 出力 | 5 秒ごとのログ (`[stats]` 行) と終了時のログのみ (zakuro-moq/src/main.rs:276-312) |
+| 出力 | 5 秒ごとのログ (`[stats]` 行) と終了時のログのみ (main.rs の spawn_stats) |
 | トラック別内訳 | 無し。全 publisher / subscription の合計値のみ |
 | セッション進捗 | `publish=受理/全, sent-objects=, forwarding=, subscribe=受理/全, received-objects=` を 5 秒ごとにログ出力 |
 | レイテンシ | publish から subscribe までの遅延、RTT、jitter の計測は無い |
@@ -221,7 +222,7 @@
 
 | 項目 | 現状 |
 | --- | --- |
-| しきい値判定 | 無し。VC / インスタンスの失敗は warn ログを出して継続する (zakuro-moq/src/main.rs:151-157) |
+| しきい値判定 | 無し。VC / インスタンスの失敗は warn ログを出して継続する (main.rs の async_main) |
 | 終了コード | 0 = 正常終了、1 = 起動 / 設定エラー、130 = 2 回目 Ctrl+C |
 | 構造化出力 | 無し。DuckDB / JSON / CSV / Prometheus / OTLP への出力は無い |
 | CI での判定 | `.github/workflows/e2e-test.yml` がログの最終行を grep して往復を確認する (しきい値判定ではない) |
@@ -233,8 +234,8 @@
 | HTTP API | `zakuro` と同じ `zakuro-core` の `GET /.ok` / `POST /rpc` (GetVersion のみ) |
 | 実行中制御 | 無し |
 | 設定ファイル | JSONC (`--config`)。`instances` は最上位をテンプレートとして継承 |
-| 環境変数の展開 | 未対応。`${...}` を含む値を書くとエラーになる (zakuro-moq/src/args.rs:888-893) |
-| 検証 / 整形 | `zakuro-moq lint` / `zakuro-moq fmt` は無い (README.md:324) |
+| 環境変数の展開 | 未対応。`${...}` を含む値を書くとエラーになる (args.rs の push_kv) |
+| 検証 / 整形 | `zakuro-moq lint` / `zakuro-moq fmt` は無い (README の JSONC 設定ファイルの節) |
 | TLS | WebPKI / `--ca-cert` / `--insecure`。クライアント証明書 (mTLS) は無い |
 
 ### 共通で欠けているもの (両ツール)
@@ -364,8 +365,8 @@ MoQ 負荷試験として見たときに、zakuro-moq に足りていないも�
 
 | 不足 | 内容 | 参考になる機能 |
 | --- | --- | --- |
-| publish から subscribe までの遅延 | LOC の Timestamp は「送信数 / レート」から作る合成値で、受信側でも decode していない (zakuro-moq/src/moq_client/session.rs:1366-1382) | moq-bench の片道遅延 (p50 / p90 / p99 / max、clock skew の除外付き) |
-| 欠落 / 順序 / 重複 | 受信側で Object ID / Group ID を記録していないため、object の欠落・順序逆転・重複を検出できない (zakuro-moq/src/moq_client/session.rs:1049-1083) | moq-bench の group sequence span による欠落検出 (live frontier を除外) |
+| publish から subscribe までの遅延 | LOC の Timestamp は「送信数 / レート」から作る合成値で、受信側でも decode していない (`build_loc_properties`) | moq-bench の片道遅延 (p50 / p90 / p99 / max、clock skew の除外付き) |
+| 欠落 / 順序 / 重複 | 受信側で Object ID / Group ID を記録していないため、object の欠落・順序逆転・重複を検出できない (`record_received_object`) | moq-bench の group sequence span による欠落検出 (live frontier を除外) |
 | ペイロード長の検証 | 受信 payload 長を送信側の `object-size` と比較していない | 受信内容の期待値検証 |
 | トラック別の内訳 | メトリクスは全トラックの合計値のみ。トラック別の送信数 / レート / 遅延が出ない | moq-bench の broadcast 単位の統計 |
 
@@ -373,11 +374,11 @@ MoQ 負荷試験として見たときに、zakuro-moq に足りていないも�
 
 | 不足 | 内容 | 参考になる機能 |
 | --- | --- | --- |
-| QUIC 統計 | RTT / 損失 / 輻輳ウィンドウ / bytes in flight / stream 数を読んでいない (zakuro-moq/src/moq_client/transport.rs:222-258 は接続のみ) | h2load の最小 RTT / 平滑化 RTT / 損失宣言数、s2n-quic の接続メトリクス |
+| QUIC 統計 | RTT / 損失 / 輻輳ウィンドウ / bytes in flight / stream 数を読んでいない (transport.rs は接続のみ) | h2load の最小 RTT / 平滑化 RTT / 損失宣言数、s2n-quic の接続メトリクス |
 | 輻輳制御と 0-RTT | 輻輳制御アルゴリズムの指定、0-RTT の利用、idle timeout の指定ができない | quic-go/perf のハンドシェイク計測、QUIC 実装のパラメータ指定 |
 | リレーの経路 | 複数ホップのリレー、キャッシュヒット、同一 object を複数 subscriber が受ける場合の挙動を検証する仕組みが無い | moq-relay の hop リストとデバッグ用 HTTP API、moq-stats |
 | プロトコル機能の網羅 | 優先度 (`publisher_priority`) は固定、DATAGRAM は未使用、Subgroup は Group 内 1 本固定、SUBSCRIBE_UPDATE / TRACK_STATUS などは未使用。`--tracks` は固定値のみ | moxygen の転送プリファレンス 4 種、moq-bench の `[min, max]` のレンジ指定 |
-| 異常系 | GOAWAY 受信、PUBLISH / SUBSCRIBE の拒否、REQUEST_ERROR などを意図的に起こせない。peer 起点の request も扱わない (zakuro-moq/src/moq_client/session.rs:818-827) | moxygen 適合性試験のケース設計 |
+| 異常系 | GOAWAY の受信自体は New Session URI への移行として処理するが、意図的に起こす手段は無い。PUBLISH / SUBSCRIBE の拒否、REQUEST_ERROR などを意図的に起こせない。peer 起点の request も扱わない (`run` の `bidi_acceptor.accept_bidirectional_stream`) | moxygen 適合性試験のケース設計 |
 
 ### 試験の制御と出力
 
@@ -390,7 +391,7 @@ MoQ 負荷試験として見たときに、zakuro-moq に足りていないも�
 | シナリオ | publish / subscribe の定常動作以外を定義できない | moxygen の購読者ランプと配信タイムアウト、moq-bench の負荷形状 |
 | 設定の検証 | `zakuro-moq lint` / `fmt` が無い | `zakuro lint` / `fmt` |
 | 購読側の負荷モデル | subscribe 専用起動はできるが、購読開始レート・購読数・購読解除の制御は publish と同じ扱い | moxygen の `--subscriber_ramp` / `--subscriber_max` |
-| 設定の外部化 | 環境変数の展開ができない (zakuro-moq/src/args.rs:888-893) | 環境変数と秘匿情報の外部注入 |
+| 設定の外部化 | 環境変数の展開ができない (args.rs の push_kv) | 環境変数と秘匿情報の外部注入 |
 
 ## 参考ツール
 

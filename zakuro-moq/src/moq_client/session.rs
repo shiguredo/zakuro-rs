@@ -115,6 +115,24 @@ pub(crate) struct SessionConfig<'a> {
     pub(crate) subscribe_tracks: &'a [String],
     /// 受信 payload が zakuro-moq の publisher のパターンと一致するかを検査する
     pub(crate) verify_payload: bool,
+    /// GOAWAY を受信したときに新セッションへ移行するか
+    ///
+    /// false のときは従来どおり peer がセッションを閉じるまで publish を続け、
+    /// その後の再接続判断は呼び出し側のリトライ経路に任せる。
+    pub(crate) migrate_on_goaway: bool,
+}
+
+/// MOQT セッションが終了した理由
+pub(crate) enum SessionEnd {
+    /// 移行せずに終了した
+    Closed,
+    /// peer の GOAWAY により新セッションへ移行する
+    Migrated {
+        /// 移行先セッション URI (空なら現在の URI を再利用する)
+        new_session_uri: Vec<u8>,
+        /// GOAWAY の Timeout (ms)
+        timeout_ms: u64,
+    },
 }
 
 /// subscribe 中のトラックの状態
@@ -207,6 +225,18 @@ enum RequestMessage {
     },
 }
 
+/// peer の制御ストリームから受信した GOAWAY の内容
+///
+/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): New Session URI が空の場合は現在の URI を
+/// 再利用する。移行の実行可否は `SessionConfig::migrate_on_goaway` と token の状態で
+/// `should_migrate` が判断する。
+struct GoawayInfo {
+    /// 移行先セッション URI
+    new_session_uri: Vec<u8>,
+    /// GOAWAY の Timeout (ms)
+    timeout_ms: u64,
+}
+
 /// セッション中に変化する状態
 ///
 /// `drain_events` が `Session` のイベントを処理しながら更新する。
@@ -230,6 +260,8 @@ struct SessionState {
     reset_data_streams: Vec<(DataStreamId, u64)>,
     /// セッション確立を通知するチャネル (呼び出し側が待ち合わせに使う)
     established_notify: Option<tokio::sync::oneshot::Sender<()>>,
+    /// peer の制御ストリームから受信した GOAWAY (受信していなければ None)
+    goaway: Option<GoawayInfo>,
 }
 
 /// 1 本のトラックへ object を送り続ける publisher
@@ -553,10 +585,18 @@ fn object_id_delta(prev_object_id: Option<u64>, object_id: u64) -> u64 {
     }
 }
 
+/// GOAWAY を受信していて、新セッションへ移行する条件を満たすか
+///
+/// 移行が無効な場合と、プロセス終了 (token キャンセル) の場合は移行しない。
+fn should_migrate(has_goaway: bool, migrate_on_goaway: bool, cancelled: bool) -> bool {
+    has_goaway && migrate_on_goaway && !cancelled
+}
+
 /// MOQT セッションを確立し、publisher として object を送り続ける
 ///
 /// `token` がキャンセルされるか、peer がセッションを閉じるか、transport が失敗するまで
-/// 戻らない。
+/// 戻らない。GOAWAY を受信して新セッションへ移行する設定の場合は、旧セッションを
+/// 終了処理して [`SessionEnd::Migrated`] を返す。
 ///
 /// # Errors
 ///
@@ -569,7 +609,7 @@ pub(crate) async fn run(
     established_notify: Option<tokio::sync::oneshot::Sender<()>>,
     objects_sent: Arc<AtomicU64>,
     receive_counters: ReceiveCounters,
-) -> Result<()> {
+) -> Result<SessionEnd> {
     let mut connection_handle = connection.handle();
     // Forward State 0 の間は object を送らないため、無通信で idle timeout に達しないよう
     // keep-alive を有効にする
@@ -621,6 +661,7 @@ pub(crate) async fn run(
         control_closed: false,
         reset_data_streams: Vec::new(),
         established_notify,
+        goaway: None,
     };
     session
         .recv_control_stream_type(peer_stream_type)
@@ -661,6 +702,16 @@ pub(crate) async fn run(
     tokio::pin!(establish_deadline);
 
     loop {
+        // GOAWAY を観測済みの場合 (SETUP 直後の drain など) は、次の select を待たずに
+        // 移行する。初回 tick を待つと移行判定が tick 間隔 (50ms) だけ遅れるため
+        if should_migrate(
+            state.goaway.is_some(),
+            config.migrate_on_goaway,
+            token.is_cancelled(),
+        ) {
+            break;
+        }
+
         // 次に object を送る時刻 (全トラックの最小値) を求める
         let next_deadline = publishers.iter().filter_map(|p| p.deadline()).min();
 
@@ -851,6 +902,18 @@ pub(crate) async fn run(
             }
         }
 
+        // GOAWAY を観測していた場合は、PUBLISH / SUBSCRIBE の初期 request を送る前に移行する。
+        // draft-ietf-moq-transport-22 §9.2 (GOAWAY): GOAWAY 受信後に新規 request を開始するのは
+        // SHOULD NOT であり、moqt-rs も send_publish / send_subscribe を PeerGoawayReceived で
+        // 拒否する。ここで抜けないとセッションエラーとして終了してしまう
+        if should_migrate(
+            state.goaway.is_some(),
+            config.migrate_on_goaway,
+            token.is_cancelled(),
+        ) {
+            break;
+        }
+
         // Session が要求した data stream の reset は publisher が stream を所有しているため
         // ここで実行する (同時に複数届くことがあるため全件処理する)
         for (stream_id, error_code) in state.reset_data_streams.drain(..) {
@@ -896,6 +959,15 @@ pub(crate) async fn run(
                     token,
                 )
                 .await?;
+
+                // PUBLISH の送信中に GOAWAY を観測した場合は SUBSCRIBE を送らずに移行する
+                if should_migrate(
+                    state.goaway.is_some(),
+                    config.migrate_on_goaway,
+                    token.is_cancelled(),
+                ) {
+                    break;
+                }
             }
 
             // 購読するトラックの SUBSCRIBE を送る
@@ -938,6 +1010,19 @@ pub(crate) async fn run(
                 )
                 .await?;
             }
+        }
+
+        // peer の GOAWAY を受信したら、旧セッションを閉じて新セッションへ移行する。
+        // 移行しない設定の場合は従来どおり peer がセッションを閉じるまで publish を続ける
+        // (draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration): GOAWAY は
+        // クライアントに新セッションの確立を促す合図である)。
+        // token キャンセル時は移行しない (呼び出し側が終了する) ため条件に含める
+        if should_migrate(
+            state.goaway.is_some(),
+            config.migrate_on_goaway,
+            token.is_cancelled(),
+        ) {
+            break;
         }
 
         if let Some(reason) = state.closed_reason.take() {
@@ -988,7 +1073,17 @@ pub(crate) async fn run(
         token,
     )
     .await;
-    Ok(())
+
+    // GOAWAY を受信して移行する設定の場合だけ、移行先を呼び出し側へ返す。
+    // 移行しない場合は従来どおり Closed として返し、リトライ経路に任せる
+    let end = match state.goaway {
+        Some(goaway) if config.migrate_on_goaway && !token.is_cancelled() => SessionEnd::Migrated {
+            new_session_uri: goaway.new_session_uri,
+            timeout_ms: goaway.timeout_ms,
+        },
+        _ => SessionEnd::Closed,
+    };
+    Ok(end)
 }
 
 /// request stream の受信方向を読み続けるタスク
@@ -1671,8 +1766,35 @@ async fn drain_events(
                     error_code,
                 );
             }
-            SessionEvent::GoawayReceived { timeout, .. } => {
-                tracing::warn!("MOQT: GOAWAY received (timeout={timeout}ms)");
+            SessionEvent::GoawayReceived {
+                new_session_uri,
+                timeout,
+                on_request_stream,
+            } => {
+                // draft-ietf-moq-transport-22 §9.2 (GOAWAY): control stream の GOAWAY は
+                // セッション全体の移行、request stream の GOAWAY は当該 request の移行である。
+                // zakuro は 1 セッションに全トラックを載せているため per-request migration は
+                // 実装しておらず、セッション移行の対象は control stream の GOAWAY のみとする。
+                // URI はログ注入を避けるため Debug 表記で出力する
+                let uri = String::from_utf8_lossy(&new_session_uri);
+                match on_request_stream {
+                    None => {
+                        tracing::info!(
+                            "MOQT: GOAWAY received (timeout={timeout}ms) new_session_uri={uri:?}"
+                        );
+                        state.goaway = Some(GoawayInfo {
+                            new_session_uri,
+                            timeout_ms: timeout,
+                        });
+                    }
+                    Some(request_id) => {
+                        // 当該 request のみの移行は未対応。relay がこの request を reset すると
+                        // RequestTerminated として現れ、既存のリトライ経路に入る
+                        tracing::info!(
+                            "MOQT: GOAWAY received on a request stream (request_id={request_id}, timeout={timeout}ms) new_session_uri={uri:?}; per-request migration is not supported"
+                        );
+                    }
+                }
             }
             SessionEvent::RequestErrorReceived {
                 request_id,
@@ -1785,6 +1907,7 @@ mod tests {
             payload: vec![0u8; 1000].into(),
             subscribe_tracks: &[],
             verify_payload: false,
+            migrate_on_goaway: false,
         };
         let options = build_setup_options(&config);
         assert_eq!(options.path(), Some(b"/".as_slice()), "PATH が載っていない");
@@ -1925,5 +2048,16 @@ mod tests {
             publisher.deadline().is_none(),
             "Forward State 0 では送信予定が無いこと"
         );
+    }
+
+    /// GOAWAY 受信時の移行可否の判定
+    ///
+    /// GOAWAY を受信していても、移行が無効な場合とプロセス終了中は移行しない。
+    #[test]
+    fn should_migrate_requires_goaway_and_migration_enabled() {
+        assert!(should_migrate(true, true, false));
+        assert!(!should_migrate(false, true, false));
+        assert!(!should_migrate(true, false, false));
+        assert!(!should_migrate(true, true, true));
     }
 }

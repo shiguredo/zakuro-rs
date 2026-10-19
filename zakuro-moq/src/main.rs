@@ -176,7 +176,8 @@ async fn async_main() -> Result<()> {
 
 /// 1 つのインスタンスを実行する
 ///
-/// QUIC クライアントと名前解決はインスタンスで 1 回だけ行い、仮想クライアントで共有する。
+/// 初期接続先の QUIC クライアントと名前解決はインスタンスで 1 回だけ行い、仮想クライアントで
+/// 共有する。GOAWAY の New Session URI へ移行する場合の接続先は必要になった時点で構築する。
 async fn run_instance(
     instance_id: u32,
     common: CommonArgs,
@@ -189,12 +190,13 @@ async fn run_instance(
     let endpoint = moq_client::MoqEndpoint::parse(&instance.url)?;
     let track_names: Vec<String> = instance.tracks.iter().map(|t| t.name.clone()).collect();
     tracing::info!(
-        "Zakuro instance {} (MOQ): vcs={} vcs-hatch-rate={} duration={:?} repeat-interval={:?} namespace={} tracks=[{}] subscribe-tracks=[{}] verify-payload={}",
+        "Zakuro instance {} (MOQ): vcs={} vcs-hatch-rate={} duration={:?} repeat-interval={:?} reconnect-on-goaway={} namespace={} tracks=[{}] subscribe-tracks=[{}] verify-payload={}",
         instance_id,
         instance.vcs,
         instance.vcs_hatch_rate,
         instance.duration,
         instance.repeat_interval,
+        instance.reconnect_on_goaway,
         instance.namespace,
         track_names.join(", "),
         instance.subscribe_tracks.join(", "),
@@ -229,6 +231,7 @@ async fn run_instance(
         repeat_interval: instance.repeat_interval,
         max_retry: instance.max_retry,
         retry_interval: instance.retry_interval,
+        reconnect_on_goaway: instance.reconnect_on_goaway,
     };
     let context = moq_client::build_context(&config).await?;
 

@@ -99,6 +99,8 @@ pub(crate) struct InstanceArgs {
     pub(crate) max_retry: u32,
     /// リトライ間隔 (秒)
     pub(crate) retry_interval: f64,
+    /// GOAWAY を受信したときに New Session URI へ再接続する
+    pub(crate) reconnect_on_goaway: bool,
 }
 
 /// JSONC から取り出した argv 群
@@ -419,6 +421,16 @@ fn parse_instance_args(
         .present_and_then(|o| o.value().parse::<f64>())?
         .unwrap_or(60.0);
 
+    let reconnect_on_goaway: bool = noargs::opt("reconnect-on-goaway")
+        .doc("Reconnect to the New Session URI when a GOAWAY is received (true/false, default: true)")
+        .take(&mut args)
+        .present_and_then(|o| match o.value() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err("--reconnect-on-goaway は true または false で指定してください"),
+        })?
+        .unwrap_or(true);
+
     let help = args.finish()?.unwrap_or_default();
     let _ = warnings;
 
@@ -435,6 +447,7 @@ fn parse_instance_args(
         repeat_interval,
         max_retry,
         retry_interval,
+        reconnect_on_goaway,
     )?;
     Ok((instance, help))
 }
@@ -454,6 +467,7 @@ fn validate_instance_args(
     repeat_interval: Option<f64>,
     max_retry: u32,
     retry_interval: f64,
+    reconnect_on_goaway: bool,
 ) -> Result<InstanceArgs> {
     crate::moq_client::MoqEndpoint::parse(url)?;
 
@@ -530,6 +544,7 @@ fn validate_instance_args(
         repeat_interval,
         max_retry,
         retry_interval,
+        reconnect_on_goaway,
     })
 }
 
@@ -967,6 +982,7 @@ mod tests {
                 repeat_interval,
                 0,
                 retry_interval,
+                true,
             )
         };
 
@@ -1269,5 +1285,90 @@ mod tests {
         let (common, instance) = split_cli_argv(cli).expect("分割に成功すること");
         assert_eq!(common, vec!["--log-level", "warning"]);
         assert_eq!(instance, vec!["--namespace=test"]);
+    }
+
+    /// `--reconnect-on-goaway` は既定で有効になること
+    #[test]
+    fn reconnect_on_goaway_defaults_to_true() {
+        let (instance, _help) = parse_instance_args(
+            "zakuro-moq",
+            vec![
+                "--url".to_string(),
+                "moqt://relay.example.com:4433".to_string(),
+                "--tracks".to_string(),
+                "video".to_string(),
+            ],
+            &mut Vec::new(),
+        )
+        .expect("解釈に成功すること");
+        assert!(instance.reconnect_on_goaway);
+    }
+
+    /// `--reconnect-on-goaway false` で無効にできること
+    #[test]
+    fn reconnect_on_goaway_can_be_disabled() {
+        let (instance, _help) = parse_instance_args(
+            "zakuro-moq",
+            vec![
+                "--url".to_string(),
+                "moqt://relay.example.com:4433".to_string(),
+                "--reconnect-on-goaway".to_string(),
+                "false".to_string(),
+            ],
+            &mut Vec::new(),
+        )
+        .expect("解釈に成功すること");
+        assert!(!instance.reconnect_on_goaway);
+    }
+
+    /// `--reconnect-on-goaway=false` の `--key=value` 形式でも解釈できること
+    #[test]
+    fn reconnect_on_goaway_accepts_equal_form() {
+        let (instance, _help) = parse_instance_args(
+            "zakuro-moq",
+            vec![
+                "--url=moqt://relay.example.com:4433".to_string(),
+                "--reconnect-on-goaway=false".to_string(),
+            ],
+            &mut Vec::new(),
+        )
+        .expect("解釈に成功すること");
+        assert!(!instance.reconnect_on_goaway);
+    }
+
+    /// `--reconnect-on-goaway` に true / false 以外は指定できないこと
+    #[test]
+    fn reconnect_on_goaway_rejects_invalid_value() {
+        let result = parse_instance_args(
+            "zakuro-moq",
+            vec![
+                "--url".to_string(),
+                "moqt://relay.example.com:4433".to_string(),
+                "--reconnect-on-goaway".to_string(),
+                "yes".to_string(),
+            ],
+            &mut Vec::new(),
+        );
+        assert!(result.is_err());
+    }
+
+    /// JSONC の reconnect-on-goaway が値付きオプションとして展開されること
+    ///
+    /// 値なしフラグとして扱うと `true` / `false` が値として積まれず、起動時に
+    /// unexpected argument になる。
+    #[test]
+    fn jsonc_reconnect_on_goaway_is_value_option() {
+        let content = r#"{
+            "url": "moqt://relay.example.com:4433",
+            "subscribe-tracks": ["video"],
+            "reconnect-on-goaway": false
+        }"#;
+        let config = parse_jsonc_config(content).expect("パースに成功すること");
+        let argv = &config.instance_argvs[0];
+        let pos = argv
+            .iter()
+            .position(|s| s == "--reconnect-on-goaway")
+            .expect("--reconnect-on-goaway があること");
+        assert_eq!(argv[pos + 1], "false");
     }
 }

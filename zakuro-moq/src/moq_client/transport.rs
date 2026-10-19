@@ -2,6 +2,7 @@
 //!
 //! MOQT の接続先 URL の解釈、名前解決、TLS 設定、s2n-quic のクライアント構築を担当する。
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -72,8 +73,26 @@ impl MoqEndpoint {
     ///
     /// スキームが `moqt` でない場合、ホスト部が空の場合、ポートが数値でない場合はエラーになる。
     pub(crate) fn parse(url: &str) -> Result<Self> {
+        Self::parse_with_name(url, "--url")
+    }
+
+    /// GOAWAY の New Session URI を解釈する
+    ///
+    /// CLI 引数ではない URL を解釈するため、エラーメッセージに `--url` を含めない。
+    ///
+    /// # Errors
+    ///
+    /// スキームが `moqt` でない場合、ホスト部が空の場合、ポートが数値でない場合はエラーになる。
+    pub(crate) fn parse_new_session_uri(url: &str) -> Result<Self> {
+        Self::parse_with_name(url, "GOAWAY の New Session URI")
+    }
+
+    /// URL を解釈する
+    ///
+    /// `name` はエラーメッセージに載せる呼び名である (CLI 引数か New Session URI か)。
+    fn parse_with_name(url: &str, name: &str) -> Result<Self> {
         let rest = url.strip_prefix("moqt://").ok_or_else(|| {
-            ErrorMessage::new(format!("--url は moqt:// で始まる必要があります: {url}"))
+            ErrorMessage::new(format!("{name} は moqt:// で始まる必要があります: {url:?}"))
         })?;
 
         // フラグメントは MOQT の接続に使わないため取り除く
@@ -94,14 +113,14 @@ impl MoqEndpoint {
         };
         if authority.is_empty() {
             return Err(
-                ErrorMessage::new(format!("--url にホストが指定されていません: {url}")).into(),
+                ErrorMessage::new(format!("{name} にホストが指定されていません: {url:?}")).into(),
             );
         }
 
-        let (host, port) = split_host_port(authority)?;
+        let (host, port) = split_host_port(authority, name)?;
         if host.is_empty() {
             return Err(
-                ErrorMessage::new(format!("--url にホストが指定されていません: {url}")).into(),
+                ErrorMessage::new(format!("{name} にホストが指定されていません: {url:?}")).into(),
             );
         }
 
@@ -117,11 +136,12 @@ impl MoqEndpoint {
 /// authority からホスト部とポート部を分離する
 ///
 /// IPv6 リテラルはブラケットの内側をホスト部とする。ブラケットが無い場合、複数の `:` を
-/// 含む authority はポートの区切りと区別できないためエラーにする。
-fn split_host_port(authority: &str) -> Result<(String, Option<u16>)> {
+/// 含む authority はポートの区切りと区別できないためエラーにする。`name` はエラーメッセージに
+/// 載せる呼び名である。
+fn split_host_port(authority: &str, name: &str) -> Result<(String, Option<u16>)> {
     if let Some(rest) = authority.strip_prefix('[') {
         let end = rest.find(']').ok_or_else(|| {
-            ErrorMessage::new(format!("--url の IPv6 アドレスが不正です: {authority}"))
+            ErrorMessage::new(format!("{name} の IPv6 アドレスが不正です: {authority:?}"))
         })?;
         let host = &rest[..end];
         let after = &rest[end + 1..];
@@ -129,9 +149,9 @@ fn split_host_port(authority: &str) -> Result<(String, Option<u16>)> {
             None
         } else {
             let value = after.strip_prefix(':').ok_or_else(|| {
-                ErrorMessage::new(format!("--url のポート指定が不正です: {authority}"))
+                ErrorMessage::new(format!("{name} のポート指定が不正です: {authority:?}"))
             })?;
-            Some(parse_port(value, authority)?)
+            Some(parse_port(value, authority, name)?)
         };
         return Ok((host.to_string(), port));
     }
@@ -140,21 +160,21 @@ fn split_host_port(authority: &str) -> Result<(String, Option<u16>)> {
         Some((host, port)) => {
             if host.contains(':') {
                 return Err(ErrorMessage::new(format!(
-                    "--url の IPv6 アドレスはブラケットで囲む必要があります: {authority}"
+                    "{name} の IPv6 アドレスはブラケットで囲む必要があります: {authority:?}"
                 ))
                 .into());
             }
-            Ok((host.to_string(), Some(parse_port(port, authority)?)))
+            Ok((host.to_string(), Some(parse_port(port, authority, name)?)))
         }
         None => Ok((authority.to_string(), None)),
     }
 }
 
 /// ポート文字列を数値に変換する
-fn parse_port(value: &str, authority: &str) -> Result<u16> {
-    value
-        .parse::<u16>()
-        .map_err(|_| ErrorMessage::new(format!("--url のポート指定が不正です: {authority}")).into())
+fn parse_port(value: &str, authority: &str, name: &str) -> Result<u16> {
+    value.parse::<u16>().map_err(|_| {
+        ErrorMessage::new(format!("{name} のポート指定が不正です: {authority:?}")).into()
+    })
 }
 
 /// MOQ relay へ接続するときの TLS 設定
@@ -168,58 +188,29 @@ pub(crate) struct MoqTlsOptions {
     pub(crate) ca_cert: Option<String>,
 }
 
-/// インスタンス内の仮想クライアントで共有する接続コンテキスト
+/// 接続先 1 件分の状態
 ///
-/// s2n-quic の `Client` は 1 つの UDP ソケットとエンドポイントタスクを表す。仮想クライアントごとに
-/// 作るとソケットとタスクが仮想クライアント数だけ増えるため、インスタンスで 1 つ作って clone する。
-#[derive(Clone)]
-pub(crate) struct MoqClientContext {
+/// s2n-quic の `Client` は UDP ソケットとエンドポイントタスクを表す。UDP ソケットは異なる
+/// アドレスファミリ宛に送信できないため、名前解決の結果に含まれるファミリごとに
+/// クライアントを作る。名前解決結果と SNI は接続先ごとに異なるため、接続先ごとに保持する。
+struct EndpointState {
     /// アドレスファミリごとの s2n-quic クライアント (bool は IPv6 かどうか)
-    ///
-    /// UDP ソケットは異なるアドレスファミリ宛に送信できないため、名前解決の結果に含まれる
-    /// ファミリごとにクライアント (ソケット) を作る。通常は片方だけになる。
     clients: Vec<(bool, Client)>,
+    /// TLS の SNI に使うサーバー名
     server_name: String,
+    /// 名前解決の結果
     addrs: Vec<SocketAddr>,
 }
 
-impl MoqClientContext {
-    /// 名前解決と s2n-quic クライアントの構築を行う
-    ///
-    /// # Errors
-    ///
-    /// 名前解決に失敗した場合、TLS 設定が不正な場合、ソケットのバインドに失敗した場合は
-    /// エラーになる。
-    pub(crate) async fn new(endpoint: &MoqEndpoint, tls_options: &MoqTlsOptions) -> Result<Self> {
-        let addrs = resolve(&endpoint.host, endpoint.port).await?;
-        if addrs.is_empty() {
-            return Err(ErrorMessage::new("MOQ relay のアドレスが解決できませんでした").into());
-        }
-
-        let tls = build_tls(tls_options)?;
-        let mut clients = Vec::new();
-        for is_ipv6 in [false, true] {
-            if !addrs.iter().any(|addr| addr.is_ipv6() == is_ipv6) {
-                continue;
-            }
-            clients.push((is_ipv6, build_client(&tls, is_ipv6)?));
-        }
-
-        Ok(Self {
-            clients,
-            server_name: endpoint.host.clone(),
-            addrs,
-        })
-    }
-
-    /// 仮想クライアント 1 本分の QUIC 接続を確立する
+impl EndpointState {
+    /// この接続先へ QUIC 接続を確立する
     ///
     /// 名前解決で複数のアドレスが得られた場合は順に試す。全て失敗した場合は最後のエラーを返す。
     ///
     /// # Errors
     ///
     /// 全ての接続先への接続に失敗した場合はエラーになる。
-    pub(crate) async fn connect(&self) -> Result<Connection> {
+    async fn connect(&self) -> Result<Connection> {
         let mut last_error: Option<ErrorMessage> = None;
         let last_index = self.addrs.len().saturating_sub(1);
         for (index, addr) in self.addrs.iter().enumerate() {
@@ -256,6 +247,131 @@ impl MoqClientContext {
             .unwrap_or_else(|| ErrorMessage::new("MOQ relay への接続先がありません"))
             .into())
     }
+}
+
+/// 接続先キャッシュのキー
+///
+/// 名前解決・SNI・UDP ソケットは host と port だけで決まる。authority / path は SETUP に
+/// 載せる値であり `SessionConfig` 側で扱うため、path や query だけが異なる New Session URI
+/// でソケットを作り直さないようキーに含めない。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EndpointKey {
+    /// TLS の SNI と名前解決に使うホスト部
+    host: String,
+    /// 接続先ポート
+    port: u16,
+}
+
+impl EndpointKey {
+    /// 接続先からキーを作る
+    ///
+    /// ホスト名の大文字小文字は DNS では区別されないため、キーでは小文字に正規化する。
+    /// IPv6 リテラルの表記揺れまでは正規化しない (同じ接続先に余分なソケットを作り得るが、
+    /// 誤って別の接続先を共有することはない)。
+    fn new(endpoint: &MoqEndpoint) -> Self {
+        Self {
+            host: endpoint.host.to_ascii_lowercase(),
+            port: endpoint.port,
+        }
+    }
+}
+
+/// インスタンス内の仮想クライアントで共有する接続コンテキスト
+///
+/// s2n-quic の `Client` は 1 つの UDP ソケットとエンドポイントタスクを表す。仮想クライアントごとに
+/// 作るとソケットとタスクが仮想クライアント数だけ増えるため、インスタンスで 1 つ作って clone する。
+/// GOAWAY の New Session URI で移行先が変わると接続先が増えるため、接続先ごとの状態を
+/// キャッシュして仮想クライアント間で共有する。
+#[derive(Clone)]
+pub(crate) struct MoqClientContext {
+    /// TLS クライアント (移行先が増えても作り直さない)
+    tls: s2n_rustls::Client,
+    /// 接続先ごとの状態 (GOAWAY の New Session URI で増える)
+    ///
+    /// `tokio::sync::Mutex` を使う理由: 複数の仮想クライアントが同じ移行先へ同時に接続する
+    /// ため、キャッシュへの読み書きを直列化する。名前解決・接続処理などの await を伴う処理は
+    /// ロックを持たずに行う (ロックを await で保持すると、全仮想クライアントの接続が直列化
+    /// される)。
+    endpoints: Arc<tokio::sync::Mutex<HashMap<EndpointKey, Arc<EndpointState>>>>,
+}
+
+impl MoqClientContext {
+    /// 初期接続先の名前解決と s2n-quic クライアントの構築を行う
+    ///
+    /// # Errors
+    ///
+    /// 名前解決に失敗した場合、TLS 設定が不正な場合、ソケットのバインドに失敗した場合は
+    /// エラーになる。
+    pub(crate) async fn new(endpoint: &MoqEndpoint, tls_options: &MoqTlsOptions) -> Result<Self> {
+        let tls = build_tls(tls_options)?;
+        let state = build_endpoint_state(&tls, endpoint).await?;
+        let mut endpoints = HashMap::new();
+        endpoints.insert(EndpointKey::new(endpoint), Arc::new(state));
+        Ok(Self {
+            tls,
+            endpoints: Arc::new(tokio::sync::Mutex::new(endpoints)),
+        })
+    }
+
+    /// 指定した接続先へ QUIC 接続を確立する
+    ///
+    /// 初めての接続先の場合は名前解決とクライアントの構築を行う。同じ接続先に対しては
+    /// インスタンス内で状態を共有する。
+    ///
+    /// # Errors
+    ///
+    /// 名前解決に失敗した場合、TLS 設定が不正な場合、ソケットのバインドに失敗した場合、
+    /// 全ての接続先への接続に失敗した場合はエラーになる。
+    pub(crate) async fn connect_to(&self, endpoint: &MoqEndpoint) -> Result<Connection> {
+        let key = EndpointKey::new(endpoint);
+        // キャッシュ済みの場合は名前解決もソケット作成もしない。
+        // MutexGuard を if let の scrutinee に置くと guard が then ブロックの終わりまで
+        // 生存し、接続処理の await 中もロックを保持してしまうため、ここで guard を落とす
+        let cached = {
+            let endpoints = self.endpoints.lock().await;
+            endpoints.get(&key).cloned()
+        };
+        if let Some(state) = cached {
+            return state.connect().await;
+        }
+
+        // 初めての接続先はロックを保持せずに構築する。同じ接続先へ複数の仮想クライアントが
+        // 同時に接続した場合は、先に登録された状態を使い、余分に作った状態は drop する
+        // (UDP ソケットも閉じる)。名前解決の失敗でロック待ちが連鎖しないことを優先する
+        let built = Arc::new(build_endpoint_state(&self.tls, endpoint).await?);
+        let state = self
+            .endpoints
+            .lock()
+            .await
+            .entry(key)
+            .or_insert_with(|| Arc::clone(&built))
+            .clone();
+        state.connect().await
+    }
+}
+
+/// 接続先の名前解決と TLS / UDP クライアントの構築を行う
+///
+/// # Errors
+///
+/// 名前解決に失敗した場合、またはソケットのバインドに失敗した場合はエラーになる。
+async fn build_endpoint_state(
+    tls: &s2n_rustls::Client,
+    endpoint: &MoqEndpoint,
+) -> Result<EndpointState> {
+    let addrs = resolve(&endpoint.host, endpoint.port).await?;
+    let mut clients = Vec::new();
+    for is_ipv6 in [false, true] {
+        if !addrs.iter().any(|addr| addr.is_ipv6() == is_ipv6) {
+            continue;
+        }
+        clients.push((is_ipv6, build_client(tls, is_ipv6)?));
+    }
+    Ok(EndpointState {
+        clients,
+        server_name: endpoint.host.clone(),
+        addrs,
+    })
 }
 
 /// ホスト名とポートを解決する
@@ -566,5 +682,56 @@ mod tests {
         let endpoint =
             MoqEndpoint::parse("moqt://relay.example.com:0/").expect("解釈に成功すること");
         assert_eq!(endpoint.port, 0);
+    }
+
+    /// 同じ host / port で path や query だけが違う接続先は同じキャッシュキーになること
+    ///
+    /// New Session URI が path / query だけ変わる場合に UDP ソケットを作り直さない。
+    #[test]
+    fn endpoint_key_ignores_path_and_query() {
+        let a =
+            MoqEndpoint::parse("moqt://relay.example.com:4433/live").expect("解釈に成功すること");
+        let b = MoqEndpoint::parse("moqt://relay.example.com:4433/other?token=abc")
+            .expect("解釈に成功すること");
+        assert_eq!(EndpointKey::new(&a), EndpointKey::new(&b));
+    }
+
+    /// host または port が違う接続先は別のキャッシュキーになること
+    #[test]
+    fn endpoint_key_separates_host_and_port() {
+        let base =
+            MoqEndpoint::parse("moqt://relay.example.com:4433/live").expect("解釈に成功すること");
+        let other_host =
+            MoqEndpoint::parse("moqt://relay2.example.com:4433/live").expect("解釈に成功すること");
+        let other_port =
+            MoqEndpoint::parse("moqt://relay.example.com:4443/live").expect("解釈に成功すること");
+        assert_ne!(EndpointKey::new(&base), EndpointKey::new(&other_host));
+        assert_ne!(EndpointKey::new(&base), EndpointKey::new(&other_port));
+    }
+
+    /// host の大文字小文字はキーで正規化されること
+    #[test]
+    fn endpoint_key_normalizes_host_case() {
+        let lower =
+            MoqEndpoint::parse("moqt://relay.example.com:4433/").expect("解釈に成功すること");
+        let upper =
+            MoqEndpoint::parse("moqt://RELAY.EXAMPLE.COM:4433/").expect("解釈に成功すること");
+        assert_eq!(EndpointKey::new(&lower), EndpointKey::new(&upper));
+    }
+
+    /// New Session URI のエラーが CLI 引数の `--url` に言及しないこと
+    #[test]
+    fn parse_new_session_uri_reports_its_own_name() {
+        let error = MoqEndpoint::parse_new_session_uri("https://relay.example.com")
+            .expect_err("エラーになること");
+        let message = format!("{error}");
+        assert!(
+            message.contains("New Session URI"),
+            "New Session URI のエラーだと分かること: {message}"
+        );
+        assert!(
+            !message.contains("--url"),
+            "CLI 引数の --url に言及しないこと: {message}"
+        );
     }
 }

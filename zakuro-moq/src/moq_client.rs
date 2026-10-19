@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::error::Result;
+use crate::error::{ErrorMessage, Result};
 use zakuro_core::stats::StatsEvent;
 
 pub(crate) use session::ReceiveCounters;
@@ -73,6 +73,11 @@ pub(crate) struct MoqClientConfig {
     pub(crate) max_retry: u32,
     /// リトライ間隔 (秒)
     pub(crate) retry_interval: f64,
+    /// GOAWAY を受信したときに New Session URI へ再接続する
+    ///
+    /// false のときは従来どおり peer がセッションを閉じるまで publish を続け、
+    /// その後は接続失敗と同じリトライ経路で処理する。
+    pub(crate) reconnect_on_goaway: bool,
 }
 
 /// 仮想クライアント 1 本を実行する
@@ -110,25 +115,31 @@ pub(crate) async fn run(
         .iter()
         .map(|name| resolve_subscribe_track_name(name, instance_id, vc_id))
         .collect();
-    let session_config = session::SessionConfig {
-        namespace: &config.namespace,
-        tracks: &tracks,
-        authority: &config.endpoint.authority,
-        path: &config.endpoint.path,
-        payload: std::sync::Arc::clone(&config.payload),
-        subscribe_tracks: &subscribe_tracks,
-        verify_payload: config.verify_payload,
-    };
+    // GOAWAY の New Session URI で移行すると接続先が変わるため、現在の接続先を保持する
+    let mut current_endpoint = config.endpoint.clone();
+    // 移行した回数 (ログ用)
+    let mut migration_count: u64 = 0;
 
     let mut retry_count: u32 = 0;
 
     loop {
+        // 接続先は GOAWAY の移行で変わるため、セッション設定を接続先ごとに作り直す
+        let session_config = session::SessionConfig {
+            namespace: &config.namespace,
+            tracks: &tracks,
+            authority: &current_endpoint.authority,
+            path: &current_endpoint.path,
+            payload: std::sync::Arc::clone(&config.payload),
+            subscribe_tracks: &subscribe_tracks,
+            verify_payload: config.verify_payload,
+            migrate_on_goaway: config.reconnect_on_goaway,
+        };
         let connection_token = token.child_token();
 
         let connection = tokio::select! {
             biased;
             _ = token.cancelled() => break,
-            result = context.connect() => match result {
+            result = context.connect_to(&current_endpoint) => match result {
                 Ok(connection) => connection,
                 Err(e) => {
                     tracing::warn!("[i{}/vc-{}] MOQ connect failed: {}", instance_id, vc_id, e);
@@ -173,6 +184,8 @@ pub(crate) async fn run(
         // session future が完了したかを追跡する。async fn の future は完了後に再度 poll
         // すると panic するため、終了処理では未完了のときだけ待つ
         let mut session_finished = false;
+        // セッションが GOAWAY による移行で終了した場合は移行先を受け取る
+        let mut session_end: Option<session::SessionEnd> = None;
         let established = tokio::select! {
             biased;
             _ = token.cancelled() => false,
@@ -180,7 +193,10 @@ pub(crate) async fn run(
             result = &mut session_future => {
                 session_finished = true;
                 match result {
-                    Ok(()) => tracing::info!("[i{}/vc-{}] MOQ session finished", instance_id, vc_id),
+                    Ok(end) => {
+                        session_end = Some(end);
+                        tracing::info!("[i{}/vc-{}] MOQ session finished", instance_id, vc_id);
+                    }
                     Err(e) => tracing::warn!("[i{}/vc-{}] MOQ session failed: {}", instance_id, vc_id, e),
                 }
                 false
@@ -205,7 +221,10 @@ pub(crate) async fn run(
                 result = &mut session_future => {
                     session_finished = true;
                     match result {
-                        Ok(()) => tracing::info!("[i{}/vc-{}] MOQ session finished", instance_id, vc_id),
+                        Ok(end) => {
+                            session_end = Some(end);
+                            tracing::info!("[i{}/vc-{}] MOQ session finished", instance_id, vc_id);
+                        }
                         Err(e) => tracing::warn!("[i{}/vc-{}] MOQ session failed: {}", instance_id, vc_id, e),
                     }
                     false
@@ -228,6 +247,41 @@ pub(crate) async fn run(
         if token.is_cancelled() {
             tracing::info!("[i{}/vc-{}] shutting down", instance_id, vc_id);
             break;
+        }
+
+        // GOAWAY による移行でセッションが終了した場合は、計画的な切断として扱う。
+        // 接続失敗ではないため retry_count を消費せず、retry-interval も待たずに移行する
+        if let Some(session::SessionEnd::Migrated {
+            new_session_uri,
+            timeout_ms,
+        }) = session_end
+        {
+            match resolve_next_endpoint(&current_endpoint, &new_session_uri) {
+                Ok(next_endpoint) => {
+                    migration_count += 1;
+                    tracing::info!(
+                        "[i{}/vc-{}] MOQT session migration: {:?} -> {:?} (timeout={}ms, migrations={})",
+                        instance_id,
+                        vc_id,
+                        endpoint_label(&current_endpoint),
+                        endpoint_label(&next_endpoint),
+                        timeout_ms,
+                        migration_count,
+                    );
+                    current_endpoint = next_endpoint;
+                    retry_count = 0;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[i{}/vc-{}] MOQT session migration failed: {:?}",
+                        instance_id,
+                        vc_id,
+                        e,
+                    );
+                    break;
+                }
+            }
         }
 
         if disconnected_by_duration {
@@ -289,6 +343,42 @@ pub(crate) async fn run(
         .await;
 }
 
+/// GOAWAY の New Session URI から移行先の接続先を決定する
+///
+/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): New Session URI が空の場合は現在の URI を
+/// 再利用し、非空の場合はクライアントはその URI を新セッションに使わなければならない
+/// (MUST)。URI の形式不正時の扱いは仕様に規定が無い。黙って現在の URI へフォールバックすると
+/// relay の誤りを隠したまま別の接続先へ繋ぐ可能性があるため、エラーにして停止する。
+///
+/// # Errors
+///
+/// New Session URI が UTF-8 でない場合、または `moqt://` の URI として解釈できない場合は
+/// エラーになる。
+fn resolve_next_endpoint(current: &MoqEndpoint, new_session_uri: &[u8]) -> Result<MoqEndpoint> {
+    if new_session_uri.is_empty() {
+        return Ok(current.clone());
+    }
+    let uri = std::str::from_utf8(new_session_uri).map_err(|e| {
+        ErrorMessage::new(format!(
+            "GOAWAY の New Session URI が UTF-8 ではありません: {e}"
+        ))
+    })?;
+    MoqEndpoint::parse_new_session_uri(uri)
+}
+
+/// ログ用に接続先を `moqt://` URI の形で表す
+///
+/// New Session URI は relay 由来であり、query に認可情報を含み得るため伏せる。
+/// ログ注入を避けるため、呼び出し側で Debug 表記 (エスケープ) して出力する。
+fn endpoint_label(endpoint: &MoqEndpoint) -> String {
+    let path = endpoint
+        .path
+        .split('?')
+        .next()
+        .unwrap_or(endpoint.path.as_str());
+    format!("moqt://{}{}", endpoint.authority, path)
+}
+
 /// `--duration` 経過を待つ future
 ///
 /// 未指定または 0 以下の場合は完了しない (`pending`)。
@@ -301,8 +391,9 @@ async fn duration_timer(duration: Option<f64>) {
 
 /// MOQ relay へ接続するためのコンテキストを構築する
 ///
-/// 名前解決と s2n-quic クライアントの構築はインスタンスで 1 回だけ行い、仮想クライアントで
-/// 共有する。
+/// 初期接続先の名前解決と s2n-quic クライアントの構築はインスタンスで 1 回だけ行い、
+/// 仮想クライアントで共有する。GOAWAY の New Session URI へ移行する場合の接続先は、
+/// 必要になった時点で接続先ごとに構築する。
 ///
 /// # Errors
 ///
@@ -320,7 +411,7 @@ pub(crate) async fn build_context(config: &MoqClientConfig) -> Result<MoqClientC
 /// future を完了後に poll すると panic するため、この判定は必須である。
 async fn wait_for_session_shutdown<F>(session_future: &mut F, finished: bool)
 where
-    F: std::future::Future<Output = Result<()>> + Unpin,
+    F: std::future::Future<Output = Result<session::SessionEnd>> + Unpin,
 {
     if finished {
         return;
@@ -338,7 +429,7 @@ mod tests {
     /// `` `async fn` resumed after completion `` で panic する。
     #[tokio::test]
     async fn wait_for_session_shutdown_skips_finished_future() {
-        let mut future = Box::pin(async { Ok(()) });
+        let mut future = Box::pin(async { Ok(session::SessionEnd::Closed) });
         let _ = (&mut future).await;
         wait_for_session_shutdown(&mut future, true).await;
     }
@@ -368,5 +459,56 @@ mod tests {
         );
         // 片方だけの置換もできる
         assert_eq!(resolve_subscribe_track_name("video-{vc}", 2, 5), "video-5");
+    }
+
+    /// New Session URI が空の場合は現在の接続先を再利用すること
+    ///
+    /// draft-ietf-moq-transport-22 §9.2 (GOAWAY): "If the URI is zero bytes long, the
+    /// current URI is reused instead."
+    #[test]
+    fn resolve_next_endpoint_reuses_current_uri_when_empty() {
+        let current = MoqEndpoint::parse("moqt://relay.example.com:4433/live")
+            .expect("接続先の解釈に成功すること");
+        let next = resolve_next_endpoint(&current, &[]).expect("空の URI を解釈できること");
+        assert_eq!(next, current);
+    }
+
+    /// New Session URI の host / port / path を解釈すること
+    #[test]
+    fn resolve_next_endpoint_parses_new_uri() {
+        let current = MoqEndpoint::parse("moqt://relay.example.com:4433/live")
+            .expect("接続先の解釈に成功すること");
+        let next = resolve_next_endpoint(&current, b"moqt://relay2.example.com:4443/live2")
+            .expect("New Session URI を解釈できること");
+        assert_eq!(next.host, "relay2.example.com");
+        assert_eq!(next.port, 4443);
+        assert_eq!(next.authority, "relay2.example.com:4443");
+        assert_eq!(next.path, "/live2");
+    }
+
+    /// IPv6 リテラルの New Session URI を解釈すること
+    #[test]
+    fn resolve_next_endpoint_parses_ipv6_new_uri() {
+        let current = MoqEndpoint::parse("moqt://relay.example.com:4433")
+            .expect("接続先の解釈に成功すること");
+        let next = resolve_next_endpoint(&current, b"moqt://[2001:db8::1]:4443/live")
+            .expect("New Session URI を解釈できること");
+        assert_eq!(next.host, "2001:db8::1");
+        assert_eq!(next.port, 4443);
+        assert_eq!(next.authority, "[2001:db8::1]:4443");
+        assert_eq!(next.path, "/live");
+    }
+
+    /// New Session URI が解釈できない場合はエラーになること
+    ///
+    /// 現在の URI へフォールバックすると relay のプロトコル違反を隠すため、エラーにする。
+    #[test]
+    fn resolve_next_endpoint_rejects_invalid_uri() {
+        let current = MoqEndpoint::parse("moqt://relay.example.com:4433")
+            .expect("接続先の解釈に成功すること");
+        // moqt 以外のスキームは受け付けない
+        assert!(resolve_next_endpoint(&current, b"https://relay.example.com").is_err());
+        // UTF-8 ではないバイト列は受け付けない
+        assert!(resolve_next_endpoint(&current, &[0xff]).is_err());
     }
 }
