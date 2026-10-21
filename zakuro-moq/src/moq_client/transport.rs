@@ -1,13 +1,15 @@
-//! MOQ relay への QUIC 接続 (s2n-quic + rustls)
+//! MOQ relay への接続 (QUIC 直接接続 / QMux)
 //!
-//! MOQT の接続先 URL の解釈、名前解決、TLS 設定、s2n-quic のクライアント構築を担当する。
+//! MOQT の接続先 URL の解釈、名前解決、TLS 設定、経路ごとのクライアント構築を担当する。
+//! QUIC 直接接続は s2n-quic を、QMux は TLS over TCP + tokio-qmux を使う。どちらの経路も
+//! `session.rs` からは [`MoqConnection`] として同じように扱える。
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustls::pki_types::pem::PemObject;
 use s2n_quic::Client;
 use s2n_quic::client::Connect;
 use s2n_quic::connection::Connection;
@@ -15,12 +17,55 @@ use s2n_quic::provider::tls::rustls as s2n_rustls;
 
 use crate::error::{ErrorMessage, Result};
 
-/// QUIC 直接接続の ALPN プロトコル識別子
+use super::qmux;
+use super::stream::{MoqBidiAcceptor, MoqConnectionHandle, MoqRecvAcceptor};
+
+/// 下位トランスポート種別
+///
+/// QUIC 直接接続と QMux (draft-ietf-quic-qmux-02) のどちらで relay へ接続するかを表す。
+/// URL はどちらも `moqt://` で、経路は CLI の `--transport` で選ぶ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum MoqTransport {
+    /// QUIC 直接接続 (s2n-quic)
+    #[default]
+    Quic,
+    /// QMux (TLS over TCP + tokio-qmux)
+    Qmux,
+}
+
+impl MoqTransport {
+    /// CLI と JSONC の値から経路を解釈する
+    ///
+    /// # Errors
+    ///
+    /// `quic` と `qmux` 以外の値はエラーになる。
+    pub(crate) fn parse(value: &str) -> Result<Self> {
+        match value {
+            "quic" => Ok(Self::Quic),
+            "qmux" => Ok(Self::Qmux),
+            _ => Err(ErrorMessage::new(format!(
+                "--transport は quic または qmux で指定してください: {value:?}"
+            ))
+            .into()),
+        }
+    }
+
+    /// CLI とログに載せる名前を返す
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Quic => "quic",
+            Self::Qmux => "qmux",
+        }
+    }
+}
+
+/// MOQT の ALPN プロトコル識別子
 ///
 /// draft-ietf-moq-transport-22 §6.2 (Session establishment) が定める MOQT の
-/// プロトコル識別子。WebTransport 経路は `h3` / `h2` を使うが、zakuro は QUIC 直接接続のみ使う。
+/// プロトコル識別子。zakuro は QUIC 直接接続と QMux の両方でこの値を使う。QMux は
+/// individual draft Section 3.2 が native QUIC と同じ識別子を使うと定めているためである。
 /// この値は draft 由来であり将来の draft 改訂で変わる可能性がある。
-const ALPN: &[u8] = b"moqt-22";
+pub(crate) const ALPN: &[u8] = b"moqt-22";
 
 /// MOQT URI でポートを省略したときに使う既定ポート
 ///
@@ -210,7 +255,7 @@ impl EndpointState {
     /// # Errors
     ///
     /// 全ての接続先への接続に失敗した場合はエラーになる。
-    async fn connect(&self) -> Result<Connection> {
+    async fn connect_quic(&self) -> Result<Connection> {
         let mut last_error: Option<ErrorMessage> = None;
         let last_index = self.addrs.len().saturating_sub(1);
         for (index, addr) in self.addrs.iter().enumerate() {
@@ -239,6 +284,49 @@ impl EndpointState {
                 Err(_) => {
                     last_error = Some(ErrorMessage::new(format!(
                         "MOQ relay への接続がタイムアウトしました ({addr})"
+                    )));
+                }
+            }
+        }
+        Err(last_error
+            .unwrap_or_else(|| ErrorMessage::new("MOQ relay への接続先がありません"))
+            .into())
+    }
+
+    /// この接続先へ QMux 接続 (TLS over TCP) を確立する
+    ///
+    /// QUIC 直接接続と同様に、名前解決で複数のアドレスが得られた場合は順に試し、候補ごとに
+    /// タイムアウトで打ち切る。QMux は仮想クライアントごとに独立した TCP 接続を張るため、
+    /// UDP ソケットのようにインスタンス内で共有できない。
+    ///
+    /// # Errors
+    ///
+    /// 全ての接続先への TCP + TLS 接続に失敗した場合はエラーになる。
+    async fn connect_qmux(
+        &self,
+        tls: &Arc<rustls::ClientConfig>,
+    ) -> Result<Arc<tokio_qmux::Connection>> {
+        let mut last_error: Option<ErrorMessage> = None;
+        let last_index = self.addrs.len().saturating_sub(1);
+        for (index, addr) in self.addrs.iter().enumerate() {
+            let timeout = if index == last_index {
+                CONNECT_FINAL_ATTEMPT_TIMEOUT
+            } else {
+                CONNECT_ATTEMPT_TIMEOUT
+            };
+            // TCP 接続と TLS ハンドシェイクをまとめて打ち切る。QMux の接続生成はローカル処理
+            // のため、ここには含めない
+            let connect = qmux::connect(*addr, &self.server_name, Arc::clone(tls));
+            match tokio::time::timeout(timeout, connect).await {
+                Ok(Ok(connection)) => return Ok(connection),
+                Ok(Err(e)) => {
+                    last_error = Some(ErrorMessage::new(format!(
+                        "MOQ relay への QMux 接続に失敗しました ({addr}): {e}"
+                    )));
+                }
+                Err(_) => {
+                    last_error = Some(ErrorMessage::new(format!(
+                        "MOQ relay への QMux 接続がタイムアウトしました ({addr})"
                     )));
                 }
             }
@@ -278,14 +366,22 @@ impl EndpointKey {
 
 /// インスタンス内の仮想クライアントで共有する接続コンテキスト
 ///
-/// s2n-quic の `Client` は 1 つの UDP ソケットとエンドポイントタスクを表す。仮想クライアントごとに
-/// 作るとソケットとタスクが仮想クライアント数だけ増えるため、インスタンスで 1 つ作って clone する。
+/// QUIC 直接接続では s2n-quic の `Client` (UDP ソケットとエンドポイントタスク) を接続先ごとに
+/// 共有する。仮想クライアントごとに作るとソケットとタスクが仮想クライアント数だけ増えるため、
+/// インスタンスで 1 つ作って clone する。QMux では TCP + TLS 接続を仮想クライアントごとに
+/// 張るため、ここで共有するのは TLS 設定と接続先ごとの名前解決結果だけである。
 /// GOAWAY の New Session URI で移行先が変わると接続先が増えるため、接続先ごとの状態を
 /// キャッシュして仮想クライアント間で共有する。
 #[derive(Clone)]
 pub(crate) struct MoqClientContext {
-    /// TLS クライアント (移行先が増えても作り直さない)
-    tls: s2n_rustls::Client,
+    /// 下位トランスポート種別 (インスタンス内で固定)
+    transport: MoqTransport,
+    /// QUIC 直接接続の TLS クライアント (移行先が増えても作り直さない)
+    quic_tls: Option<s2n_rustls::Client>,
+    /// QMux の TLS 設定 (TCP + TLS のハンドシェイクに使う)
+    ///
+    /// rustls の `ClientConfig` は接続ごとに clone せず `Arc` で共有できる。
+    qmux_tls: Option<Arc<rustls::ClientConfig>>,
     /// 接続先ごとの状態 (GOAWAY の New Session URI で増える)
     ///
     /// `tokio::sync::Mutex` を使う理由: 複数の仮想クライアントが同じ移行先へ同時に接続する
@@ -296,24 +392,33 @@ pub(crate) struct MoqClientContext {
 }
 
 impl MoqClientContext {
-    /// 初期接続先の名前解決と s2n-quic クライアントの構築を行う
+    /// 初期接続先の名前解決と経路ごとのクライアント構築を行う
     ///
     /// # Errors
     ///
     /// 名前解決に失敗した場合、TLS 設定が不正な場合、ソケットのバインドに失敗した場合は
     /// エラーになる。
-    pub(crate) async fn new(endpoint: &MoqEndpoint, tls_options: &MoqTlsOptions) -> Result<Self> {
-        let tls = build_tls(tls_options)?;
-        let state = build_endpoint_state(&tls, endpoint).await?;
+    pub(crate) async fn new(
+        endpoint: &MoqEndpoint,
+        tls_options: &MoqTlsOptions,
+        transport: MoqTransport,
+    ) -> Result<Self> {
+        let (quic_tls, qmux_tls) = match transport {
+            MoqTransport::Quic => (Some(build_quic_tls(tls_options)?), None),
+            MoqTransport::Qmux => (None, Some(build_qmux_tls(tls_options)?)),
+        };
+        let state = build_endpoint_state(endpoint, quic_tls.as_ref()).await?;
         let mut endpoints = HashMap::new();
         endpoints.insert(EndpointKey::new(endpoint), Arc::new(state));
         Ok(Self {
-            tls,
+            transport,
+            quic_tls,
+            qmux_tls,
             endpoints: Arc::new(tokio::sync::Mutex::new(endpoints)),
         })
     }
 
-    /// 指定した接続先へ QUIC 接続を確立する
+    /// 指定した接続先へ選択中のトランスポートで接続を確立する
     ///
     /// 初めての接続先の場合は名前解決とクライアントの構築を行う。同じ接続先に対しては
     /// インスタンス内で状態を共有する。
@@ -322,7 +427,7 @@ impl MoqClientContext {
     ///
     /// 名前解決に失敗した場合、TLS 設定が不正な場合、ソケットのバインドに失敗した場合、
     /// 全ての接続先への接続に失敗した場合はエラーになる。
-    pub(crate) async fn connect_to(&self, endpoint: &MoqEndpoint) -> Result<Connection> {
+    pub(crate) async fn connect_to(&self, endpoint: &MoqEndpoint) -> Result<MoqConnection> {
         let key = EndpointKey::new(endpoint);
         // キャッシュ済みの場合は名前解決もソケット作成もしない。
         // MutexGuard を if let の scrutinee に置くと guard が then ブロックの終わりまで
@@ -331,41 +436,95 @@ impl MoqClientContext {
             let endpoints = self.endpoints.lock().await;
             endpoints.get(&key).cloned()
         };
-        if let Some(state) = cached {
-            return state.connect().await;
+        let state = match cached {
+            Some(state) => state,
+            None => {
+                // 初めての接続先はロックを保持せずに構築する。同じ接続先へ複数の仮想
+                // クライアントが同時に接続した場合は、先に登録された状態を使い、余分に
+                // 作った状態は drop する (UDP ソケットも閉じる)。名前解決の失敗でロック待ちが
+                // 連鎖しないことを優先する
+                let built = Arc::new(build_endpoint_state(endpoint, self.quic_tls.as_ref()).await?);
+                self.endpoints
+                    .lock()
+                    .await
+                    .entry(key)
+                    .or_insert_with(|| Arc::clone(&built))
+                    .clone()
+            }
+        };
+        match self.transport {
+            MoqTransport::Quic => Ok(MoqConnection::Quic(state.connect_quic().await?)),
+            MoqTransport::Qmux => {
+                let tls = self
+                    .qmux_tls
+                    .as_ref()
+                    .expect("logical invariant: QMux transport always has a TLS config");
+                Ok(MoqConnection::Qmux(state.connect_qmux(tls).await?))
+            }
         }
-
-        // 初めての接続先はロックを保持せずに構築する。同じ接続先へ複数の仮想クライアントが
-        // 同時に接続した場合は、先に登録された状態を使い、余分に作った状態は drop する
-        // (UDP ソケットも閉じる)。名前解決の失敗でロック待ちが連鎖しないことを優先する
-        let built = Arc::new(build_endpoint_state(&self.tls, endpoint).await?);
-        let state = self
-            .endpoints
-            .lock()
-            .await
-            .entry(key)
-            .or_insert_with(|| Arc::clone(&built))
-            .clone();
-        state.connect().await
     }
 }
 
-/// 接続先の名前解決と TLS / UDP クライアントの構築を行う
+/// 確立済みの接続
+///
+/// `session.rs` は経路を意識せずにこの型を分割し、ストリームの送受信と接続の終了を行う。
+pub(crate) enum MoqConnection {
+    /// QUIC 直接接続
+    Quic(Connection),
+    /// QMux 接続
+    Qmux(Arc<tokio_qmux::Connection>),
+}
+
+impl MoqConnection {
+    /// この接続のトランスポート種別を返す
+    pub(crate) fn transport(&self) -> MoqTransport {
+        match self {
+            Self::Quic(_) => MoqTransport::Quic,
+            Self::Qmux(_) => MoqTransport::Qmux,
+        }
+    }
+
+    /// 接続ハンドルと accept 用の口へ分割する
+    pub(crate) fn split(self) -> (MoqConnectionHandle, MoqRecvAcceptor, MoqBidiAcceptor) {
+        match self {
+            Self::Quic(connection) => {
+                let (handle, acceptor) = connection.split();
+                let (bidi, recv) = acceptor.split();
+                (
+                    MoqConnectionHandle::Quic(handle),
+                    MoqRecvAcceptor::Quic(recv),
+                    MoqBidiAcceptor::Quic(bidi),
+                )
+            }
+            Self::Qmux(connection) => (
+                MoqConnectionHandle::Qmux(Arc::clone(&connection)),
+                MoqRecvAcceptor::Qmux(Arc::clone(&connection)),
+                MoqBidiAcceptor::Qmux(connection),
+            ),
+        }
+    }
+}
+
+/// 接続先の名前解決と QUIC クライアントの構築を行う
+///
+/// QMux 経路では UDP ソケットを使わないため `tls` に `None` を渡し、`clients` を空にする。
 ///
 /// # Errors
 ///
 /// 名前解決に失敗した場合、またはソケットのバインドに失敗した場合はエラーになる。
 async fn build_endpoint_state(
-    tls: &s2n_rustls::Client,
     endpoint: &MoqEndpoint,
+    tls: Option<&s2n_rustls::Client>,
 ) -> Result<EndpointState> {
     let addrs = resolve(&endpoint.host, endpoint.port).await?;
     let mut clients = Vec::new();
-    for is_ipv6 in [false, true] {
-        if !addrs.iter().any(|addr| addr.is_ipv6() == is_ipv6) {
-            continue;
+    if let Some(tls) = tls {
+        for is_ipv6 in [false, true] {
+            if !addrs.iter().any(|addr| addr.is_ipv6() == is_ipv6) {
+                continue;
+            }
+            clients.push((is_ipv6, build_client(tls, is_ipv6)?));
         }
-        clients.push((is_ipv6, build_client(tls, is_ipv6)?));
     }
     Ok(EndpointState {
         clients,
@@ -437,63 +596,100 @@ fn local_bind_addr(is_ipv6: bool) -> &'static str {
     if is_ipv6 { "[::]:0" } else { "0.0.0.0:0" }
 }
 
-/// TLS クライアントを構築する
+/// rustls のクライアント設定を構築する (ALPN は呼び出し側が設定する)
 ///
 /// # Errors
 ///
-/// `--ca-cert` に指定した PEM の読み込みに失敗した場合、または TLS 設定の構築に
-/// 失敗した場合はエラーになる。
-fn build_tls(options: &MoqTlsOptions) -> Result<s2n_rustls::Client> {
-    if options.insecure {
-        // 検証をスキップする場合でも、ALPN は MOQT のプロトコル識別子を広告する必要がある
-        return insecure_tls_client();
-    }
+/// `--ca-cert` に指定した PEM の読み込みに失敗した場合、ルート証明書が 1 件も
+/// 得られない場合、または TLS 設定の構築に失敗した場合はエラーになる。
+fn build_rustls_config(options: &MoqTlsOptions) -> Result<rustls::ClientConfig> {
+    let config = if options.insecure {
+        // `--insecure` 指定時の開発用経路である。検証をしない旨は呼び出し側で警告ログに出す
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| ErrorMessage::new(format!("TLS バージョンの設定に失敗しました: {e}")))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoVerifier))
+        .with_no_client_auth()
+    } else {
+        let roots = build_root_store(options)?;
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| ErrorMessage::new(format!("TLS バージョンの設定に失敗しました: {e}")))?
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+    };
+    Ok(config)
+}
 
-    if let Some(path) = options.ca_cert.as_deref() {
-        let client = s2n_rustls::Client::builder()
-            .with_certificate(Path::new(path))
-            .map_err(|e| {
-                ErrorMessage::new(format!(
-                    "--ca-cert の CA 証明書の読み込みに失敗しました ({path}): {e}"
-                ))
-            })?
-            .with_application_protocols([ALPN].iter())
-            .map_err(|e| ErrorMessage::new(format!("ALPN の設定に失敗しました: {e}")))?
-            .build()
-            .map_err(|e| ErrorMessage::new(format!("TLS クライアントの構築に失敗しました: {e}")))?;
-        return Ok(client);
-    }
-
-    // 既定は WebPKI のルート証明書で検証する。s2n-quic の rustls provider は
-    // 信頼するルート証明書が無い ClientConfig を組み立てられないため、rustls の
-    // ClientConfig を直接作って渡す
+/// 信頼するルート証明書を構築する
+///
+/// `--ca-cert` が指定された場合はその PEM だけを信頼し、未指定の場合は WebPKI の
+/// ルート証明書を使う。
+///
+/// # Errors
+///
+/// `--ca-cert` の読み込み・PEM のパース・ルート証明書の追加に失敗した場合、または
+/// 証明書が 1 件も含まれていない場合はエラーになる。
+fn build_root_store(options: &MoqTlsOptions) -> Result<rustls::RootCertStore> {
     let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .map_err(|e| ErrorMessage::new(format!("TLS バージョンの設定に失敗しました: {e}")))?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
+    let Some(path) = options.ca_cert.as_deref() else {
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        return Ok(roots);
+    };
+
+    let pem = std::fs::read_to_string(path).map_err(|e| {
+        ErrorMessage::new(format!(
+            "--ca-cert の CA 証明書の読み込みに失敗しました ({path}): {e}"
+        ))
+    })?;
+    let mut count = 0;
+    for certificate in rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes()) {
+        let certificate = certificate.map_err(|e| {
+            ErrorMessage::new(format!(
+                "--ca-cert の CA 証明書のパースに失敗しました ({path}): {e}"
+            ))
+        })?;
+        roots.add(certificate).map_err(|e| {
+            ErrorMessage::new(format!(
+                "--ca-cert の CA 証明書の追加に失敗しました ({path}): {e}"
+            ))
+        })?;
+        count += 1;
+    }
+    if count == 0 {
+        return Err(ErrorMessage::new(format!(
+            "--ca-cert の CA 証明書に PEM 形式の証明書が含まれていません ({path})"
+        ))
+        .into());
+    }
+    Ok(roots)
+}
+
+/// QUIC 直接接続用の TLS クライアントを構築する
+///
+/// # Errors
+///
+/// TLS 設定の構築に失敗した場合はエラーになる。
+fn build_quic_tls(options: &MoqTlsOptions) -> Result<s2n_rustls::Client> {
+    let mut config = build_rustls_config(options)?;
     config.alpn_protocols = vec![ALPN.to_vec()];
     Ok(s2n_rustls::Client::from(config))
 }
 
-/// 証明書検証をスキップする TLS クライアントを構築する
+/// QMux 用の TLS 設定を構築する
 ///
-/// `--insecure` 指定時の開発用経路である。検証をしない旨は呼び出し側で警告ログに出す。
-fn insecure_tls_client() -> Result<s2n_rustls::Client> {
-    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .map_err(|e| ErrorMessage::new(format!("TLS バージョンの設定に失敗しました: {e}")))?
-    .dangerous()
-    .with_custom_certificate_verifier(Arc::new(NoVerifier))
-    .with_no_client_auth();
+/// # Errors
+///
+/// TLS 設定の構築に失敗した場合はエラーになる。
+fn build_qmux_tls(options: &MoqTlsOptions) -> Result<Arc<rustls::ClientConfig>> {
+    let mut config = build_rustls_config(options)?;
     config.alpn_protocols = vec![ALPN.to_vec()];
-    Ok(s2n_rustls::Client::from(config))
+    Ok(Arc::new(config))
 }
 
 /// 証明書検証をスキップする Verifier (`--insecure` 専用)
@@ -638,6 +834,33 @@ mod tests {
         assert!(MoqEndpoint::parse("moqt://:4433/").is_err());
     }
 
+    /// `--transport` の値を解釈できること
+    #[test]
+    fn parse_transport_accepts_supported_values() {
+        assert_eq!(
+            MoqTransport::parse("quic").expect("quic は受理されること"),
+            MoqTransport::Quic
+        );
+        assert_eq!(
+            MoqTransport::parse("qmux").expect("qmux は受理されること"),
+            MoqTransport::Qmux
+        );
+        // ログと CLI で同じ表記を使う
+        assert_eq!(MoqTransport::Quic.as_str(), "quic");
+        assert_eq!(MoqTransport::Qmux.as_str(), "qmux");
+    }
+
+    /// 未対応の transport 名・表記ゆれ・空文字は拒否すること
+    #[test]
+    fn parse_transport_rejects_unknown_values() {
+        for value in ["QUIC", "QMux", "quic-direct", ""] {
+            assert!(
+                MoqTransport::parse(value).is_err(),
+                "受理してはならない: {value:?}"
+            );
+        }
+    }
+
     /// 接続先のアドレスファミリに合わせてローカルアドレスを選ぶこと
     #[test]
     fn local_bind_addr_matches_address_family() {
@@ -732,6 +955,63 @@ mod tests {
         assert!(
             !message.contains("--url"),
             "CLI 引数の --url に言及しないこと: {message}"
+        );
+    }
+
+    /// QMux の TLS 設定が MOQT の ALPN を広告すること
+    ///
+    /// QMux 上の MOQT は native QUIC と同じ `moqt-22` を使う。ALPN が無いと
+    /// rustls のハンドシェイク自体は成功してしまい、QMux のトランスポートパラメータを
+    /// 待ち続けるため、確実に載っていることを固定する。
+    #[test]
+    fn qmux_tls_advertises_moqt_alpn() {
+        let tls = build_qmux_tls(&MoqTlsOptions::default()).expect("TLS 設定の構築に成功すること");
+        assert_eq!(tls.alpn_protocols, vec![b"moqt-22".to_vec()]);
+    }
+
+    /// `--insecure` でも QMux の ALPN を広告すること
+    #[test]
+    fn qmux_tls_insecure_advertises_moqt_alpn() {
+        let options = MoqTlsOptions {
+            insecure: true,
+            ca_cert: None,
+        };
+        let tls = build_qmux_tls(&options).expect("TLS 設定の構築に成功すること");
+        assert_eq!(tls.alpn_protocols, vec![b"moqt-22".to_vec()]);
+    }
+
+    /// 存在しない `--ca-cert` はエラーになること
+    #[test]
+    fn ca_cert_missing_file_is_error() {
+        let options = MoqTlsOptions {
+            insecure: false,
+            ca_cert: Some("/nonexistent/zakuro-ca.pem".to_string()),
+        };
+        assert!(build_rustls_config(&options).is_err());
+    }
+
+    /// QMux の接続コンテキストが QUIC の UDP ソケットを作らないこと
+    ///
+    /// QMux は仮想クライアントごとに TCP を張るため、QUIC の `EndpointState` に
+    /// s2n-quic のクライアントを持たせてはならない。
+    #[tokio::test]
+    async fn qmux_context_does_not_build_quic_clients() {
+        let endpoint =
+            MoqEndpoint::parse("moqt://127.0.0.1:4433/").expect("接続先の解釈に成功すること");
+        let context =
+            MoqClientContext::new(&endpoint, &MoqTlsOptions::default(), MoqTransport::Qmux)
+                .await
+                .expect("コンテキストの構築に成功すること");
+        assert!(context.quic_tls.is_none());
+        assert!(context.qmux_tls.is_some());
+        let endpoints = context.endpoints.lock().await;
+        let state = endpoints
+            .values()
+            .next()
+            .expect("接続先が登録されていること");
+        assert!(
+            state.clients.is_empty(),
+            "QMux では QUIC クライアントを作らないこと"
         );
     }
 }

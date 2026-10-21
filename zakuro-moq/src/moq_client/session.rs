@@ -1,8 +1,8 @@
 //! MOQT セッションの駆動 (SETUP 交換・複数トラックの PUBLISH・object 送信)
 //!
 //! `shiguredo_moqt` の `Session` は Sans I/O の状態機械であり、ワイヤの読み書きは
-//! 呼び出し側の責務である。このモジュールは s2n-quic のストリームと `Session` を
-//! 1 つのタスクで駆動し、publisher として複数のトラックへ object を送り続ける。
+//! 呼び出し側の責務である。このモジュールは経路ごとのストリーム (QUIC 直接接続 / QMux) と
+//! `Session` を 1 つのタスクで駆動し、publisher として複数のトラックへ object を送り続ける。
 //!
 //! トラックごとに bidi request stream を 1 本開くため、その受信方向はストリームごとの
 //! タスクで読み、デコードしたメッセージをチャネルでメインタスクへ渡す (`Session` は
@@ -16,8 +16,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use s2n_quic::connection::{Connection, Handle};
-use s2n_quic::stream::{ReceiveStream, SendStream};
 use shiguredo_moqt::decoder::MessageDecoder;
 use shiguredo_moqt::loc::{
     LocProperties, LocProperty, LocPropertyValue, PROP_TIMESCALE, PROP_TIMESTAMP,
@@ -38,10 +36,11 @@ use shiguredo_moqt::stream::decoder::{DecodedSubgroupObject, SubgroupStreamDecod
 use shiguredo_moqt::stream::encode_control_stream_setup;
 use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode, SubgroupObject};
 use shiguredo_moqt::track_properties::TrackProperties;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use super::stream::{MoqConnectionHandle, MoqRecvAcceptor, MoqRecvStream, MoqSendStream};
+use super::transport::{MoqConnection, MoqTransport};
 use crate::error::{ErrorMessage, Result};
 
 /// SETUP Option の MOQT_IMPLEMENTATION に載せる実装名
@@ -242,11 +241,11 @@ struct GoawayInfo {
 /// `drain_events` が `Session` のイベントを処理しながら更新する。
 struct SessionState {
     /// 自側の制御ストリーム (GOAWAY を書く)
-    control_send: SendStream,
+    control_send: MoqSendStream,
     /// 接続のハンドル (request stream の open と接続の close に使う)
-    connection_handle: Handle,
+    connection_handle: MoqConnectionHandle,
     /// 自側が開始した bidi request stream の送信方向 (Request ID ごと)
-    request_sends: HashMap<u64, SendStream>,
+    request_sends: HashMap<u64, MoqSendStream>,
     /// セッションが確立したか (両側の SETUP が完了したか)
     established: bool,
     /// peer からセッション終了を通知された場合の理由
@@ -285,7 +284,7 @@ struct Publisher {
     /// object を送る周期
     period: Duration,
     /// 開いている subgroup stream (FIN で閉じた後は `None`)
-    stream: Option<SendStream>,
+    stream: Option<MoqSendStream>,
     /// 開いている subgroup stream の DataStreamId
     stream_id: Option<DataStreamId>,
     /// 現在の Group ID
@@ -374,7 +373,7 @@ impl Publisher {
     async fn send_next_object(
         &mut self,
         session: &mut Session,
-        handle: &mut Handle,
+        handle: &mut MoqConnectionHandle,
         payload: &Arc<[u8]>,
         objects_sent: &AtomicU64,
     ) -> Result<()> {
@@ -384,7 +383,7 @@ impl Publisher {
 
         // Group の終わりに達していたら FIN で閉じ、次の Group へ進む
         if self.object_id >= self.objects_per_group {
-            self.close_stream(session);
+            self.close_stream(session).await;
             self.group_id += 1;
             self.object_id = 0;
             self.prev_object_id = None;
@@ -500,22 +499,27 @@ impl Publisher {
     }
 
     /// 開いている subgroup stream を FIN で閉じる
-    fn close_stream(&mut self, session: &mut Session) {
+    async fn close_stream(&mut self, session: &mut Session) {
         if let (Some(stream), Some(stream_id)) = (self.stream.as_mut(), self.stream_id) {
             let _ = session.send_data_stream_closed(stream_id, RequestStreamEnd::Fin);
-            let _ = stream.finish();
+            let _ = stream.finish().await;
         }
         self.stream = None;
         self.stream_id = None;
     }
 
     /// Session が要求した data stream の reset を実行する
-    fn reset_stream(&mut self, session: &mut Session, stream_id: DataStreamId, error_code: u64) {
+    async fn reset_stream(
+        &mut self,
+        session: &mut Session,
+        stream_id: DataStreamId,
+        error_code: u64,
+    ) {
         if self.stream_id != Some(stream_id) {
             return;
         }
         if let Some(stream) = self.stream.as_mut() {
-            let _ = stream.reset(application_error(error_code));
+            let _ = stream.reset(error_code).await;
         }
         self.stream = None;
         self.stream_id = None;
@@ -614,24 +618,28 @@ fn should_migrate(has_goaway: bool, migrate_on_goaway: bool, cancelled: bool) ->
 /// 接続が確立できない場合、MOQT のメッセージが不正な場合、ストリームの読み書きに
 /// 失敗した場合はエラーになる。
 pub(crate) async fn run(
-    connection: Connection,
+    connection: MoqConnection,
     config: &SessionConfig<'_>,
     token: &CancellationToken,
     established_notify: Option<tokio::sync::oneshot::Sender<()>>,
     objects_sent: Arc<AtomicU64>,
     receive_counters: ReceiveCounters,
 ) -> Result<SessionEnd> {
-    let mut connection_handle = connection.handle();
+    // 下位トランスポートは SETUP の AUTHORITY / PATH の扱いと、data stream の ID 空間にだけ
+    // 影響する。QMux は native QUIC と同じく AUTHORITY / PATH を送る
+    let transport = match connection.transport() {
+        MoqTransport::Quic => Transport::Quic,
+        MoqTransport::Qmux => Transport::Qmux,
+    };
+    let (mut handle, mut recv_acceptor, mut bidi_acceptor) = connection.split();
+
     // Forward State 0 の間は object を送らないため、無通信で idle timeout に達しないよう
-    // keep-alive を有効にする
-    connection_handle
-        .keep_alive(true)
+    // keep-alive を有効にする。QMux は PING を送るタスクを起動する
+    handle
+        .keep_alive(token)
         .map_err(|e| ErrorMessage::new(format!("keep-alive の有効化に失敗しました: {e}")))?;
 
-    let (mut handle, acceptor) = connection.split();
-    let (mut bidi_acceptor, mut recv_acceptor) = acceptor.split();
-
-    let mut session = Session::new_client(Transport::Quic, build_setup_options(config))
+    let mut session = Session::new_client(transport, build_setup_options(config))
         .map_err(|e| ErrorMessage::new(format!("MOQT セッションの生成に失敗しました: {e:?}")))?;
 
     // 自側の制御ストリームを開き、SETUP を送る
@@ -665,7 +673,7 @@ pub(crate) async fn run(
 
     let mut state = SessionState {
         control_send,
-        connection_handle: connection_handle.clone(),
+        connection_handle: handle.clone(),
         request_sends: HashMap::new(),
         established: false,
         closed_reason: None,
@@ -931,7 +939,9 @@ pub(crate) async fn run(
         // ここで実行する (同時に複数届くことがあるため全件処理する)
         for (stream_id, error_code) in state.reset_data_streams.drain(..) {
             for publisher in publishers.iter_mut() {
-                publisher.reset_stream(&mut session, stream_id, error_code);
+                publisher
+                    .reset_stream(&mut session, stream_id, error_code)
+                    .await;
             }
         }
 
@@ -1077,7 +1087,7 @@ pub(crate) async fn run(
         mismatched,
     );
     for publisher in publishers.iter_mut() {
-        publisher.close_stream(&mut session);
+        publisher.close_stream(&mut session).await;
     }
     let _ = session.send_goaway(Vec::new(), 0);
     let _ = drain_events(
@@ -1118,7 +1128,7 @@ pub(crate) async fn run(
 /// (セッション終了) は読み込みを止める。
 async fn run_request_reader(
     request_id: u64,
-    mut stream: ReceiveStream,
+    mut stream: MoqRecvStream,
     tx: mpsc::Sender<RequestMessage>,
     token: CancellationToken,
 ) {
@@ -1241,7 +1251,7 @@ fn record_received_object(
 /// `Session` は `&mut self` を要求するため複数 stream を同時に扱えない。デコードだけを
 /// このタスクで行い、`Session` への通知はメインタスクが行う。
 async fn run_data_reader(
-    mut stream: ReceiveStream,
+    mut stream: MoqRecvStream,
     tx: mpsc::Sender<DataMessage>,
     token: CancellationToken,
     verify_payload: bool,
@@ -1432,7 +1442,7 @@ fn payload_matches_pattern(payload: &[u8]) -> bool {
 
 /// stream から 1 チャンク読む (キャンセル時は `Ok(None)`)
 async fn read_chunk(
-    stream: &mut ReceiveStream,
+    stream: &mut MoqRecvStream,
     buf: &mut [u8],
     token: &CancellationToken,
 ) -> std::io::Result<Option<usize>> {
@@ -1458,11 +1468,6 @@ async fn sleep_until_optional(deadline: Option<tokio::time::Instant>) {
     }
 }
 
-/// QUIC の application error code を `s2n_quic` の型へ変換する
-fn application_error(error_code: u64) -> s2n_quic::application::Error {
-    s2n_quic::application::Error::new(error_code).unwrap_or(s2n_quic::application::Error::UNKNOWN)
-}
-
 /// SETUP メッセージを取り出す
 fn take_setup_message(session: &mut Session) -> Result<ControlMessage> {
     match session.poll_event() {
@@ -1473,8 +1478,11 @@ fn take_setup_message(session: &mut Session) -> Result<ControlMessage> {
 
 /// SETUP Options を構築する
 ///
-/// PATH (0x01) と AUTHORITY (0x05) は native QUIC のときだけ載せる
-/// (draft-ietf-moq-transport-22 §9.1.1 / §9.1.2: WebTransport では MUST NOT)。
+/// PATH (0x01) と AUTHORITY (0x05) を載せる。
+///
+/// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) は WebTransport での送信を
+/// MUST NOT としているが、zakuro は WebTransport を使わない。QMux は同節の適用範囲外であり、
+/// native QUIC と同じく AUTHORITY / PATH を送る (QMux 上の MOQT の参照実装と同じ扱い)。
 fn build_setup_options(config: &SessionConfig<'_>) -> SetupOptions {
     let mut options = SetupOptions::new();
     options.push(SetupOption {
@@ -1517,9 +1525,9 @@ fn build_loc_properties(sent_objects: u64, object_rate: f64) -> LocProperties {
 /// 新しく作る (`MessageDecoder` は varint の後ろに読んだバイトを内部に保持するため、
 /// stream 間で共有すると前の stream の残骸を次の stream type として誤って解釈する)。
 async fn accept_control_stream(
-    acceptor: &mut s2n_quic::connection::ReceiveStreamAcceptor,
+    acceptor: &mut MoqRecvAcceptor,
     token: &CancellationToken,
-) -> Result<(ReceiveStream, u64, MessageDecoder)> {
+) -> Result<(MoqRecvStream, u64, MessageDecoder)> {
     loop {
         let mut stream = tokio::select! {
             biased;
@@ -1552,7 +1560,7 @@ async fn accept_control_stream(
 }
 
 /// uni stream の先頭から stream type varint を読む
-async fn read_stream_type(stream: &mut ReceiveStream, decoder: &mut MessageDecoder) -> Result<u64> {
+async fn read_stream_type(stream: &mut MoqRecvStream, decoder: &mut MessageDecoder) -> Result<u64> {
     let mut buf = [0u8; 64];
     for _ in 0..MAX_STREAM_TYPE_READS {
         if let Some(stream_type) = decoder.try_decode_varint().map_err(|e| {
@@ -1619,14 +1627,13 @@ async fn drain_events(
                 request_id,
                 message,
             } => {
-                let stream = state
+                let (recv, mut send) = state
                     .connection_handle
                     .open_bidirectional_stream()
                     .await
                     .map_err(|e| {
                         ErrorMessage::new(format!("request stream の open に失敗しました: {e}"))
                     })?;
-                let (recv, mut send) = stream.split();
                 send.write_all(&message.encode().map_err(|e| {
                     ErrorMessage::new(format!(
                         "request メッセージのエンコードに失敗しました: {e:?}"
@@ -1665,7 +1672,7 @@ async fn drain_events(
                     ErrorMessage::new(format!("request メッセージの送信に失敗しました: {e}"))
                 })?;
                 if fin {
-                    let _ = send.finish();
+                    let _ = send.finish().await;
                 }
             }
             SessionEvent::Established => {
@@ -1762,13 +1769,13 @@ async fn drain_events(
                 error_code,
             } => {
                 if let Some(send) = state.request_sends.get_mut(&request_id) {
-                    let _ = send.reset(application_error(error_code));
+                    let _ = send.reset(error_code).await;
                 }
                 tracing::warn!("MOQT: request stream was reset by peer: request_id={request_id}");
             }
             SessionEvent::FinishRequestStream { request_id } => {
                 if let Some(send) = state.request_sends.get_mut(&request_id) {
-                    let _ = send.finish();
+                    let _ = send.finish().await;
                 }
             }
             SessionEvent::StopSendingRequestStream { request_id, .. } => {
@@ -1856,7 +1863,7 @@ async fn drain_events(
             }
             SessionEvent::CloseSession(error) => {
                 // `CloseSession` は「I/O 層が接続を閉じる」指示である
-                state.connection_handle.close(application_error(error.code));
+                state.connection_handle.close(error.code);
                 state.closed_reason = Some(format!("{:#x} {}", error.code, error.reason));
             }
             // publisher 専用クライアントでは扱わないイベント

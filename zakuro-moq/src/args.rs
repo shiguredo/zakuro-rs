@@ -5,6 +5,7 @@ use nojson::{JsonValueKind, RawJson, RawJsonValue};
 
 use crate::error::{ErrorMessage, Result};
 use crate::logging::LogLevel;
+use crate::moq_client::MoqTransport;
 
 /// `--tracks` で object レートを省略したときの既定値 (objects/sec)
 const DEFAULT_OBJECT_RATE: f64 = 30.0;
@@ -77,6 +78,8 @@ pub(crate) struct CommonArgs {
 pub(crate) struct InstanceArgs {
     /// MOQ relay の URL (`moqt://host:port`)
     pub(crate) url: String,
+    /// 下位トランスポート種別 (QUIC 直接接続 / QMux)
+    pub(crate) transport: MoqTransport,
     /// Track Namespace
     pub(crate) namespace: String,
     /// publish するトラック (1 仮想クライアントが全トラックを publish する)
@@ -359,6 +362,12 @@ fn parse_instance_args(
         .take(&mut args)
         .then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
+    let transport: MoqTransport = noargs::opt("transport")
+        .doc("Transport (quic | qmux, default: quic)")
+        .take(&mut args)
+        .present_and_then(|o| MoqTransport::parse(o.value()))?
+        .unwrap_or_default();
+
     let namespace: String = noargs::opt("namespace")
         .doc("Track Namespace (default: zakuro)")
         .take(&mut args)
@@ -436,6 +445,7 @@ fn parse_instance_args(
 
     let instance = validate_instance_args(
         &url,
+        transport,
         &namespace,
         tracks_arg.as_deref(),
         subscribe_tracks_arg.as_deref(),
@@ -456,6 +466,7 @@ fn parse_instance_args(
 #[expect(clippy::too_many_arguments)]
 fn validate_instance_args(
     url: &str,
+    transport: MoqTransport,
     namespace: &str,
     tracks_arg: Option<&str>,
     subscribe_tracks_arg: Option<&str>,
@@ -533,6 +544,7 @@ fn validate_instance_args(
 
     Ok(InstanceArgs {
         url: url.to_string(),
+        transport,
         namespace: namespace.to_string(),
         tracks,
         subscribe_tracks,
@@ -971,6 +983,7 @@ mod tests {
                         retry_interval: f64| {
             validate_instance_args(
                 "moqt://relay.example.com:4433",
+                MoqTransport::Quic,
                 "zakuro",
                 Some("video"),
                 None,
@@ -1370,5 +1383,73 @@ mod tests {
             .position(|s| s == "--reconnect-on-goaway")
             .expect("--reconnect-on-goaway があること");
         assert_eq!(argv[pos + 1], "false");
+    }
+
+    /// `--transport` を省略した場合は QUIC 直接接続になること
+    #[test]
+    fn transport_defaults_to_quic() {
+        let (instance, _help) = parse_instance_args(
+            "zakuro-moq",
+            vec![
+                "--url".to_string(),
+                "moqt://relay.example.com:4433".to_string(),
+            ],
+            &mut Vec::new(),
+        )
+        .expect("解釈に成功すること");
+        assert_eq!(instance.transport, MoqTransport::Quic);
+    }
+
+    /// `--transport qmux` と `--transport=qmux` を解釈できること
+    #[test]
+    fn transport_accepts_qmux() {
+        for argv in [
+            vec![
+                "--url".to_string(),
+                "moqt://relay.example.com:4433".to_string(),
+                "--transport".to_string(),
+                "qmux".to_string(),
+            ],
+            vec![
+                "--url=moqt://relay.example.com:4433".to_string(),
+                "--transport=qmux".to_string(),
+            ],
+        ] {
+            let (instance, _help) = parse_instance_args("zakuro-moq", argv, &mut Vec::new())
+                .expect("解釈に成功すること");
+            assert_eq!(instance.transport, MoqTransport::Qmux);
+        }
+    }
+
+    /// `--transport` に quic / qmux 以外は指定できないこと
+    #[test]
+    fn transport_rejects_unknown_value() {
+        let result = parse_instance_args(
+            "zakuro-moq",
+            vec![
+                "--url".to_string(),
+                "moqt://relay.example.com:4433".to_string(),
+                "--transport".to_string(),
+                "wt-h3".to_string(),
+            ],
+            &mut Vec::new(),
+        );
+        assert!(result.is_err());
+    }
+
+    /// JSONC の transport が値付きオプションとして展開されること
+    #[test]
+    fn jsonc_transport_is_value_option() {
+        let content = r#"{
+            "url": "moqt://relay.example.com:4433",
+            "transport": "qmux"
+        }"#;
+        let config = parse_jsonc_config(content).expect("パースに成功すること");
+        let argv = &config.instance_argvs[0];
+        let pos = argv
+            .iter()
+            .position(|s| s == "--transport")
+            .expect("--transport があること");
+        assert_eq!(argv[pos + 1], "qmux");
     }
 }

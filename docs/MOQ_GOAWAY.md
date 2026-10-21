@@ -2,7 +2,7 @@
 
 zakuro-moq が GOAWAY を受信したときに New Session URI へ再接続する仕組みの検討結果と実装方針。
 仕様は draft-ietf-moq-transport-22 (2026-10-01 発行、最新の公開 I-D)、依存は
-`shiguredo_moqt` rev `f91baf3` を前提とする。本文書は実装前の検討内容を残したものであり、
+`shiguredo_moqt` rev `49c711e` を前提とする。本文書は実装前の検討内容を残したものであり、
 実装は本文書の「結論」と「設計」に従っている。本文中の `ファイル:行` は実装前の検討時点のものを
 含むため、現在のソース上の位置はシンボル名で検索すること。
 
@@ -180,9 +180,10 @@ moqt-rs f91baf3 の受信側挙動:
 
 ### 3.3 接続コンテキスト (`zakuro-moq/src/moq_client/transport.rs`)
 
-`MoqClientContext` は初期接続先の host / port / SNI / UDP ソケット / 名前解決結果を持つ。
-host か port が変われば接続先ごとの状態を作り直す必要があり、authority / path だけの変更なら
-`SessionConfig` の作り直しだけで済む。
+`MoqClientContext` は初期接続先の host / port / SNI / 名前解決結果と、経路 (QUIC 直接接続 /
+QMux) ごとの TLS 設定を持つ。host か port が変われば接続先ごとの状態を作り直す必要があり、
+authority / path だけの変更なら `SessionConfig` の作り直しだけで済む。
+QMux 経路では UDP ソケットを共有せず、仮想クライアントごとに TCP + TLS 接続を張る。
 
 実装は次のとおり。
 
@@ -198,6 +199,9 @@ host か port が変われば接続先ごとの状態を作り直す必要があ
   持たずに行い、同じ移行先へ同時に接続した場合は先に登録された状態を使い、余分に作った状態は
   drop する。
 - TLS クライアントは 1 回だけ構築する。
+- QMux 経路では UDP ソケットも s2n-quic のクライアントも作らず、`EndpointState` は名前解決結果と
+  SNI だけを持つ。TCP + TLS 接続は仮想クライアントごとに張るため、QUIC のソケット共有に相当する
+  再利用はしない (QMux の接続は `qmux.rs` の `connect`)。
 - `--insecure` / `--ca-cert` は移行先にもそのまま適用する。移行先の証明書が `--ca-cert` の
   範囲外なら TLS 接続に失敗し、既存のリトライ経路で停止する。
 - 使われなくなった接続先のキャッシュ削除 (eviction) は未実装。多数の異なる relay へ移行し

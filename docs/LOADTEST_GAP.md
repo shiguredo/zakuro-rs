@@ -179,7 +179,8 @@
 
 | 項目 | 現状 |
 | --- | --- |
-| 仮想クライアント | `--vcs` で 1-1000。VC 1 本 = 1 QUIC 接続 = 1 MOQT セッション |
+| 仮想クライアント | `--vcs` で 1-1000。VC 1 本 = 1 接続 = 1 MOQT セッション |
+| トランスポート | `--transport quic` (既定) または `--transport qmux`。QMux は TLS over TCP 上で QUIC version 1 のストリームを多重化する (experimental) |
 | インスタンス | JSONC `instances` 配列で 1-64。`--instance-hatch-rate` で段階起動 |
 | 起動レート | `--vcs-hatch-rate` / `--instance-hatch-rate`。VC 起動後は本数が増えない |
 | 持続時間 | `--duration`。経過でセッションを閉じ、`--repeat-interval` で再接続 |
@@ -204,7 +205,7 @@
 | subscribe | `--subscribe-tracks`。`{instance}` / `{vc}` のプレースホルダで 1 publish に対して N subscribe を構成できる |
 | 受信検証 | `--verify-payload` で `位置 % 251` パターンとの一致のみ検査 (既定は無効) |
 | 欠落 / 順序 / 遅延 | 計測しない。受信側で Object ID / Group ID を記録していない (`record_received_object`) |
-| DATAGRAM | endpoint は有効化しているが、object は subgroup stream のみで送る (transport.rs の build_client の DATAGRAM endpoint) |
+| DATAGRAM | endpoint (QUIC) と `max_datagram_frame_size` (QMux) は広告しているが、object は subgroup stream のみで送る (`transport.rs` の `build_client` / `qmux.rs` の `build_config`) |
 
 #### メトリクス
 
@@ -374,7 +375,7 @@ MoQ 負荷試験として見たときに、zakuro-moq に足りていないも�
 
 | 不足 | 内容 | 参考になる機能 |
 | --- | --- | --- |
-| QUIC 統計 | RTT / 損失 / 輻輳ウィンドウ / bytes in flight / stream 数を読んでいない (transport.rs は接続のみ) | h2load の最小 RTT / 平滑化 RTT / 損失宣言数、s2n-quic の接続メトリクス |
+| QUIC 統計 | RTT / 損失 / 輻輳ウィンドウ / bytes in flight / stream 数を読んでいない (transport.rs / qmux.rs は接続のみ) | h2load の最小 RTT / 平滑化 RTT / 損失宣言数、s2n-quic の接続メトリクス |
 | 輻輳制御と 0-RTT | 輻輳制御アルゴリズムの指定、0-RTT の利用、idle timeout の指定ができない | quic-go/perf のハンドシェイク計測、QUIC 実装のパラメータ指定 |
 | リレーの経路 | 複数ホップのリレー、キャッシュヒット、同一 object を複数 subscriber が受ける場合の挙動を検証する仕組みが無い | moq-relay の hop リストとデバッグ用 HTTP API、moq-stats |
 | プロトコル機能の網羅 | 優先度 (`publisher_priority`) は固定、DATAGRAM は未使用、Subgroup は Group 内 1 本固定、SUBSCRIBE_UPDATE / TRACK_STATUS などは未使用。`--tracks` は固定値のみ | moxygen の転送プリファレンス 4 種、moq-bench の `[min, max]` のレンジ指定 |

@@ -220,9 +220,9 @@ cargo run -- \
 ## MOQ 版 (`zakuro-moq`)
 
 Sora MoQ (Media over QUIC 実装) のリレーに対する publish 負荷試験を行います。
-1 仮想クライアント = 1 QUIC 接続 = 1 MOQT セッションで、指定した複数トラックを同時に
-publish します。Track Name は `<トラック名>-<インスタンス>-<仮想クライアント>` として
-仮想クライアントごとに一意化します。
+1 仮想クライアント = 1 接続 (QUIC 直接接続または QMux) = 1 MOQT セッションで、指定した
+複数トラックを同時に publish します。Track Name は
+`<トラック名>-<インスタンス>-<仮想クライアント>` として仮想クライアントごとに一意化します。
 
 ```bash
 cargo run -p zakuro-moq -- \
@@ -236,6 +236,28 @@ cargo run -p zakuro-moq -- \
 
 TLS は既定で WebPKI のルート証明書を使って検証します。relay の CA 証明書を指定する場合は
 `--ca-cert <PEM>`、検証をスキップする場合は `--insecure` を使います。
+
+### トランスポート (`--transport`)
+
+`--transport` で下位トランスポートを選びます (既定は `quic`)。
+
+- `quic`: QUIC 直接接続 (s2n-quic)。UDP が必要です。
+- `qmux`: QMux (draft-ietf-quic-qmux-02) 経由。TLS over TCP の 1 本のバイトストリームに
+  QUIC version 1 のストリームと DATAGRAM を多重化するため、UDP が使えない環境でも接続できます。
+  QMux 上の MOQT は experimental であり、QMux を終端できる relay が必要です。TCP の再送で
+  遅延が伸びるため、遅延を重視する試験では QUIC 直接接続を使ってください。ALPN は QUIC 直接接続と
+  同じ `moqt-22` です。
+
+```bash
+cargo run -p zakuro-moq -- \
+  --url moqt://relay.example.com:4433 \
+  --transport qmux \
+  --namespace zakuro \
+  --tracks video:30:1000 \
+  --vcs 10
+```
+
+仕様上の判断と制約は [docs/MOQ_QMUX.md](docs/MOQ_QMUX.md) にまとめています。
 
 MOQT では、購読者がいないトラックの送信を止めるよう relay から `REQUEST_UPDATE`
 (FORWARD=0) が届くことがあります。zakuro-moq はこれに従います (FORWARD はトラック単位で
@@ -297,6 +319,7 @@ relay へ接続する場合は誤検知になるため既定では無効です�
 | オプション | 説明 |
 | --- | --- |
 | `--url` | MOQ relay の URL (`moqt://host:port`)。必須 |
+| `--transport` | 下位トランスポート (`quic` / `qmux`、デフォルト: `quic`) |
 | `--namespace` | Track Namespace (デフォルト: `zakuro`) |
 | `--tracks` | publish するトラック (`名前[:レート[:サイズ]]` のカンマ区切り、デフォルト: `video`。`--subscribe-tracks` 指定時は publish しない) |
 | `--subscribe-tracks` | 購読するトラック名のカンマ区切り。`{instance}` / `{vc}` を書くと置換し、書かなければ `<名前>-<インスタンス>-<仮想クライアント>` になる |
@@ -320,6 +343,7 @@ relay へ接続する場合は誤検知になるため既定では無効です�
 {
   "instance-hatch-rate": 1.0,
   "url": "moqt://relay.example.com:4433",
+  "transport": "quic",
   "namespace": "zakuro",
   "tracks": [
     { "name": "video", "object-rate": 30, "object-size": 1000 },

@@ -2134,7 +2134,7 @@ checksum = "521929c2893005420ccee04aada685000c967cbcae36cd46117b40bf5495e5ab"
 [[package]]
 name = "shiguredo_moqt"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/moqt-rs?rev=f91baf3be4f9946ddcf08cfacf4cc493795285f5#f91baf3be4f9946ddcf08cfacf4cc493795285f5"
+source = "git+https://github.com/shiguredo/moqt-rs?rev=49c711e5832272a7dbde3f8953a6dd62815f7ad6#49c711e5832272a7dbde3f8953a6dd62815f7ad6"
 dependencies = [
  "base64ct",
  "hashbrown 0.17.1",
@@ -2169,6 +2169,11 @@ dependencies = [
  "shiguredo_cmake",
  "shiguredo_toml",
 ]
+
+[[package]]
+name = "shiguredo_qmux"
+version = "2026.0.0"
+source = "git+https://github.com/shiguredo/qmux-rs?rev=3e0dc0f6a7404b940a67a42e04f986a79811a046#3e0dc0f6a7404b940a67a42e04f986a79811a046"
 
 [[package]]
 name = "shiguredo_toml"
@@ -2459,6 +2464,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "tokio-qmux"
+version = "0.0.0"
+source = "git+https://github.com/shiguredo/qmux-rs?rev=3e0dc0f6a7404b940a67a42e04f986a79811a046#3e0dc0f6a7404b940a67a42e04f986a79811a046"
+dependencies = [
+ "shiguredo_qmux",
+ "tokio",
 ]
 
 [[package]]
@@ -3043,7 +3057,10 @@ dependencies = [
  "rustls",
  "s2n-quic",
  "shiguredo_moqt",
+ "shiguredo_qmux",
  "tokio",
+ "tokio-qmux",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-util",
  "tracing",

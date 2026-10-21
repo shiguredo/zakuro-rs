@@ -4,7 +4,9 @@
 //! Track Name へ object を送り続ける。接続・切断・リトライのライフサイクルは
 //! `crate::virtual_client` の Sora 版と同じ規則に従う。
 
+mod qmux;
 pub(crate) mod session;
+mod stream;
 mod transport;
 
 use std::time::Duration;
@@ -16,7 +18,7 @@ use crate::error::{ErrorMessage, Result};
 use zakuro_core::stats::StatsEvent;
 
 pub(crate) use session::ReceiveCounters;
-pub(crate) use transport::{MoqClientContext, MoqEndpoint, MoqTlsOptions};
+pub(crate) use transport::{MoqClientContext, MoqEndpoint, MoqTlsOptions, MoqTransport};
 
 /// subscribe するトラック名を解決する
 ///
@@ -55,6 +57,8 @@ pub(crate) struct MoqClientConfig {
     pub(crate) endpoint: MoqEndpoint,
     /// TLS 設定
     pub(crate) tls: MoqTlsOptions,
+    /// 下位トランスポート種別 (QUIC 直接接続 / QMux)
+    pub(crate) transport: MoqTransport,
     /// Track Namespace
     pub(crate) namespace: String,
     /// publish するトラック (Track Name は仮想クライアントごとに一意化する)
@@ -402,7 +406,8 @@ pub(crate) async fn build_context(config: &MoqClientConfig) -> Result<MoqClientC
     if config.tls.insecure {
         tracing::warn!("MOQ TLS certificate verification is disabled (--insecure)");
     }
-    MoqClientContext::new(&config.endpoint, &config.tls).await
+    tracing::info!("MOQ transport: {}", config.transport.as_str());
+    MoqClientContext::new(&config.endpoint, &config.tls, config.transport).await
 }
 
 /// セッション future の終了処理を待つ

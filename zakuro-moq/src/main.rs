@@ -176,8 +176,9 @@ async fn async_main() -> Result<()> {
 
 /// 1 つのインスタンスを実行する
 ///
-/// 初期接続先の QUIC クライアントと名前解決はインスタンスで 1 回だけ行い、仮想クライアントで
-/// 共有する。GOAWAY の New Session URI へ移行する場合の接続先は必要になった時点で構築する。
+/// 初期接続先の名前解決 (と QUIC 直接接続のクライアント) はインスタンスで 1 回だけ行い、
+/// 仮想クライアントで共有する。GOAWAY の New Session URI へ移行する場合の接続先は必要になった
+/// 時点で構築する。QMux 経路は仮想クライアントごとに TCP + TLS 接続を張る。
 async fn run_instance(
     instance_id: u32,
     common: CommonArgs,
@@ -190,8 +191,9 @@ async fn run_instance(
     let endpoint = moq_client::MoqEndpoint::parse(&instance.url)?;
     let track_names: Vec<String> = instance.tracks.iter().map(|t| t.name.clone()).collect();
     tracing::info!(
-        "Zakuro instance {} (MOQ): vcs={} vcs-hatch-rate={} duration={:?} repeat-interval={:?} reconnect-on-goaway={} namespace={} tracks=[{}] subscribe-tracks=[{}] verify-payload={}",
+        "Zakuro instance {} (MOQ): transport={} vcs={} vcs-hatch-rate={} duration={:?} repeat-interval={:?} reconnect-on-goaway={} namespace={} tracks=[{}] subscribe-tracks=[{}] verify-payload={}",
         instance_id,
+        instance.transport.as_str(),
         instance.vcs,
         instance.vcs_hatch_rate,
         instance.duration,
@@ -222,6 +224,7 @@ async fn run_instance(
             insecure: common.insecure,
             ca_cert: instance.ca_cert.clone(),
         },
+        transport: instance.transport,
         namespace: instance.namespace.clone(),
         tracks: instance.tracks.clone(),
         subscribe_tracks: instance.subscribe_tracks.clone(),

@@ -21,8 +21,10 @@ log = "0.4"
 noargs = "0.4"
 # JSON パース / 生成
 nojson = "0.3"
-# TLS (s2n-quic の rustls provider で MOQ relay へ接続する際に利用)
+# TLS (s2n-quic の rustls provider と QMux 経路の TLS over TCP で利用)
 rustls = "0.23"
+# TLS ハンドシェイクの Tokio 統合 (QMux 経路の TLS over TCP で利用)
+tokio-rustls = "0.26"
 # tokio Stream ラッパー (ReceiverStream)
 tokio-stream = "0.1"
 # tokio ユーティリティ (CancellationToken, DelayQueue)
@@ -56,7 +58,14 @@ features = [
 # crates.io には未公開のため git 依存とし、再現性のため rev を固定する
 [dependencies.shiguredo_moqt]
 git = "https://github.com/shiguredo/moqt-rs"
-rev = "f91baf3be4f9946ddcf08cfacf4cc493795285f5"
+rev = "49c711e5832272a7dbde3f8953a6dd62815f7ad6"
+
+# QMux (draft-ietf-quic-qmux-02) の Sans I/O 実装。
+# crates.io には未公開のため git 依存とし、再現性のため rev を固定する。
+# rev は moqt-rs の examples/tokio-moq が固定している値と揃える
+[dependencies.shiguredo_qmux]
+git = "https://github.com/shiguredo/qmux-rs"
+rev = "3e0dc0f6a7404b940a67a42e04f986a79811a046"
 
 # 非同期ランタイム
 [dependencies.tokio]
@@ -70,3 +79,8 @@ features = [
   "sync",
   "time",
 ]
+
+# QMux の Tokio ラッパー。tokio-qmux は publish = false のため git 依存で固定する
+[dependencies.tokio-qmux]
+git = "https://github.com/shiguredo/qmux-rs"
+rev = "3e0dc0f6a7404b940a67a42e04f986a79811a046"
