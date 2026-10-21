@@ -46,7 +46,7 @@ zakuro-moq が UDP を使えない環境や、TCP しか通らない環境でも
 - `--transport qmux` で QMux 接続を確立し、MOQT セッションを開始できること。
 - QMux のストリームアダプタが本物の QMux client / server で往復できること (モックなし)。
 - `cargo fmt` / `cargo clippy` / `cargo test` / `make smoke` / tombi が全て通ること。
-- 実 QMux relay での E2E は relay が無いため未実施であることを明記すること。
+- 実 QMux relay に対する E2E で publish / subscribe が成立すること。
 
 ## 解決方法
 
@@ -79,6 +79,10 @@ zakuro-moq が UDP を使えない環境や、TCP しか通らない環境でも
   --features fdk-aac -- -D warnings` / `cargo test --locked --workspace --features fdk-aac` /
   `make smoke` / `prek run tombi-lint --all-files` / `prek run tombi-format --all-files` が
   全て成功した。
-- 未実施: 実 QMux relay に対する E2E。QMux を終端できる relay が確認できていないため、
-  TCP + TLS + QMux の実接続は自動テストでカバーしていない。relay が用意でき次第、
-  `--transport qmux` での E2E を追加する。
+- 実 QMux relay (`moqt://sora-moq.shiguredo.co.jp/`) に対する E2E を 2026-10-21 に実施した。
+  TLS の証明書検証を有効にしたまま `--transport qmux` で接続し、次の 2 条件で
+  publish / subscribe が成立した。
+  - VC 1 本 20 秒 (`video:30:1000`): sent-objects=600 / received-objects=600 /
+    payload-mismatches=0
+  - VC 3 本 10 秒 (`video:10:500`): sent-objects=300 / received-objects=300 /
+    payload-mismatches=0 (VC ごとに TCP + TLS 接続を張る)

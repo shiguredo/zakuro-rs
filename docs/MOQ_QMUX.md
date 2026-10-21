@@ -86,9 +86,12 @@ QMux の実効 idle timeout は両端の広告値のうち 0 でない値の最�
 
 ## 3. 制約と未対応
 
-- QMux を終端できる実 relay は確認できていない (moqt-rs の E2E も QMux を対象外にしている)。
-  このため実 relay に対する E2E は未実施である。ストリームアダプタは qmux-rs の client と
-  server をメモリ上の duplex で両端に立てて検証している (モックではない)。
+- 実 QMux relay として `moqt://sora-moq.shiguredo.co.jp/` で動作を確認した (2026-10-21)。
+  TLS の証明書検証を有効にしたまま、VC 1 本 20 秒と VC 3 本 10 秒の publish + subscribe を
+  実行し、両方で `publish=1/1` / `subscribe=1/1` / `payload-mismatches=0` だった。
+  ストリームアダプタは qmux-rs の client と server をメモリ上の duplex で両端に立てても
+  検証している (モックではない)。moqt-rs の E2E は QMux を対象外にしているため、この実 relay
+  での確認が QMux 経路の E2E にあたる。
 - QMux の DATAGRAM は広告のみで、object の DATAGRAM 送受信は未対応 (QUIC 経路と同じ)。
 - TCP の再送で遅延が伸びるため、遅延を重視する試験では QUIC 直接接続を使うこと。
 - QMux の RESET_STREAM_AT は未実装のため、reset の `reliable_size` は常に `None` である。
@@ -102,3 +105,6 @@ QMux の実効 idle timeout は両端の広告値のうち 0 でない値の最�
 - `cargo test --locked --workspace --features fdk-aac`
 - `make smoke` (`zakuro-moq --help` に `--transport` が出ること)
 - tombic (`prek run tombi-lint --all-files` / `prek run tombi-format --all-files`)
+- 実 relay の E2E: `moqt://sora-moq.shiguredo.co.jp/` へ `--transport qmux` で接続し、
+  `--tracks video:30:1000 --subscribe-tracks video --verify-payload --vcs 1 --duration 20` で
+  publish / subscribe が成立すること (2026-10-21 に確認)
