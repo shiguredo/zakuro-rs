@@ -20,7 +20,7 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 | バイナリ | ディレクトリ | 対象 | 主な依存 |
 |---|---|---|---|
 | `zakuro` | `zakuro/` | Sora WebRTC SFU | libwebrtc (Sora Rust SDK)・DuckDB |
-| `zakuro-moq` | `zakuro-moq/` | Sora MoQ (Media over QUIC 実装) のリレー | s2n-quic・moqt-rs (`shiguredo_moqt`) |
+| `zakuro-moq` | `zakuro-moq/` | Sora MoQ (Media over QUIC 実装) のリレー | s2n-quic / ngtcp2-rs、moqt-rs (`shiguredo_moqt`) |
 
 両者で共有する基盤 (統計・HTTP サーバー・JSON-RPC) は `zakuro-core/` に置いています。
 
@@ -234,19 +234,55 @@ cargo run -p zakuro-moq -- \
   --duration 60
 ```
 
-TLS は既定で WebPKI のルート証明書を使って検証します。relay の CA 証明書を指定する場合は
-`--ca-cert <PEM>`、検証をスキップする場合は `--insecure` を使います。
+TLS は既定で証明書を検証します。relay の CA 証明書を指定する場合は `--ca-cert <PEM>`、
+検証をスキップする場合は `--insecure` を使います。s2n-quic / QMux は WebPKI のルート証明書を使い、
+`--ca-cert` を指定するとその PEM だけを信頼します。ngtcp2 はシステムの信頼ストアを使い、
+`--ca-cert` の証明書を追加で信頼します。
 
 ### トランスポート (`--transport`)
 
 `--transport` で下位トランスポートを選びます (既定は `quic`)。
 
-- `quic`: QUIC 直接接続 (s2n-quic)。UDP が必要です。
+- `quic`: QUIC 直接接続。`--quic-backend s2n-quic|ngtcp2` で実装を選びます (既定は `s2n-quic`)。UDP が必要です。
+- `wt-h3`: ngtcp2 による WebTransport over HTTP/3 接続。UDP が必要です。
+  ALPN は `h3`、WebTransport のサブプロトコルは `moqt-22` です。
+  URL は `moqt://` のまま指定し、パスとクエリーは HTTPS の Extended CONNECT に渡します。
 - `qmux`: QMux (draft-ietf-quic-qmux-02) 経由。TLS over TCP の 1 本のバイトストリームに
   QUIC version 1 のストリームと DATAGRAM を多重化するため、UDP が使えない環境でも接続できます。
   QMux 上の MOQT は experimental であり、QMux を終端できる relay が必要です。TCP の再送で
   遅延が伸びるため、遅延を重視する試験では QUIC 直接接続を使ってください。ALPN は QUIC 直接接続と
   同じ `moqt-22` です。
+
+ngtcp2-rs (`shiguredo_ngtcp2_tokio`) は `RESET_STREAM_AT` の受理を広告し、
+ピアが対応している場合は送信済みデータの配信を保証してストリームを reset します。
+対応していないピアには通常の `RESET_STREAM` を送ります。
+ngtcp2 は DNS 名と IP アドレスの両方に対応し、IP アドレスでは証明書の IP SAN を検証します。
+接続ごとに UDP ソケットと駆動タスクを作ります。s2n-quic はインスタンス内で
+アドレスファミリごとの UDP ソケットを共有するため、負荷試験時のリソース使用量が異なります。
+`wt-h3` のバックエンドは `ngtcp2` です。`--quic-backend` は省略できます。
+HTTP/3 SETTINGS と QUIC transport parameter を検証してから接続し、単方向・双方向ストリーム、
+WT フロー制御、reset / STOP_SENDING、drain / close を処理します。
+MOQT の object は subgroup stream で送信します。
+
+```bash
+cargo run -p zakuro-moq -- \
+  --url moqt://relay.example.com:4433 \
+  --quic-backend ngtcp2 \
+  --tracks video:30:1000 \
+  --vcs 10
+```
+
+WebTransport over HTTP/3 経由で接続する場合は次のように指定します。
+
+```bash
+cargo run -p zakuro-moq -- \
+  --url moqt://relay.example.com:4433/moq \
+  --transport wt-h3 \
+  --tracks video:30:1000 \
+  --vcs 10
+```
+
+QMux 経由で接続する場合は次のように指定します。
 
 ```bash
 cargo run -p zakuro-moq -- \
@@ -319,12 +355,13 @@ relay へ接続する場合は誤検知になるため既定では無効です�
 | オプション | 説明 |
 | --- | --- |
 | `--url` | MOQ relay の URL (`moqt://host:port`)。必須 |
-| `--transport` | 下位トランスポート (`quic` / `qmux`、デフォルト: `quic`) |
+| `--transport` | 下位トランスポート (`quic` / `wt-h3` / `qmux`、デフォルト: `quic`) |
+| `--quic-backend` | QUIC 実装 (`s2n-quic` / `ngtcp2`)。`quic` の既定は `s2n-quic`、`wt-h3` は `ngtcp2` |
 | `--namespace` | Track Namespace (デフォルト: `zakuro`) |
 | `--tracks` | publish するトラック (`名前[:レート[:サイズ]]` のカンマ区切り、デフォルト: `video`。`--subscribe-tracks` 指定時は publish しない) |
 | `--subscribe-tracks` | 購読するトラック名のカンマ区切り。`{instance}` / `{vc}` を書くと置換し、書かなければ `<名前>-<インスタンス>-<仮想クライアント>` になる |
 | `--verify-payload` | 受信 payload が zakuro-moq の publisher のパターンと一致するかを検査する |
-| `--ca-cert` | relay の CA 証明書 (PEM、未指定なら WebPKI のルート証明書) |
+| `--ca-cert` | relay の CA 証明書 (PEM)。既定の信頼ストアと追加 / 置換の扱いはバックエンドに依存 |
 | `--vcs` | 仮想クライアント数 (1-1000、デフォルト: 1) |
 | `--vcs-hatch-rate` | 仮想クライアントの起動レート (毎秒、デフォルト: 1.0) |
 | `--duration` | 接続維持秒数 (未指定なら無制限) |
@@ -344,6 +381,7 @@ relay へ接続する場合は誤検知になるため既定では無効です�
   "instance-hatch-rate": 1.0,
   "url": "moqt://relay.example.com:4433",
   "transport": "quic",
+  "quic-backend": "ngtcp2",
   "namespace": "zakuro",
   "tracks": [
     { "name": "video", "object-rate": 30, "object-size": 1000 },

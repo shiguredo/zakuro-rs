@@ -6,6 +6,7 @@ use nojson::{JsonValueKind, RawJson, RawJsonValue};
 use crate::error::{ErrorMessage, Result};
 use crate::logging::LogLevel;
 use crate::moq_client::MoqTransport;
+use crate::moq_client::transport::QuicBackend;
 
 /// `--tracks` で object レートを省略したときの既定値 (objects/sec)
 const DEFAULT_OBJECT_RATE: f64 = 30.0;
@@ -78,8 +79,10 @@ pub(crate) struct CommonArgs {
 pub(crate) struct InstanceArgs {
     /// MOQ relay の URL (`moqt://host:port`)
     pub(crate) url: String,
-    /// 下位トランスポート種別 (QUIC 直接接続 / QMux)
+    /// 下位トランスポート種別 (QUIC / WebTransport over HTTP/3 / QMux)
     pub(crate) transport: MoqTransport,
+    /// QUIC 直接接続で利用する実装
+    pub(crate) quic_backend: QuicBackend,
     /// Track Namespace
     pub(crate) namespace: String,
     /// publish するトラック (1 仮想クライアントが全トラックを publish する)
@@ -363,10 +366,28 @@ fn parse_instance_args(
         .then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let transport: MoqTransport = noargs::opt("transport")
-        .doc("Transport (quic | qmux, default: quic)")
+        .doc("Transport (quic | wt-h3 | qmux, default: quic)")
         .take(&mut args)
         .present_and_then(|o| MoqTransport::parse(o.value()))?
         .unwrap_or_default();
+
+    let quic_backend = noargs::opt("quic-backend")
+        .doc("QUIC backend (s2n-quic | ngtcp2, default: s2n-quic for quic, ngtcp2 for wt-h3)")
+        .take(&mut args)
+        .present_and_then(|o| QuicBackend::parse(o.value()))?;
+    if transport == MoqTransport::Qmux && quic_backend.is_some() {
+        return Err(
+            ErrorMessage::new("--quic-backend は quic または wt-h3 で指定してください").into(),
+        );
+    }
+    let quic_backend = quic_backend.unwrap_or(if transport == MoqTransport::WtH3 {
+        QuicBackend::Ngtcp2
+    } else {
+        QuicBackend::S2nQuic
+    });
+    if transport == MoqTransport::WtH3 && quic_backend != QuicBackend::Ngtcp2 {
+        return Err(ErrorMessage::new("wt-h3 は ngtcp2 バックエンドで利用してください").into());
+    }
 
     let namespace: String = noargs::opt("namespace")
         .doc("Track Namespace (default: zakuro)")
@@ -446,6 +467,7 @@ fn parse_instance_args(
     let instance = validate_instance_args(
         &url,
         transport,
+        quic_backend,
         &namespace,
         tracks_arg.as_deref(),
         subscribe_tracks_arg.as_deref(),
@@ -467,6 +489,7 @@ fn parse_instance_args(
 fn validate_instance_args(
     url: &str,
     transport: MoqTransport,
+    quic_backend: QuicBackend,
     namespace: &str,
     tracks_arg: Option<&str>,
     subscribe_tracks_arg: Option<&str>,
@@ -545,6 +568,7 @@ fn validate_instance_args(
     Ok(InstanceArgs {
         url: url.to_string(),
         transport,
+        quic_backend,
         namespace: namespace.to_string(),
         tracks,
         subscribe_tracks,
@@ -984,6 +1008,7 @@ mod tests {
             validate_instance_args(
                 "moqt://relay.example.com:4433",
                 MoqTransport::Quic,
+                QuicBackend::default(),
                 "zakuro",
                 Some("video"),
                 None,
@@ -1398,6 +1423,82 @@ mod tests {
         )
         .expect("解釈に成功すること");
         assert_eq!(instance.transport, MoqTransport::Quic);
+        assert_eq!(instance.quic_backend, QuicBackend::S2nQuic);
+    }
+
+    /// QUIC 実装の指定形式と未知の値、QMux との併用を検証する
+    #[test]
+    fn quic_backend_selection() {
+        for (option, expected) in [
+            ("--quic-backend=s2n-quic", QuicBackend::S2nQuic),
+            ("--quic-backend=ngtcp2", QuicBackend::Ngtcp2),
+        ] {
+            let (instance, _) = parse_instance_args(
+                "zakuro-moq",
+                vec!["--url=moqt://localhost:4433".into(), option.into()],
+                &mut Vec::new(),
+            )
+            .expect("指定した QUIC 実装を解釈できること");
+            assert_eq!(instance.quic_backend, expected);
+            assert_eq!(
+                expected.as_str(),
+                option.split_once('=').expect("値があること").1
+            );
+        }
+        for options in [
+            vec!["--quic-backend=unknown"],
+            vec!["--transport=qmux", "--quic-backend=ngtcp2"],
+            vec!["--transport=qmux", "--quic-backend=s2n-quic"],
+            vec!["--transport=wt-h3", "--quic-backend=s2n-quic"],
+        ] {
+            let mut argv = vec!["--url=moqt://localhost:4433".into()];
+            argv.extend(options.into_iter().map(str::to_owned));
+            assert!(
+                parse_instance_args("zakuro-moq", argv, &mut Vec::new()).is_err(),
+                "無効な組み合わせを拒否すること"
+            );
+        }
+    }
+
+    /// WebTransport は ngtcp2 を既定とし、明示指定と JSONC の双方で選択できること
+    #[test]
+    fn webtransport_selects_ngtcp2() {
+        for options in [
+            vec!["--transport=wt-h3"],
+            vec!["--transport=wt-h3", "--quic-backend=ngtcp2"],
+        ] {
+            let mut argv = vec!["--url=moqt://localhost/moq?room=test".into()];
+            argv.extend(options.into_iter().map(str::to_owned));
+            let (instance, _) = parse_instance_args("zakuro-moq", argv, &mut Vec::new())
+                .expect("WT 経路を選べること");
+            assert_eq!(instance.transport, MoqTransport::WtH3);
+            assert_eq!(instance.quic_backend, QuicBackend::Ngtcp2);
+        }
+        let config = parse_jsonc_config(r#"{"url":"moqt://localhost/", "transport":"wt-h3"}"#)
+            .expect("JSONC を解釈できること");
+        let (instance, _) = parse_instance_args(
+            "zakuro-moq",
+            config.instance_argvs[0].clone(),
+            &mut Vec::new(),
+        )
+        .expect("JSONC から WT 経路を選べること");
+        assert_eq!(instance.transport, MoqTransport::WtH3);
+        assert_eq!(instance.quic_backend, QuicBackend::Ngtcp2);
+    }
+
+    /// JSONC の値が CLI と同じ経路でバックエンドの選択に反映されること
+    #[test]
+    fn jsonc_quic_backend_selection() {
+        let config =
+            parse_jsonc_config(r#"{"url":"moqt://localhost:4433", "quic-backend":"ngtcp2"}"#)
+                .expect("JSONC を解釈できること");
+        let (instance, _) = parse_instance_args(
+            "zakuro-moq",
+            config.instance_argvs[0].clone(),
+            &mut Vec::new(),
+        )
+        .expect("JSONC のオプションを解釈できること");
+        assert_eq!(instance.quic_backend, QuicBackend::Ngtcp2);
     }
 
     /// `--transport qmux` と `--transport=qmux` を解釈できること
@@ -1421,7 +1522,7 @@ mod tests {
         }
     }
 
-    /// `--transport` に quic / qmux 以外は指定できないこと
+    /// 未知のトランスポートは指定できないこと
     #[test]
     fn transport_rejects_unknown_value() {
         let result = parse_instance_args(
@@ -1430,7 +1531,7 @@ mod tests {
                 "--url".to_string(),
                 "moqt://relay.example.com:4433".to_string(),
                 "--transport".to_string(),
-                "wt-h3".to_string(),
+                "unknown".to_string(),
             ],
             &mut Vec::new(),
         );

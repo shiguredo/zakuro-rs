@@ -4,10 +4,11 @@
 //! Track Name へ object を送り続ける。接続・切断・リトライのライフサイクルは
 //! `crate::virtual_client` の Sora 版と同じ規則に従う。
 
+mod ngtcp2;
 mod qmux;
 pub(crate) mod session;
 mod stream;
-mod transport;
+pub(crate) mod transport;
 
 use std::time::Duration;
 
@@ -57,8 +58,10 @@ pub(crate) struct MoqClientConfig {
     pub(crate) endpoint: MoqEndpoint,
     /// TLS 設定
     pub(crate) tls: MoqTlsOptions,
-    /// 下位トランスポート種別 (QUIC 直接接続 / QMux)
+    /// 下位トランスポート種別 (QUIC / WebTransport over HTTP/3 / QMux)
     pub(crate) transport: MoqTransport,
+    /// QUIC 直接接続で利用する実装
+    pub(crate) quic_backend: transport::QuicBackend,
     /// Track Namespace
     pub(crate) namespace: String,
     /// publish するトラック (Track Name は仮想クライアントごとに一意化する)
@@ -395,7 +398,7 @@ async fn duration_timer(duration: Option<f64>) {
 
 /// MOQ relay へ接続するためのコンテキストを構築する
 ///
-/// 初期接続先の名前解決と s2n-quic クライアントの構築はインスタンスで 1 回だけ行い、
+/// 初期接続先の名前解決と QUIC の共有設定の構築はインスタンスで 1 回だけ行い、
 /// 仮想クライアントで共有する。GOAWAY の New Session URI へ移行する場合の接続先は、
 /// 必要になった時点で接続先ごとに構築する。
 ///
@@ -407,7 +410,16 @@ pub(crate) async fn build_context(config: &MoqClientConfig) -> Result<MoqClientC
         tracing::warn!("MOQ TLS certificate verification is disabled (--insecure)");
     }
     tracing::info!("MOQ transport: {}", config.transport.as_str());
-    MoqClientContext::new(&config.endpoint, &config.tls, config.transport).await
+    if config.transport == MoqTransport::Quic {
+        tracing::info!("MOQ QUIC backend: {}", config.quic_backend.as_str());
+    }
+    MoqClientContext::new(
+        &config.endpoint,
+        &config.tls,
+        config.transport,
+        config.quic_backend,
+    )
+    .await
 }
 
 /// セッション future の終了処理を待つ

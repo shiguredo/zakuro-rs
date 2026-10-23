@@ -1,7 +1,7 @@
 //! MOQT セッションの駆動 (SETUP 交換・複数トラックの PUBLISH・object 送信)
 //!
 //! `shiguredo_moqt` の `Session` は Sans I/O の状態機械であり、ワイヤの読み書きは
-//! 呼び出し側の責務である。このモジュールは経路ごとのストリーム (QUIC 直接接続 / QMux) と
+//! 呼び出し側の責務である。このモジュールは経路ごとのストリーム (QUIC / WebTransport over HTTP/3 / QMux) と
 //! `Session` を 1 つのタスクで駆動し、publisher として複数のトラックへ object を送り続ける。
 //!
 //! トラックごとに bidi request stream を 1 本開くため、その受信方向はストリームごとの
@@ -199,6 +199,13 @@ enum DataMessage {
         /// 対象 stream の DataStreamId
         stream_id: DataStreamId,
     },
+    /// peer が送信方向を reset した
+    Reset {
+        /// 対象 stream の DataStreamId
+        stream_id: DataStreamId,
+        /// peer が指定したエラーコード
+        error_code: u64,
+    },
     /// 読み込みに失敗した (stream は破棄する)
     Failed {
         /// 対象 stream の DataStreamId
@@ -217,10 +224,12 @@ enum RequestMessage {
         /// 受信したメッセージ
         message: ControlMessage,
     },
-    /// peer が送信方向を閉じた (FIN)
+    /// peer が送信方向を閉じた
     Closed {
         /// 対象 request の Request ID
         request_id: u64,
+        /// FIN または reset
+        end: RequestStreamEnd,
     },
 }
 
@@ -629,6 +638,7 @@ pub(crate) async fn run(
     // 影響する。QMux は native QUIC と同じく AUTHORITY / PATH を送る
     let transport = match connection.transport() {
         MoqTransport::Quic => Transport::Quic,
+        MoqTransport::WtH3 => Transport::WebTransport,
         MoqTransport::Qmux => Transport::Qmux,
     };
     let (mut handle, mut recv_acceptor, mut bidi_acceptor) = connection.split();
@@ -639,7 +649,7 @@ pub(crate) async fn run(
         .keep_alive(token)
         .map_err(|e| ErrorMessage::new(format!("keep-alive の有効化に失敗しました: {e}")))?;
 
-    let mut session = Session::new_client(transport, build_setup_options(config))
+    let mut session = Session::new_client(transport, build_setup_options(config, transport))
         .map_err(|e| ErrorMessage::new(format!("MOQT セッションの生成に失敗しました: {e:?}")))?;
 
     // 自側の制御ストリームを開き、SETUP を送る
@@ -788,8 +798,8 @@ pub(crate) async fn run(
                             ErrorMessage::new(format!("request メッセージの受理に失敗しました: {e:?}"))
                         })?;
                     }
-                    Some(RequestMessage::Closed { request_id }) => {
-                        if let Err(e) = session.recv_request_stream_closed(request_id, RequestStreamEnd::Fin) {
+                    Some(RequestMessage::Closed { request_id, end }) => {
+                        if let Err(e) = session.recv_request_stream_closed(request_id, end) {
                             tracing::warn!(
                                 "MOQT: request stream closed with an error: request_id={} error={:?}",
                                 request_id,
@@ -872,6 +882,14 @@ pub(crate) async fn run(
                     DataMessage::Closed { stream_id } => {
                         stream_aliases.remove(&stream_id);
                         let _ = session.recv_data_stream_closed(stream_id, RequestStreamEnd::Fin);
+                    }
+                    DataMessage::Reset { stream_id, error_code } => {
+                        stream_aliases.remove(&stream_id);
+                        // ngtcp2 の公開イベントは RESET_STREAM_AT の reliable size を公開しない。
+                        // 受信済みバイト数で代用せず、エラーコードだけを Session へ伝える。
+                        let _ = session.recv_data_stream_closed(stream_id, RequestStreamEnd::Reset {
+                            error_code: Some(error_code), reliable_size: None,
+                        });
                     }
                     DataMessage::Failed { stream_id, reason } => {
                         tracing::warn!("MOQT: data stream read failed: stream_id={stream_id:?} {reason}");
@@ -1142,7 +1160,12 @@ async fn run_request_reader(
         };
         match read {
             Ok(0) => {
-                let _ = tx.send(RequestMessage::Closed { request_id }).await;
+                let _ = tx
+                    .send(RequestMessage::Closed {
+                        request_id,
+                        end: RequestStreamEnd::Fin,
+                    })
+                    .await;
                 return;
             }
             Ok(size) => {
@@ -1174,6 +1197,21 @@ async fn run_request_reader(
                 }
             }
             Err(e) => {
+                if let Some(reset) = e
+                    .get_ref()
+                    .and_then(|e| e.downcast_ref::<super::ngtcp2::StreamReset>())
+                {
+                    let _ = tx
+                        .send(RequestMessage::Closed {
+                            request_id,
+                            end: RequestStreamEnd::Reset {
+                                error_code: Some(reset.0),
+                                reliable_size: None,
+                            },
+                        })
+                        .await;
+                    return;
+                }
                 tracing::warn!(
                     "MOQT: request stream read failed: request_id={} error={}",
                     request_id,
@@ -1246,6 +1284,23 @@ fn record_received_object(
     counters.record(payload_length, payload_ok);
 }
 
+/// reset のエラーコードを失わずに data stream の読み込みエラーを通知する
+fn data_read_error(stream_id: DataStreamId, error: &std::io::Error) -> DataMessage {
+    match error
+        .get_ref()
+        .and_then(|e| e.downcast_ref::<super::ngtcp2::StreamReset>())
+    {
+        Some(reset) => DataMessage::Reset {
+            stream_id,
+            error_code: reset.0,
+        },
+        None => DataMessage::Failed {
+            stream_id,
+            reason: format!("読み込みに失敗しました: {error}"),
+        },
+    }
+}
+
 /// uni data stream を読み、デコードした内容をメインタスクへ送るタスク
 ///
 /// `Session` は `&mut self` を要求するため複数 stream を同時に扱えない。デコードだけを
@@ -1287,12 +1342,7 @@ async fn run_data_reader(
                 return;
             }
             Err(e) => {
-                let _ = tx
-                    .send(DataMessage::Failed {
-                        stream_id,
-                        reason: format!("読み込みに失敗しました: {e}"),
-                    })
-                    .await;
+                let _ = tx.send(data_read_error(stream_id, &e)).await;
                 return;
             }
         }
@@ -1334,12 +1384,7 @@ async fn run_data_reader(
                 return;
             }
             Err(e) => {
-                let _ = tx
-                    .send(DataMessage::Failed {
-                        stream_id,
-                        reason: format!("読み込みに失敗しました: {e}"),
-                    })
-                    .await;
+                let _ = tx.send(data_read_error(stream_id, &e)).await;
                 return;
             }
         }
@@ -1369,12 +1414,7 @@ async fn run_data_reader(
                     return;
                 }
                 Err(e) => {
-                    let _ = tx
-                        .send(DataMessage::Failed {
-                            stream_id,
-                            reason: format!("読み込みに失敗しました: {e}"),
-                        })
-                        .await;
+                    let _ = tx.send(data_read_error(stream_id, &e)).await;
                     return;
                 }
             },
@@ -1401,12 +1441,7 @@ async fn run_data_reader(
                     return;
                 }
                 Err(e) => {
-                    let _ = tx
-                        .send(DataMessage::Failed {
-                            stream_id,
-                            reason: format!("読み込みに失敗しました: {e}"),
-                        })
-                        .await;
+                    let _ = tx.send(data_read_error(stream_id, &e)).await;
                     return;
                 }
             }
@@ -1478,21 +1513,20 @@ fn take_setup_message(session: &mut Session) -> Result<ControlMessage> {
 
 /// SETUP Options を構築する
 ///
-/// PATH (0x01) と AUTHORITY (0x05) を載せる。
-///
 /// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) は WebTransport での送信を
-/// MUST NOT としているが、zakuro は WebTransport を使わない。QMux は同節の適用範囲外であり、
-/// native QUIC と同じく AUTHORITY / PATH を送る (QMux 上の MOQT の参照実装と同じ扱い)。
-fn build_setup_options(config: &SessionConfig<'_>) -> SetupOptions {
+/// MUST NOT としている。WebTransport では CONNECT で渡し、QUIC と QMux では SETUP に載せる。
+fn build_setup_options(config: &SessionConfig<'_>, transport: Transport) -> SetupOptions {
     let mut options = SetupOptions::new();
-    options.push(SetupOption {
-        option_type: SETUP_OPTION_PATH,
-        value: SetupOptionValue::Bytes(config.path.as_bytes().to_vec()),
-    });
-    options.push(SetupOption {
-        option_type: SETUP_OPTION_AUTHORITY,
-        value: SetupOptionValue::Bytes(config.authority.as_bytes().to_vec()),
-    });
+    if transport != Transport::WebTransport {
+        options.push(SetupOption {
+            option_type: SETUP_OPTION_PATH,
+            value: SetupOptionValue::Bytes(config.path.as_bytes().to_vec()),
+        });
+        options.push(SetupOption {
+            option_type: SETUP_OPTION_AUTHORITY,
+            value: SetupOptionValue::Bytes(config.authority.as_bytes().to_vec()),
+        });
+    }
     options.push(SetupOption {
         option_type: SETUP_OPTION_MOQT_IMPLEMENTATION,
         value: SetupOptionValue::Bytes(MOQT_IMPLEMENTATION_NAME.to_vec()),
@@ -1863,7 +1897,7 @@ async fn drain_events(
             }
             SessionEvent::CloseSession(error) => {
                 // `CloseSession` は「I/O 層が接続を閉じる」指示である
-                state.connection_handle.close(error.code);
+                state.connection_handle.close(error.code).await;
                 state.closed_reason = Some(format!("{:#x} {}", error.code, error.reason));
             }
             // publisher 専用クライアントでは扱わないイベント
@@ -1942,12 +1976,24 @@ mod tests {
             verify_payload: false,
             migrate_on_goaway: false,
         };
-        let options = build_setup_options(&config);
+        let options = build_setup_options(&config, Transport::Quic);
         assert_eq!(options.path(), Some(b"/".as_slice()), "PATH が載っていない");
         assert_eq!(
             options.authority(),
             Some(b"relay.example.com:4433".as_slice()),
             "AUTHORITY が載っていない"
+        );
+        // WT では CONNECT が接続先を運ぶため、同じ値を SETUP に重複させない。
+        let wt_options = build_setup_options(&config, Transport::WebTransport);
+        assert_eq!(
+            wt_options.path(),
+            None,
+            "WT の SETUP に PATH を載せないこと"
+        );
+        assert_eq!(
+            wt_options.authority(),
+            None,
+            "WT の SETUP に AUTHORITY を載せないこと"
         );
     }
 

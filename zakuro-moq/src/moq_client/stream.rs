@@ -1,11 +1,11 @@
 //! MOQT の I/O 層で使うストリームと接続ハンドルの抽象化
 //!
 //! `shiguredo_moqt::Session` は Sans I/O の状態機械であり、ワイヤの読み書きは呼び出し側の
-//! 責務である。zakuro-moq は QUIC 直接接続 (s2n-quic) と QMux (tokio-qmux) の 2 経路を持ち、
+//! 責務である。zakuro-moq は QUIC 直接接続 (s2n-quic / ngtcp2)、WebTransport over HTTP/3、QMux の経路を持ち、
 //! `session.rs` は経路を意識せずにセッションを駆動したい。そこでストリーム・接続ハンドル・
 //! accept を enum で包み、必要な操作だけを提供する。
 //!
-//! トレイトは作らない (時雨堂 Rust 規約)。経路が 2 つしかなく、どちらも同じ操作を提供する
+//! トレイトは作らない (時雨堂 Rust 規約)。各経路が同じ操作を提供する
 //! ため、enum の match で十分である。
 
 use std::sync::Arc;
@@ -14,12 +14,14 @@ use s2n_quic::connection::{BidirectionalStreamAcceptor, Handle, ReceiveStreamAcc
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
-use super::qmux;
+use super::{ngtcp2, qmux};
 
 /// 送信ストリーム
 pub(crate) enum MoqSendStream {
     /// QUIC 直接接続の送信ストリーム
     Quic(s2n_quic::stream::SendStream),
+    /// ngtcp2 の送信ストリーム
+    Ngtcp2(ngtcp2::SendStream),
     /// QMux の送信ストリーム
     Qmux(tokio_qmux::SendStream),
 }
@@ -32,6 +34,7 @@ impl MoqSendStream {
     pub(crate) fn id(&self) -> u64 {
         match self {
             Self::Quic(stream) => stream.id(),
+            Self::Ngtcp2(stream) => stream.id(),
             Self::Qmux(stream) => stream.id().as_u64(),
         }
     }
@@ -45,6 +48,7 @@ impl MoqSendStream {
         match self {
             // s2n-quic の SendStream は AsyncWrite を実装している
             Self::Quic(stream) => stream.write_all(buf).await,
+            Self::Ngtcp2(stream) => stream.write_all(buf).await,
             // tokio-qmux の write は渡したデータをすべて受け付けるまで待つ
             Self::Qmux(stream) => stream.write(buf).await.map(|_| ()).map_err(io_error),
         }
@@ -58,6 +62,7 @@ impl MoqSendStream {
     pub(crate) async fn finish(&mut self) -> std::io::Result<()> {
         match self {
             Self::Quic(stream) => stream.finish().map_err(io_error),
+            Self::Ngtcp2(stream) => stream.finish().await,
             Self::Qmux(stream) => stream.finish().await.map_err(io_error),
         }
     }
@@ -68,6 +73,7 @@ impl MoqSendStream {
     /// (draft-ietf-moq-transport-22 §12.5) である。QMux は QUIC version 1 のフレームを
     /// 多重化するため、コード空間は native QUIC と共通である
     /// (draft-ietf-quic-qmux-02 Section 4)。
+    /// ngtcp2 は対応ピアに RESET_STREAM_AT を送り、送信済みのバイト列を保証する。
     ///
     /// # Errors
     ///
@@ -78,6 +84,7 @@ impl MoqSendStream {
                 .reset(application_error(error_code))
                 .map_err(io_error),
             Self::Qmux(stream) => stream.reset(error_code).await.map_err(io_error),
+            Self::Ngtcp2(stream) => stream.reset(error_code).await,
         }
     }
 }
@@ -86,6 +93,8 @@ impl MoqSendStream {
 pub(crate) enum MoqRecvStream {
     /// QUIC 直接接続の受信ストリーム
     Quic(s2n_quic::stream::ReceiveStream),
+    /// ngtcp2 の受信ストリーム
+    Ngtcp2(ngtcp2::RecvStream),
     /// QMux の受信ストリーム
     Qmux(tokio_qmux::RecvStream),
 }
@@ -95,6 +104,7 @@ impl MoqRecvStream {
     pub(crate) fn id(&self) -> u64 {
         match self {
             Self::Quic(stream) => stream.id(),
+            Self::Ngtcp2(stream) => stream.id(),
             Self::Qmux(stream) => stream.id().as_u64(),
         }
     }
@@ -103,11 +113,12 @@ impl MoqRecvStream {
     ///
     /// # Errors
     ///
-    /// 読み込みに失敗した場合はエラーになる。QMux の RESET_STREAM もエラーとして扱う
-    /// (`reliable_size` は RESET_STREAM_AT 未対応のため使わない)。
+    /// 読み込みとストリームの reset はエラーになる。ngtcp2 の reset エラーは
+    /// [`ngtcp2::StreamReset`] としてエラーコードを保持する。
     pub(crate) async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Self::Quic(stream) => stream.read(buf).await,
+            Self::Ngtcp2(stream) => stream.read(buf).await,
             Self::Qmux(stream) => match stream.read(buf).await {
                 Ok(Some(size)) => Ok(size),
                 // QMux の read は FIN を Ok(None) で表す
@@ -122,6 +133,7 @@ impl std::fmt::Debug for MoqRecvStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Quic(stream) => f.debug_tuple("Quic").field(stream).finish(),
+            Self::Ngtcp2(stream) => f.debug_tuple("Ngtcp2").field(&stream.id()).finish(),
             Self::Qmux(stream) => f.debug_tuple("Qmux").field(stream).finish(),
         }
     }
@@ -129,12 +141,14 @@ impl std::fmt::Debug for MoqRecvStream {
 
 /// 接続のハンドル
 ///
-/// 複数タスクから clone して使う (ストリームの open と接続の close)。QUIC は s2n-quic の
-/// `Handle` を、QMux は `Arc<tokio_qmux::Connection>` を持つ。
+/// 複数タスクから clone して使う (ストリームの open と接続の close)。s2n-quic は
+/// `Handle`、ngtcp2 は駆動タスクへのチャネル、QMux は `Arc<tokio_qmux::Connection>` を持つ。
 #[derive(Clone)]
 pub(crate) enum MoqConnectionHandle {
     /// QUIC 直接接続のハンドル
     Quic(Handle),
+    /// ngtcp2 の接続ハンドル
+    Ngtcp2(ngtcp2::Handle),
     /// QMux 接続のハンドル
     Qmux(Arc<tokio_qmux::Connection>),
 }
@@ -157,6 +171,7 @@ impl MoqConnectionHandle {
                 .await
                 .map(MoqSendStream::Qmux)
                 .map_err(io_error),
+            Self::Ngtcp2(handle) => handle.open_send_stream().await.map(MoqSendStream::Ngtcp2),
         }
     }
 
@@ -171,6 +186,10 @@ impl MoqConnectionHandle {
         &mut self,
     ) -> std::io::Result<(MoqRecvStream, MoqSendStream)> {
         match self {
+            Self::Ngtcp2(handle) => {
+                let (recv, send) = handle.open_bidirectional_stream().await?;
+                Ok((MoqRecvStream::Ngtcp2(recv), MoqSendStream::Ngtcp2(send)))
+            }
             Self::Quic(handle) => {
                 let stream = handle.open_bidirectional_stream().await.map_err(io_error)?;
                 let (recv, send) = stream.split();
@@ -189,9 +208,10 @@ impl MoqConnectionHandle {
     /// MOQT のセッション終了コード (`error_code`) を接続層へ伝える。QMux は QUIC version 1 の
     /// コード空間を共有するため、native QUIC と同じ値をそのまま載せる
     /// (draft-ietf-quic-qmux-02 Section 4)。
-    pub(crate) fn close(&self, error_code: u64) {
+    pub(crate) async fn close(&self, error_code: u64) {
         match self {
             Self::Quic(handle) => handle.close(application_error(error_code)),
+            Self::Ngtcp2(handle) => handle.close(error_code).await,
             Self::Qmux(connection) => {
                 // QMux の CONNECTION_CLOSE は理由文字列を要求する。値は可変長整数の範囲に
                 // 収まる必要があり、収まらない場合は送信されない (RFC 9000 Section 19.19)
@@ -204,7 +224,8 @@ impl MoqConnectionHandle {
 
     /// 接続をアイドルタイムアウトで切られないように維持する
     ///
-    /// QUIC は s2n-quic の keep-alive を有効にする。QMux には keep-alive の API が無いため、
+    /// s2n-quic の keep-alive を有効にする。ngtcp2 は接続構築時に有効にしている。
+    /// QMux には keep-alive の API が無いため、
     /// QX_PING を定期的に送るタスクを起動する ([`qmux::spawn_keep_alive`])。
     ///
     /// # Errors
@@ -214,6 +235,8 @@ impl MoqConnectionHandle {
     pub(crate) fn keep_alive(&mut self, token: &CancellationToken) -> std::io::Result<()> {
         match self {
             Self::Quic(handle) => handle.keep_alive(true).map_err(io_error),
+            // ngtcp2 の keep-alive は接続作成時に設定済みである
+            Self::Ngtcp2(_) => Ok(()),
             Self::Qmux(connection) => {
                 qmux::spawn_keep_alive(connection, token);
                 Ok(())
@@ -226,6 +249,8 @@ impl MoqConnectionHandle {
 pub(crate) enum MoqRecvAcceptor {
     /// QUIC 直接接続の単方向ストリーム acceptor
     Quic(ReceiveStreamAcceptor),
+    /// ngtcp2 の単方向ストリーム acceptor
+    Ngtcp2(ngtcp2::RecvAcceptor),
     /// QMux 接続 (accept は `&self` で待てる)
     Qmux(Arc<tokio_qmux::Connection>),
 }
@@ -240,6 +265,10 @@ impl MoqRecvAcceptor {
     /// accept に失敗した場合はエラーになる。
     pub(crate) async fn accept_receive_stream(&mut self) -> std::io::Result<Option<MoqRecvStream>> {
         match self {
+            Self::Ngtcp2(acceptor) => acceptor
+                .accept()
+                .await
+                .map(|stream| stream.map(MoqRecvStream::Ngtcp2)),
             Self::Quic(acceptor) => acceptor
                 .accept_receive_stream()
                 .await
@@ -258,6 +287,8 @@ impl MoqRecvAcceptor {
 pub(crate) enum MoqBidiAcceptor {
     /// QUIC 直接接続の双方向ストリーム acceptor
     Quic(BidirectionalStreamAcceptor),
+    /// ngtcp2 の双方向ストリーム acceptor
+    Ngtcp2(ngtcp2::BidiAcceptor),
     /// QMux 接続 (accept は `&self` で待てる)
     Qmux(Arc<tokio_qmux::Connection>),
 }
@@ -274,6 +305,10 @@ impl MoqBidiAcceptor {
         &mut self,
     ) -> std::io::Result<Option<(MoqRecvStream, MoqSendStream)>> {
         match self {
+            Self::Ngtcp2(acceptor) => acceptor.accept().await.map(|stream| {
+                stream
+                    .map(|(recv, send)| (MoqRecvStream::Ngtcp2(recv), MoqSendStream::Ngtcp2(send)))
+            }),
             Self::Quic(acceptor) => acceptor
                 .accept_bidirectional_stream()
                 .await

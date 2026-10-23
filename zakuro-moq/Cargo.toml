@@ -15,6 +15,8 @@ name = "zakuro-moq"
 path = "src/main.rs"
 
 [dependencies]
+# CA 証明書を ngtcp2 に 1 枚ずつ渡すための PEM エンコード
+base64ct = { version = "1.8", features = ["alloc"] }
 # ログのファサード (共有クレート zakuro-core も使う)
 log = "0.4"
 # CLI 引数パース
@@ -23,6 +25,10 @@ noargs = "0.4"
 nojson = "0.3"
 # TLS (s2n-quic の rustls provider と QMux 経路の TLS over TCP で利用)
 rustls = "0.23"
+# HTTP/3 と WebTransport の Sans I/O 実装
+shiguredo_http3 = "2026.1.0-canary.12"
+# ngtcp2 による QUIC 接続 (RESET_STREAM_AT 対応の Tokio 統合)
+shiguredo_ngtcp2_tokio = "2026.1.0-canary.2"
 # TLS ハンドシェイクの Tokio 統合 (QMux 経路の TLS over TCP で利用)
 tokio-rustls = "0.26"
 # tokio Stream ラッパー (ReceiverStream)
@@ -84,3 +90,9 @@ features = [
 [dependencies.tokio-qmux]
 git = "https://github.com/shiguredo/qmux-rs"
 rev = "3e0dc0f6a7404b940a67a42e04f986a79811a046"
+
+[dev-dependencies]
+# QUIC 接続テスト用の自己署名証明書生成
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+# QUIC 接続テスト用の証明書ファイルを保持する
+tempfile = "3.27"
