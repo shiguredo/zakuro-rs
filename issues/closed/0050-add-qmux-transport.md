@@ -79,7 +79,7 @@ zakuro-moq が UDP を使えない環境や、TCP しか通らない環境でも
   --features fdk-aac -- -D warnings` / `cargo test --locked --workspace --features fdk-aac` /
   `make smoke` / `prek run tombi-lint --all-files` / `prek run tombi-format --all-files` が
   全て成功した。
-- 実 QMux relay (`moqt://sora-moq.shiguredo.co.jp/`) に対する E2E を 2026-10-21 に実施した。
+- 実 QMux relay に対する E2E を 2026-10-21 に実施した。接続先のホスト名はリポジトリに書かない。
   TLS の証明書検証を有効にしたまま `--transport qmux` で接続し、次の 2 条件で
   publish / subscribe が成立した。
   - VC 1 本 20 秒 (`video:30:1000`): sent-objects=600 / received-objects=600 /

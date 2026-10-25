@@ -86,7 +86,7 @@ QMux の実効 idle timeout は両端の広告値のうち 0 でない値の最�
 
 ## 3. 制約と未対応
 
-- 実 QMux relay として `moqt://sora-moq.shiguredo.co.jp/` で動作を確認した (2026-10-21)。
+- 実 QMux relay で動作を確認した (2026-10-21)。接続先のホスト名はリポジトリに書かない。
   TLS の証明書検証を有効にしたまま、VC 1 本 20 秒と VC 3 本 10 秒の publish + subscribe を
   実行し、両方で `publish=1/1` / `subscribe=1/1` / `payload-mismatches=0` だった。
   ストリームアダプタは qmux-rs の client と server をメモリ上の duplex で両端に立てても
@@ -105,6 +105,6 @@ QMux の実効 idle timeout は両端の広告値のうち 0 でない値の最�
 - `cargo test --locked --workspace --features fdk-aac`
 - `make smoke` (`zakuro-moq --help` に `--transport` が出ること)
 - tombic (`prek run tombi-lint --all-files` / `prek run tombi-format --all-files`)
-- 実 relay の E2E: `moqt://sora-moq.shiguredo.co.jp/` へ `--transport qmux` で接続し、
+- 実 relay の E2E: テスト用 relay へ `--transport qmux` で接続し、
   `--tracks video:30:1000 --subscribe-tracks video --verify-payload --vcs 1 --duration 20` で
   publish / subscribe が成立すること (2026-10-21 に確認)
