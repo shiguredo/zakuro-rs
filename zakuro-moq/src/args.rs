@@ -14,6 +14,40 @@ const DEFAULT_OBJECT_RATE: f64 = 30.0;
 /// `--tracks` で object サイズを省略したときの既定値 (バイト)
 const DEFAULT_OBJECT_SIZE: usize = 1000;
 
+/// datagram 配送で送る object 1 個のサイズ上限の既定値 (バイト)
+///
+/// RFC 9000 §14 (Datagram Size) は経路が最低限支える datagram サイズを 1200 バイト
+/// (QUIC パケットヘッダと AEAD タグを含む UDP payload) と定めている。ここで判定するのは
+/// MOQT の OBJECT_DATAGRAM (ヘッダ + Properties + payload) の長さであり、QUIC のパケット
+/// ヘッダ、packet number、AEAD タグ、DATAGRAM frame の type / Length は含まれないため、
+/// その分の余裕を引いた値を既定にする。
+const DEFAULT_DATAGRAM_MAX_SIZE: usize = 1160;
+
+/// datagram のサイズ上限の許容範囲 (バイト)
+///
+/// 1 は object が入らず、65535 は QUIC DATAGRAM の最大値 (RFC 9221 §3) である。
+const DATAGRAM_MAX_SIZE_RANGE: std::ops::RangeInclusive<usize> = 1..=65535;
+
+/// OBJECT_DATAGRAM のヘッダと LOC プロパティに必要な最大バイト数
+///
+/// Type Flags (1 バイト) と Track Alias / Group ID / Object ID の varint (最大 8 バイトずつ)、
+/// LOC の Timestamp / Timescale プロパティ (最大 15 バイト) を保守的に見積もる。
+/// 起動時に object サイズが datagram に収まるかを判定するために使う。
+const DATAGRAM_HEADER_MAX_SIZE: usize = 48;
+
+/// ngtcp2 の `DatagramConfig` が既定で許可する DATAGRAM の最大サイズ (バイト)
+///
+/// `shiguredo_ngtcp2_tokio::DatagramConfig::default().max_tx_datagram_size` は
+/// 1 パケットに収まる 1200 バイトである。これを超える datagram は送信時にエラーになるため、
+/// 起動時に判定する。
+const NGTCP2_DATAGRAM_MAX_SIZE: usize = 1200;
+
+/// WebTransport over HTTP/3 の HTTP Datagram が付ける Quarter Stream ID の最大バイト数
+///
+/// RFC 9297 §2.1 の Quarter Stream ID は varint であり、WebTransport のセッション ID が
+/// 小さい間は 1 バイトである。保守的に 1 バイトを見積もる。
+const WT_H3_DATAGRAM_OVERHEAD: usize = 1;
+
 /// `--tracks` を省略したときのトラック名
 const DEFAULT_TRACK_NAME: &str = "video";
 
@@ -48,6 +82,46 @@ const HATCH_RATE_RANGE: std::ops::RangeInclusive<f64> = 1e-6..=1e6;
 /// を上限にする。
 const MAX_DURATION_SECONDS: f64 = 1e9;
 
+/// object の配送方式 (draft-ietf-moq-transport-22 §2.1.1 (Object Fields))
+///
+/// Delivery Mode は Original Publisher が object ごとに決める値であり、購読側とは
+/// 交渉しない。zakuro-moq はトラック単位で方式を固定する (仕様上は同じトラックで
+/// subgroup と datagram を混在させられるが、負荷試験では比較しやすいようトラック単位にする)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum DeliveryMode {
+    /// subgroup stream で送る
+    #[default]
+    Subgroup,
+    /// OBJECT_DATAGRAM で送る
+    Datagram,
+}
+
+impl DeliveryMode {
+    /// CLI / JSONC の値から配送方式を解釈する
+    ///
+    /// # Errors
+    ///
+    /// `subgroup` / `datagram` 以外の値はエラーになる。
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "subgroup" => Ok(Self::Subgroup),
+            "datagram" => Ok(Self::Datagram),
+            _ => Err(ErrorMessage::new(format!(
+                "配送方式は subgroup または datagram で指定してください: {value:?}"
+            ))
+            .into()),
+        }
+    }
+
+    /// CLI とログに載せる名前を返す
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Subgroup => "subgroup",
+            Self::Datagram => "datagram",
+        }
+    }
+}
+
 /// トラック 1 本の設定
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TrackSpec {
@@ -57,6 +131,8 @@ pub(crate) struct TrackSpec {
     pub(crate) object_rate: f64,
     /// 1 object の payload サイズ (バイト)
     pub(crate) object_size: usize,
+    /// object の配送方式
+    pub(crate) delivery: DeliveryMode,
 }
 
 /// プロセス全体で共有する設定
@@ -87,6 +163,8 @@ pub(crate) struct InstanceArgs {
     pub(crate) namespace: String,
     /// publish するトラック (1 仮想クライアントが全トラックを publish する)
     pub(crate) tracks: Vec<TrackSpec>,
+    /// datagram 配送で送る object 1 個のサイズ上限 (バイト)
+    pub(crate) datagram_max_size: usize,
     /// subscribe するトラック名 (Full Track Name は `<名前>-<instance>-<vc>`)
     pub(crate) subscribe_tracks: Vec<String>,
     /// 受信 payload が zakuro-moq の publisher のパターンと一致するかを検査する
@@ -405,10 +483,16 @@ fn parse_instance_args(
         .unwrap_or_else(|| "zakuro".to_string());
 
     let tracks_arg: Option<String> = noargs::opt("tracks")
-        .doc("Tracks to publish (name[:rate[:size]], comma separated, default: video)")
-        .example("video:30:1000,audio:50:200")
+        .doc("Tracks to publish (name[:rate[:size[:delivery]]], comma separated, default: video)")
+        .example("video:30:1000,audio:50:200:datagram")
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let datagram_max_size: usize = noargs::opt("datagram-max-size")
+        .doc("Maximum size of an OBJECT_DATAGRAM in bytes (default: 1160)")
+        .take(&mut args)
+        .present_and_then(|o| o.value().parse::<usize>())?
+        .unwrap_or(DEFAULT_DATAGRAM_MAX_SIZE);
 
     let subscribe_tracks_arg: Option<String> = noargs::opt("subscribe-tracks")
         .doc("Track names to subscribe (comma separated)")
@@ -479,6 +563,7 @@ fn parse_instance_args(
         quic_backend,
         &namespace,
         tracks_arg.as_deref(),
+        datagram_max_size,
         subscribe_tracks_arg.as_deref(),
         verify_payload,
         ca_cert.clone(),
@@ -501,6 +586,7 @@ fn validate_instance_args(
     quic_backend: QuicBackend,
     namespace: &str,
     tracks_arg: Option<&str>,
+    datagram_max_size: usize,
     subscribe_tracks_arg: Option<&str>,
     verify_payload: bool,
     ca_cert: Option<String>,
@@ -541,6 +627,53 @@ fn validate_instance_args(
     };
     let subscribe_tracks = parse_subscribe_tracks(subscribe_tracks_arg)?;
 
+    // datagram は分割できず 1 つの QUIC パケットに収まる必要がある (RFC 9221 §5)。
+    // 経路の上限を超えた datagram は通知なく破棄されるため (draft-ietf-moq-transport-22
+    // §11.2 (Datagrams))、起動時に object サイズが収まるかを判定する
+    if !DATAGRAM_MAX_SIZE_RANGE.contains(&datagram_max_size) {
+        return Err(ErrorMessage::new(format!(
+            "--datagram-max-size は {} から {} の範囲で指定してください",
+            DATAGRAM_MAX_SIZE_RANGE.start(),
+            DATAGRAM_MAX_SIZE_RANGE.end()
+        ))
+        .into());
+    }
+    for track in tracks
+        .iter()
+        .filter(|track| track.delivery == DeliveryMode::Datagram)
+    {
+        let required = track.object_size + DATAGRAM_HEADER_MAX_SIZE;
+        if required > datagram_max_size {
+            return Err(ErrorMessage::new(format!(
+                "datagram 配送のトラックが --datagram-max-size に収まりません: track={} object-size={} ヘッダ込み={} --datagram-max-size={}",
+                track.name, track.object_size, required, datagram_max_size
+            ))
+            .into());
+        }
+    }
+
+    // ngtcp2 の DatagramConfig は送信できる DATAGRAM を 1 パケット分 (1200 バイト) に
+    // 制限している。WebTransport over HTTP/3 は HTTP Datagram の Quarter Stream ID
+    // (1 バイト以上) を足すため、MOQT の datagram はさらに小さくする必要がある
+    if tracks
+        .iter()
+        .any(|track| track.delivery == DeliveryMode::Datagram)
+    {
+        let ngtcp2_limit = match (transport, quic_backend) {
+            (MoqTransport::Quic, QuicBackend::Ngtcp2) => Some(NGTCP2_DATAGRAM_MAX_SIZE),
+            (MoqTransport::WtH3, _) => Some(NGTCP2_DATAGRAM_MAX_SIZE - WT_H3_DATAGRAM_OVERHEAD),
+            _ => None,
+        };
+        if let Some(limit) = ngtcp2_limit
+            && datagram_max_size > limit
+        {
+            return Err(ErrorMessage::new(format!(
+                "ngtcp2 経由の datagram は {limit} バイトまでです: --datagram-max-size={datagram_max_size}"
+            ))
+            .into());
+        }
+    }
+
     if vcs == 0 || vcs > 1000 {
         return Err(ErrorMessage::new("--vcs は 1 から 1000 の範囲で指定してください").into());
     }
@@ -580,6 +713,7 @@ fn validate_instance_args(
         quic_backend,
         namespace: namespace.to_string(),
         tracks,
+        datagram_max_size,
         subscribe_tracks,
         verify_payload,
         ca_cert,
@@ -595,8 +729,9 @@ fn validate_instance_args(
 
 /// `--tracks` の値を解釈する
 ///
-/// 形式は `名前[:レート[:サイズ]]` のカンマ区切り。レートとサイズを省略した場合は
-/// 既定値 (`30` objects/sec、`1000` バイト) を使う。
+/// 形式は `名前[:レート[:サイズ[:配送方式]]]` のカンマ区切り。レートとサイズを省略した
+/// 場合は既定値 (`30` objects/sec、`1000` バイト) を、配送方式を省略した場合は
+/// `subgroup` を使う。配送方式は `subgroup` または `datagram` である。
 fn parse_tracks(value: &str) -> Result<Vec<TrackSpec>> {
     if value.trim().is_empty() {
         return Err(ErrorMessage::new("--tracks に空文字列は指定できません").into());
@@ -640,9 +775,13 @@ fn parse_tracks(value: &str) -> Result<Vec<TrackSpec>> {
             })?,
             None => DEFAULT_OBJECT_SIZE,
         };
+        let delivery = match parts.next() {
+            Some(delivery) => DeliveryMode::parse(delivery.trim())?,
+            None => DeliveryMode::default(),
+        };
         if parts.next().is_some() {
             return Err(ErrorMessage::new(format!(
-                "--tracks の形式は 名前[:レート[:サイズ]] です: {entry}"
+                "--tracks の形式は 名前[:レート[:サイズ[:配送方式]]] です: {entry}"
             ))
             .into());
         }
@@ -661,6 +800,7 @@ fn parse_tracks(value: &str) -> Result<Vec<TrackSpec>> {
             name,
             object_rate,
             object_size,
+            delivery,
         });
     }
     Ok(tracks)
@@ -854,7 +994,7 @@ fn expand_instances(value: RawJsonValue<'_, '_>, template: &[String]) -> Result<
     Ok(result)
 }
 
-/// `tracks` 配列を `--tracks name:rate:size,...` へ変換する
+/// `tracks` 配列を `--tracks name:rate:size[:delivery],...` へ変換する
 fn push_tracks(value: RawJsonValue<'_, '_>, argv: &mut Vec<String>) -> Result<()> {
     if value.kind() != JsonValueKind::Array {
         return Err(ErrorMessage::new("'tracks' は JSON 配列で指定してください").into());
@@ -904,7 +1044,19 @@ fn push_tracks(value: RawJsonValue<'_, '_>, argv: &mut Vec<String>) -> Result<()
             }
             None => DEFAULT_OBJECT_SIZE,
         };
-        specs.push(format!("{name}:{rate}:{size}"));
+        let delivery = match member_value(element, "delivery-mode")? {
+            Some(value) => {
+                let text: String = value.try_into().map_err(|_| {
+                    ErrorMessage::new(format!(
+                        "tracks[{i}] の delivery-mode が文字列ではありません: {}",
+                        value.as_raw_str()
+                    ))
+                })?;
+                DeliveryMode::parse(&text)?
+            }
+            None => DeliveryMode::default(),
+        };
+        specs.push(format!("{name}:{rate}:{size}:{}", delivery.as_str()));
     }
     argv.push("--tracks".to_string());
     argv.push(specs.join(","));
@@ -991,9 +1143,22 @@ mod tests {
         assert_eq!(tracks[0].name, "video");
         assert_eq!(tracks[0].object_rate, 30.0);
         assert_eq!(tracks[0].object_size, 1000);
+        // 配送方式を省略した場合は subgroup になる
+        assert_eq!(tracks[0].delivery, DeliveryMode::Subgroup);
         assert_eq!(tracks[1].name, "audio");
         assert_eq!(tracks[1].object_rate, 50.0);
         assert_eq!(tracks[1].object_size, 200);
+        assert_eq!(tracks[1].delivery, DeliveryMode::Subgroup);
+    }
+
+    /// 配送方式を指定できること
+    #[test]
+    fn parse_tracks_reads_delivery_mode() {
+        let tracks = parse_tracks("video:30:1000:subgroup,audio:50:200:datagram")
+            .expect("解釈に成功すること");
+        assert_eq!(tracks[0].delivery, DeliveryMode::Subgroup);
+        assert_eq!(tracks[1].delivery, DeliveryMode::Datagram);
+        assert_eq!(tracks[1].delivery.as_str(), "datagram");
     }
 
     /// レートとサイズを省略すると既定値になること
@@ -1002,6 +1167,7 @@ mod tests {
         let tracks = parse_tracks("video").expect("解釈に成功すること");
         assert_eq!(tracks[0].object_rate, DEFAULT_OBJECT_RATE);
         assert_eq!(tracks[0].object_size, DEFAULT_OBJECT_SIZE);
+        assert_eq!(tracks[0].delivery, DeliveryMode::Subgroup);
     }
 
     /// `Duration` で表現できない時間指定を拒否すること
@@ -1020,6 +1186,7 @@ mod tests {
                 QuicBackend::default(),
                 "zakuro",
                 Some("video"),
+                DEFAULT_DATAGRAM_MAX_SIZE,
                 None,
                 false,
                 None,
@@ -1216,7 +1383,171 @@ mod tests {
             .expect("--tracks があること");
         assert_eq!(
             argv[tracks_pos + 1],
-            format!("video:30:1000,audio:50:{DEFAULT_OBJECT_SIZE}")
+            format!("video:30:1000:subgroup,audio:50:{DEFAULT_OBJECT_SIZE}:subgroup")
+        );
+    }
+
+    /// JSONC の tracks 配列で delivery-mode を指定できること
+    #[test]
+    fn jsonc_tracks_read_delivery_mode() {
+        let content = r#"{
+            "url": "moqt://relay.example.com:4433",
+            "tracks": [
+                { "name": "video", "object-rate": 30, "object-size": 1000 },
+                { "name": "audio", "delivery-mode": "datagram" }
+            ]
+        }"#;
+        let config = parse_jsonc_config(content).expect("パースに成功すること");
+        let argv = &config.instance_argvs[0];
+        let tracks_pos = argv
+            .iter()
+            .position(|s| s == "--tracks")
+            .expect("--tracks があること");
+        assert_eq!(
+            argv[tracks_pos + 1],
+            format!(
+                "video:30:1000:subgroup,audio:{DEFAULT_OBJECT_RATE}:{DEFAULT_OBJECT_SIZE}:datagram"
+            )
+        );
+    }
+
+    /// JSONC の delivery-mode は文字列でなければならないこと
+    #[test]
+    fn jsonc_tracks_reject_invalid_delivery_mode_type() {
+        let content = r#"{
+            "url": "moqt://relay.example.com:4433",
+            "tracks": [ { "name": "audio", "delivery-mode": 1 } ]
+        }"#;
+        assert!(
+            parse_jsonc_config(content).is_err(),
+            "delivery-mode の型不正を許容してはならない"
+        );
+    }
+
+    /// datagram 配送の object が上限に収まるかを起動時に検証すること
+    ///
+    /// datagram は分割できず、上限を超えた object は通知なく破棄される
+    /// (draft-ietf-moq-transport-22 §11.2 (Datagrams))。起動時にエラーにする。
+    #[test]
+    fn validate_rejects_datagram_object_that_does_not_fit() {
+        let validate = |tracks: Option<&str>, datagram_max_size: usize| {
+            validate_instance_args(
+                "moqt://relay.example.com:4433",
+                MoqTransport::Quic,
+                QuicBackend::default(),
+                "zakuro",
+                tracks,
+                datagram_max_size,
+                None,
+                false,
+                None,
+                1,
+                1.0,
+                None,
+                None,
+                0,
+                60.0,
+                true,
+            )
+        };
+
+        // 既定の上限に収まる音声相当のサイズは通る
+        assert!(
+            validate(Some("audio:50:200:datagram"), DEFAULT_DATAGRAM_MAX_SIZE).is_ok(),
+            "上限に収まる datagram トラックを拒否してはならない"
+        );
+        // ヘッダ込みで上限を超えるサイズは拒否する
+        assert!(
+            validate(Some("audio:50:1200:datagram"), DEFAULT_DATAGRAM_MAX_SIZE).is_err(),
+            "ヘッダ込みで上限を超える datagram トラックを許容してはならない"
+        );
+        // subgroup 配送なら datagram の上限に縛られない
+        assert!(
+            validate(Some("video:30:1000:subgroup"), DEFAULT_DATAGRAM_MAX_SIZE).is_ok(),
+            "subgroup 配送のトラックを datagram の上限で拒否してはならない"
+        );
+        // 上限の範囲外は拒否する
+        assert!(validate(Some("audio:50:200:datagram"), 0).is_err());
+        assert!(validate(Some("audio:50:200:datagram"), 65536).is_err());
+    }
+
+    /// ngtcp2 経由の datagram サイズ上限を起動時に検証すること
+    ///
+    /// ngtcp2 の `DatagramConfig` は送信できる datagram を 1 パケット (1200 バイト) に
+    /// 制限する。WebTransport over HTTP/3 は HTTP Datagram の Quarter Stream ID を
+    /// 足すため、MOQT の datagram はさらに小さくする必要がある。
+    #[test]
+    fn validate_rejects_datagram_max_size_over_ngtcp2_limit() {
+        let validate =
+            |transport: MoqTransport, quic_backend: QuicBackend, datagram_max_size: usize| {
+                validate_instance_args(
+                    "moqt://relay.example.com:4433",
+                    transport,
+                    quic_backend,
+                    "zakuro",
+                    Some("audio:50:200:datagram"),
+                    datagram_max_size,
+                    None,
+                    false,
+                    None,
+                    1,
+                    1.0,
+                    None,
+                    None,
+                    0,
+                    60.0,
+                    true,
+                )
+            };
+
+        // ngtcp2 (QUIC 直接接続) は 1200 バイトまで
+        assert!(
+            validate(MoqTransport::Quic, QuicBackend::Ngtcp2, 1200).is_ok(),
+            "上限ちょうどの datagram を拒否してはならない"
+        );
+        assert!(
+            validate(MoqTransport::Quic, QuicBackend::Ngtcp2, 1300).is_err(),
+            "ngtcp2 の上限を超える datagram を許容してはならない"
+        );
+        // WebTransport over HTTP/3 は Quarter Stream ID の 1 バイト分だけ小さくなる
+        assert!(
+            validate(MoqTransport::WtH3, QuicBackend::Ngtcp2, 1199).is_ok(),
+            "WT over HTTP/3 の上限ちょうどの datagram を拒否してはならない"
+        );
+        assert!(
+            validate(MoqTransport::WtH3, QuicBackend::Ngtcp2, 1200).is_err(),
+            "WT over HTTP/3 の上限を超える datagram を許容してはならない"
+        );
+        // s2n-quic / QMux にはこの上限を適用しない
+        assert!(validate(MoqTransport::Quic, QuicBackend::S2nQuic, 1300).is_ok());
+        assert!(validate(MoqTransport::Qmux, QuicBackend::Ngtcp2, 1300).is_ok());
+    }
+
+    /// `--datagram-max-size` を解釈できること
+    #[test]
+    fn datagram_max_size_is_parsed() {
+        let (instance, _help) = parse_instance_args(
+            "zakuro-moq",
+            vec![
+                "--url=moqt://relay.example.com:4433".to_string(),
+                "--tracks=audio:50:200:datagram".to_string(),
+                "--datagram-max-size=1200".to_string(),
+            ],
+            &mut Vec::new(),
+        )
+        .expect("解釈に成功すること");
+        assert_eq!(instance.datagram_max_size, 1200);
+        assert_eq!(instance.tracks[0].delivery, DeliveryMode::Datagram);
+
+        let (default_instance, _help) = parse_instance_args(
+            "zakuro-moq",
+            vec!["--url=moqt://relay.example.com:4433".to_string()],
+            &mut Vec::new(),
+        )
+        .expect("解釈に成功すること");
+        assert_eq!(
+            default_instance.datagram_max_size,
+            DEFAULT_DATAGRAM_MAX_SIZE
         );
     }
 

@@ -17,7 +17,7 @@ use s2n_quic::provider::tls::rustls as s2n_rustls;
 
 use crate::error::{ErrorMessage, Result};
 
-use super::stream::{MoqBidiAcceptor, MoqConnectionHandle, MoqRecvAcceptor};
+use super::stream::{MoqBidiAcceptor, MoqConnectionHandle, MoqDatagramReceiver, MoqRecvAcceptor};
 use super::{ngtcp2, qmux, wt_h2};
 
 /// 下位トランスポート種別
@@ -702,37 +702,48 @@ impl MoqConnection {
         }
     }
 
-    /// 接続ハンドルと accept 用の口へ分割する
-    pub(crate) fn split(self) -> (MoqConnectionHandle, MoqRecvAcceptor, MoqBidiAcceptor) {
+    /// 接続ハンドル、accept 用の口、datagram の受け口へ分割する
+    pub(crate) fn split(
+        self,
+    ) -> (
+        MoqConnectionHandle,
+        MoqRecvAcceptor,
+        MoqBidiAcceptor,
+        MoqDatagramReceiver,
+    ) {
         match self {
             Self::Quic(connection) => {
                 let (handle, acceptor) = connection.split();
                 let (bidi, recv) = acceptor.split();
                 (
-                    MoqConnectionHandle::Quic(handle),
+                    MoqConnectionHandle::Quic(handle.clone()),
                     MoqRecvAcceptor::Quic(recv),
                     MoqBidiAcceptor::Quic(bidi),
+                    MoqDatagramReceiver::Quic(handle),
                 )
             }
             Self::Qmux(connection) => (
                 MoqConnectionHandle::Qmux(Arc::clone(&connection)),
                 MoqRecvAcceptor::Qmux(Arc::clone(&connection)),
-                MoqBidiAcceptor::Qmux(connection),
+                MoqBidiAcceptor::Qmux(Arc::clone(&connection)),
+                MoqDatagramReceiver::Qmux(connection),
             ),
             Self::Ngtcp2(connection) | Self::WebTransport(connection) => {
-                let (handle, recv, bidi) = connection.split();
+                let (handle, recv, bidi, datagram) = connection.split();
                 (
                     MoqConnectionHandle::Ngtcp2(handle),
                     MoqRecvAcceptor::Ngtcp2(recv),
                     MoqBidiAcceptor::Ngtcp2(bidi),
+                    MoqDatagramReceiver::Ngtcp2(datagram),
                 )
             }
             Self::WtH2(connection) => {
-                let (handle, recv, bidi) = connection.split();
+                let (handle, recv, bidi, datagram) = connection.split();
                 (
                     MoqConnectionHandle::WtH2(handle),
                     MoqRecvAcceptor::WtH2(recv),
                     MoqBidiAcceptor::WtH2(bidi),
+                    MoqDatagramReceiver::WtH2(datagram),
                 )
             }
         }
@@ -806,11 +817,16 @@ async fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
 /// TLS 設定、UDP ソケットの作成、limits の設定、クライアントの起動に失敗した場合は
 /// エラーになる。
 fn build_client(tls: &s2n_rustls::Client, is_ipv6: bool) -> Result<Client> {
+    // s2n-quic の datagram endpoint は送受信のキューの容量が既定でどちらも 0 である。
+    // 送信容量が 0 のままだと `poll_send_datagram` が空きを待ち続けて datagram を 1 つも
+    // 送れないため、送信にも容量を設定する
     let datagram_endpoint = s2n_quic::provider::datagram::default::Endpoint::builder()
+        .with_send_capacity(64)
+        .map_err(|e| ErrorMessage::new(format!("datagram endpoint の構築に失敗しました: {e}")))?
         .with_recv_capacity(64)
         .map_err(|e| ErrorMessage::new(format!("datagram endpoint の構築に失敗しました: {e}")))?
         .build()
-        .expect("datagram endpoint must build after recv capacity is set");
+        .expect("datagram endpoint must build after capacities are set");
 
     let client = Client::builder()
         .with_tls(tls.clone())

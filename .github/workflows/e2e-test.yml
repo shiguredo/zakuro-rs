@@ -90,56 +90,75 @@ jobs:
 
           # 実行ごとにユニークな namespace を使い、他の実行や手動確認と衝突させない
           namespace="zakuro-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          log="moq-e2e.log"
 
-          # 1 仮想クライアントで video を publish しながら同じトラックを subscribe し、
-          # 受信 payload が publisher のパターンと一致することを検査する。--duration 経過で
+          # 1 仮想クライアントで publish しながら同じトラックを subscribe し、受信 payload が
+          # publisher のパターンと一致することを検査する。subgroup 配送 (video) と datagram 配送
+          # (audio) の両方を 1 回ずつ実行し、配送方式ごとの往復を確認する。--duration 経過で
           # graceful に終了するため終了コードは判定に使わず、最終サマリ行で判定する
           # (timeout は停止しない場合の保険)
-          timeout 120 ./target/debug/zakuro-moq \
-            --url "$TEST_MOQT_URI" \
-            --namespace "$namespace" \
-            --tracks video:30:1000 \
-            --subscribe-tracks video \
-            --verify-payload \
-            --vcs 1 \
-            --duration 30 \
-            --log-level info \
-            > "$log" 2>&1 || true
+          run_roundtrip() {
+            label="$1"
+            tracks="$2"
+            subscribe="$3"
+            expected_track_log="$4"
+            log="moq-e2e-${label}.log"
 
-          # 失敗時のログに出る名前解決したアドレスもマスクする
-          resolved="$(grep -oE "to [0-9A-Fa-f:.]+" "$log" 2>/dev/null | cut -d" " -f2 | sort -u || true)"
-          if [ -n "$resolved" ]; then
-            for addr in $resolved; do
-              echo "::add-mask::$addr"
-            done
-          fi
+            timeout 120 ./target/debug/zakuro-moq \
+              --url "$TEST_MOQT_URI" \
+              --namespace "$namespace" \
+              --tracks "$tracks" \
+              --subscribe-tracks "$subscribe" \
+              --verify-payload \
+              --vcs 1 \
+              --duration 30 \
+              --log-level info \
+              > "$log" 2>&1 || true
 
-          cat "$log"
+            # 失敗時のログに出る名前解決したアドレスもマスクする
+            resolved="$(grep -oE "to [0-9A-Fa-f:.]+" "$log" 2>/dev/null | cut -d" " -f2 | sort -u || true)"
+            if [ -n "$resolved" ]; then
+              for addr in $resolved; do
+                echo "::add-mask::$addr"
+              done
+            fi
 
-          # 最終サマリ行から publish / subscribe の受理数、送受信数、payload 不一致数を取る
-          summary="$(grep -oE "MOQT finished:.*" "$log" | tail -1 || true)"
-          if [ -z "$summary" ]; then
-            echo "::error::the MOQ E2E test did not finish"
-            exit 1
-          fi
+            cat "$log"
 
-          for pattern in "publish=1/1" "subscribe=1/1" "payload-mismatches=0"; do
-            if ! printf '%s' "$summary" | grep -qE "$pattern"; then
-              echo "::error::the summary does not contain '$pattern'"
+            # 配送方式の設定が起動ログに反映されていることを確認する
+            if ! grep -Fq "tracks=[$expected_track_log]" "$log"; then
+              echo "::error::the startup log does not contain 'tracks=[$expected_track_log]'"
               exit 1
             fi
-          done
 
-          sent="$(printf '%s' "$summary" | grep -oE "sent-objects=[0-9]+" | cut -d= -f2)"
-          received="$(printf '%s' "$summary" | grep -oE "received-objects=[0-9]+" | cut -d= -f2)"
-          if [ -z "$sent" ] || [ -z "$received" ]; then
-            echo "::error::failed to parse the summary: $summary"
-            exit 1
-          fi
-          if [ "$sent" -lt 1 ] || [ "$received" -lt 1 ]; then
-            echo "::error::no object was sent or received"
-            exit 1
-          fi
+            # 最終サマリ行から publish / subscribe の受理数、送受信数、payload 不一致数を取る
+            summary="$(grep -oE "MOQT finished:.*" "$log" | tail -1 || true)"
+            if [ -z "$summary" ]; then
+              echo "::error::the MOQ E2E test ($label) did not finish"
+              exit 1
+            fi
 
-          echo "MOQ E2E test passed (sent=$sent received=$received)"
+            for pattern in "publish=1/1" "subscribe=1/1" "payload-mismatches=0"; do
+              if ! printf '%s' "$summary" | grep -qE "$pattern"; then
+                echo "::error::the summary does not contain '$pattern' ($label)"
+                exit 1
+              fi
+            done
+
+            sent="$(printf '%s' "$summary" | grep -oE "sent-objects=[0-9]+" | cut -d= -f2)"
+            received="$(printf '%s' "$summary" | grep -oE "received-objects=[0-9]+" | cut -d= -f2)"
+            if [ -z "$sent" ] || [ -z "$received" ]; then
+              echo "::error::failed to parse the summary: $summary"
+              exit 1
+            fi
+            if [ "$sent" -lt 1 ] || [ "$received" -lt 1 ]; then
+              echo "::error::no object was sent or received ($label)"
+              exit 1
+            fi
+
+            echo "MOQ E2E test passed ($label: sent=$sent received=$received)"
+          }
+
+          # subgroup 配送の往復
+          run_roundtrip "video-subgroup" "video:30:1000" "video" "video:subgroup"
+          # datagram 配送の往復 (音声相当の小さい object)
+          run_roundtrip "audio-datagram" "audio:50:200:datagram" "audio" "audio:datagram"

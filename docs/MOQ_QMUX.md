@@ -51,9 +51,9 @@ peer の control stream は最初の単方向 stream として受理する。
 ### 1.4 DATAGRAM
 
 QMux の DATAGRAM は下位の TCP が再送するため経路損失では失われないが、受信側のバッファが
-溢れると破棄され得る (draft-ietf-quic-qmux-02 Section 6)。zakuro-moq は現状 DATAGRAM で
-object を送受信しない (QUIC 直接接続と同じ) ため、`max_datagram_frame_size` を広告するだけに
-とどめる。
+溢れると破棄され得る (draft-ietf-quic-qmux-02 Section 6)。zakuro-moq は datagram 配送を
+指定したトラックの object を DATAGRAM で送受信する。`max_datagram_frame_size` は
+tokio-qmux の 1 Record の上限に合わせて広告する。
 
 ### 1.5 TLS
 
@@ -74,8 +74,9 @@ QMux の実効 idle timeout は両端の広告値のうち 0 でない値の最�
 - `zakuro-moq/src/moq_client/qmux.rs`: QMux 接続の確立 (TCP + TLS + ALPN 確認 +
   `tokio_qmux::Connection` の生成)、QMux の `Config`、keep-alive の PING タスク。
 - `zakuro-moq/src/moq_client/stream.rs`: s2n-quic と tokio-qmux のストリーム・接続ハンドル・
-  accept を enum で包むアダプタ。`write_all` / `finish` / `reset` は QMux 側が async のため
-  両経路とも async に揃える。`read` は QMux の `Ok(None)` (FIN) を `Ok(0)` に正規化する。
+  accept・datagram の送受信を enum で包むアダプタ。`write_all` / `finish` / `reset` は
+  QMux 側が async のため両経路とも async に揃える。`read` は QMux の `Ok(None)` (FIN) を
+  `Ok(0)` に正規化する。datagram の受信は QMux 接続の受信キューから取り出す。
 - `zakuro-moq/src/moq_client/transport.rs`: `MoqTransport` (quic / qmux)、経路ごとの TLS 設定、
   `MoqConnection` と `split`。QMux は仮想クライアントごとに TCP を張るため、QUIC の UDP
   ソケット共有 (`EndpointState.clients`) には相乗りさせない。
@@ -95,7 +96,8 @@ QMux の実効 idle timeout は両端の広告値のうち 0 でない値の最�
   ストリームアダプタは qmux-rs の client と server をメモリ上の duplex で両端に立てても
   検証している (モックではない)。moqt-rs の E2E は QMux を対象外にしているため、この実 relay
   での確認が QMux 経路の E2E にあたる。
-- QMux の DATAGRAM は広告のみで、object の DATAGRAM 送受信は未対応 (QUIC 経路と同じ)。
+- QMux の DATAGRAM は TCP 上で信頼的かつ順序どおりに届く。QUIC DATAGRAM のような経路損失は
+  無いが、速やかに配送できない DATAGRAM の破棄は許される (draft-ietf-quic-qmux-02 Section 6)。
 - TCP の再送で遅延が伸びるため、遅延を重視する試験では QUIC 直接接続を使うこと。
 - QMux の RESET_STREAM_AT は未実装のため、reset の `reliable_size` は常に `None` である。
 - 実 relay の ALPN が `moqt-22` 以外を要求する場合や、control stream を individual draft の
@@ -108,6 +110,8 @@ QMux の実効 idle timeout は両端の広告値のうち 0 でない値の最�
 - `cargo test --locked --workspace --features fdk-aac`
 - `make smoke` (`zakuro-moq --help` に `--transport` が出ること)
 - tombic (`prek run tombi-lint --all-files` / `prek run tombi-format --all-files`)
+- QMux の DATAGRAM 送受信: 実 QMux の duplex 接続で datagram の往復を検証する
+  `stream.rs` の `qmux_datagram_round_trip` テスト
 - 実 relay の E2E: テスト用 relay へ `--transport qmux` で接続し、
   `--tracks video:30:1000 --subscribe-tracks video --verify-payload --vcs 1 --duration 20` で
   publish / subscribe が成立すること (2026-10-21 と 2026-10-25 に確認)

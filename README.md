@@ -259,7 +259,7 @@ WebPKI のルート証明書を使い、`--ca-cert` を指定するとその PEM
   QUIC version 1 のストリームと DATAGRAM を多重化するため、UDP が使えない環境でも接続できます。
   QMux 上の MOQT は experimental であり、QMux を終端できる relay が必要です。TCP の再送で
   遅延が伸びるため、遅延を重視する試験では QUIC 直接接続を使ってください。ALPN は QUIC 直接接続と
-  同じ `moqt-22` です。
+  同じ `moqt-22` です。DATAGRAM は TCP 上で信頼的かつ順序どおりに届きます。
 
 ngtcp2-rs (`shiguredo_ngtcp2_tokio`) は `RESET_STREAM_AT` の受理を広告し、
 ピアが対応している場合は送信済みデータの配信を保証してストリームを reset します。
@@ -270,14 +270,15 @@ ngtcp2 は DNS 名と IP アドレスの両方に対応し、IP アドレスで�
 `wt-h3` のバックエンドは `ngtcp2` です。`--quic-backend` は省略できます。
 HTTP/3 SETTINGS と QUIC transport parameter を検証してから接続し、単方向・双方向ストリーム、
 WT フロー制御、reset / STOP_SENDING、drain / close を処理します。
-MOQT の object は subgroup stream で送信します。
+MOQT の object は既定では subgroup stream で送信し、トラック単位で OBJECT_DATAGRAM にも
+切り替えられます。詳細は「配送方式」の節を参照してください。
 
 `wt-h2` は tokio + `shiguredo_http2` (Sans I/O) + rustls で実装しています。HTTP/2 SETTINGS
 (`SETTINGS_ENABLE_CONNECT_PROTOCOL` / `SETTINGS_WT_ENABLED` / WT 初期フロー制御) と
 Extended CONNECT、`WT-Available-Protocols` / `WT-Protocol` を検証してから接続し、
 単方向・双方向ストリーム、WT フロー制御、`WT_RESET_STREAM` / `WT_STOP_SENDING` を処理します。
-接続ごとに TCP ソケットと駆動タスクを作ります。無通信の接続が relay に切られないよう、
-HTTP/2 PING を 5 秒間隔で送ります。
+DATAGRAM は `WT_DATAGRAM` capsule で運びます。接続ごとに TCP ソケットと駆動タスクを作ります。
+無通信の接続が relay に切られないよう、HTTP/2 PING を 5 秒間隔で送ります。
 
 ```bash
 cargo run -p zakuro-moq -- \
@@ -321,7 +322,43 @@ cargo run -p zakuro-moq -- \
 
 仕様上の判断と制約は [docs/MOQ_QMUX.md](docs/MOQ_QMUX.md) にまとめています。
 WebTransport over HTTP/2 の実装方針と制約は
-[docs/MOQ_WEBTRANSPORT_H2.md](docs/MOQ_WEBTRANSPORT_H2.md) にまとめています。
+[docs/MOQ_WEBTRANSPORT_H2.md](docs/MOQ_WEBTRANSPORT_H2.md)、配送方式の判断は
+[docs/MOQ_DELIVERY_MODE.md](docs/MOQ_DELIVERY_MODE.md) にまとめています。
+
+### 配送方式 (`subgroup` / `datagram`)
+
+MOQT の object の配送方式 (Delivery Mode) は Original Publisher が object ごとに決める値で、
+購読側とは交渉しません (draft-ietf-moq-transport-22 §2.1.1 (Object Fields))。zakuro-moq は
+トラック単位で選べます。`--tracks` の 4 番目に `subgroup` または `datagram` を指定し、
+省略した場合は `subgroup` になります。
+
+```bash
+cargo run -p zakuro-moq -- \
+  --url moqt://relay.example.com:4433 \
+  --namespace zakuro \
+  --tracks video:30:1000:subgroup,audio:50:200:datagram \
+  --vcs 50 \
+  --vcs-hatch-rate 10 \
+  --duration 60
+```
+
+`datagram` を指定したトラックは OBJECT_DATAGRAM で object を送ります。音声のように
+1 object が小さく、遅れた object を届けるより落とす方がよいメディアに向いています
+(draft-ietf-moq-loc-04 §4.1 (Application with one audio track))。subgroup 配送では Group の
+終端を stream の FIN で伝えますが、datagram には FIN が無いため Group の最終 object に
+END_OF_GROUP bit を立てます (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))。
+
+datagram は分割できず、経路の上限を超えた object は通知なく破棄されるため
+(draft-ietf-moq-transport-22 §11.2 (Datagrams))、`--datagram-max-size` (既定 1160 バイト) を
+上限として、起動時に object サイズとヘッダが収まるかを検証します。既定値は RFC 9000 §14
+(Datagram Size) が経路に要求する 1200 バイトから、QUIC と WebTransport のヘッダ分を
+引いた値です。音声相当の小さい object では既定値のままで構いません。
+
+datagram は再送されません (RFC 9221 §3)。QUIC 直接接続と WebTransport over HTTP/3 では、
+輻輳制御の制約で送信キューが詰まると送信待ちになります。ngtcp2 は輻輳時に datagram を
+破棄し、そのことを API から通知しないため、送信数と購読側の受信数の差を確認してください。
+QMux と WebTransport over HTTP/2 は TCP 上で動くため経路損失では失われませんが、QMux は
+速やかに配送できない DATAGRAM を破棄することがあり、遅延特性も QUIC と異なります。
 
 MOQT では、購読者がいないトラックの送信を止めるよう relay から `REQUEST_UPDATE`
 (FORWARD=0) が届くことがあります。zakuro-moq はこれに従います (FORWARD はトラック単位で
@@ -375,8 +412,9 @@ cargo run -p zakuro-moq -- --url moqt://relay.example.com:4433 --namespace zakur
 ```
 
 `--verify-payload` を付けると、受信した payload が zakuro-moq の publisher が送る
-パターン (`位置 % 251`) と一致するかを検査し、不一致数をログに出します。実メディアを配信する
-relay へ接続する場合は誤検知になるため既定では無効です。
+パターン (`位置 % 251`) と一致するかを検査し、不一致数をログに出します。subgroup 経由でも
+datagram 経由でも同じように検査します。実メディアを配信する relay へ接続する場合は
+誤検知になるため既定では無効です。
 
 ### 主なオプション (`zakuro-moq`)
 
@@ -386,7 +424,8 @@ relay へ接続する場合は誤検知になるため既定では無効です�
 | `--transport` | 下位トランスポート (`quic` / `wt-h3` / `wt-h2` / `qmux`、デフォルト: `quic`) |
 | `--quic-backend` | QUIC 実装 (`s2n-quic` / `ngtcp2`)。`quic` の既定は `s2n-quic`、`wt-h3` は `ngtcp2`。`wt-h2` と `qmux` では指定できない |
 | `--namespace` | Track Namespace (デフォルト: `zakuro`) |
-| `--tracks` | publish するトラック (`名前[:レート[:サイズ]]` のカンマ区切り、デフォルト: `video`。`--subscribe-tracks` 指定時は publish しない) |
+| `--tracks` | publish するトラック (`名前[:レート[:サイズ[:配送方式]]]` のカンマ区切り、配送方式は `subgroup` / `datagram`、デフォルト: `video`。`--subscribe-tracks` 指定時は publish しない) |
+| `--datagram-max-size` | datagram 配送で送る object 1 個のサイズ上限 (バイト、デフォルト: 1160) |
 | `--subscribe-tracks` | 購読するトラック名のカンマ区切り。`{instance}` / `{vc}` を書くと置換し、書かなければ `<名前>-<インスタンス>-<仮想クライアント>` になる |
 | `--verify-payload` | 受信 payload が zakuro-moq の publisher のパターンと一致するかを検査する |
 | `--ca-cert` | relay の CA 証明書 (PEM)。既定の信頼ストアと追加 / 置換の扱いはバックエンドに依存 |
@@ -413,8 +452,9 @@ relay へ接続する場合は誤検知になるため既定では無効です�
   "namespace": "zakuro",
   "tracks": [
     { "name": "video", "object-rate": 30, "object-size": 1000 },
-    { "name": "audio", "object-rate": 50, "object-size": 200 }
+    { "name": "audio", "object-rate": 50, "object-size": 200, "delivery-mode": "datagram" }
   ],
+  "datagram-max-size": 1160,
   "vcs": 50,
   "vcs-hatch-rate": 10,
   "duration": 60,

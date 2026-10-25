@@ -899,10 +899,11 @@ async fn session_roundtrip_over_real_tls() {
     let server = tokio::spawn(run_roundtrip_server(listener, server_tls, notice_tx));
 
     timeout(TEST_TIMEOUT, async {
-        let (handle, mut uni_acceptor, mut bidi_acceptor) = connect_client(addr, &client_tls)
-            .await
-            .expect("WebTransport セッションを確立できること")
-            .split();
+        let (handle, mut uni_acceptor, mut bidi_acceptor, _datagram) =
+            connect_client(addr, &client_tls)
+                .await
+                .expect("WebTransport セッションを確立できること")
+                .split();
 
         // クライアント -> サーバー (単方向ストリーム)
         let mut send = handle
@@ -1078,7 +1079,7 @@ async fn blocked_write_resumes_after_receive_window_growth() {
     let server = tokio::spawn(run_small_window_server(listener, server_tls, payload_size));
 
     timeout(TEST_TIMEOUT, async {
-        let (handle, _uni_acceptor, _bidi_acceptor) = connect_client(addr, &client_tls)
+        let (handle, _uni_acceptor, _bidi_acceptor, _datagram) = connect_client(addr, &client_tls)
             .await
             .expect("WebTransport セッションを確立できること")
             .split();
@@ -1199,10 +1200,11 @@ async fn peer_stop_sending_fails_writes() {
     let server = tokio::spawn(run_stop_sending_server(listener, server_tls, error_code));
 
     timeout(TEST_TIMEOUT, async {
-        let (handle, mut uni_acceptor, _bidi_acceptor) = connect_client(addr, &client_tls)
-            .await
-            .expect("WebTransport セッションを確立できること")
-            .split();
+        let (handle, mut uni_acceptor, _bidi_acceptor, _datagram) =
+            connect_client(addr, &client_tls)
+                .await
+                .expect("WebTransport セッションを確立できること")
+                .split();
         let mut send = handle
             .open_send_stream()
             .await
@@ -1320,10 +1322,11 @@ async fn peer_reset_surfaces_stream_reset_error() {
     let server = tokio::spawn(run_peer_reset_server(listener, server_tls, error_code));
 
     timeout(TEST_TIMEOUT, async {
-        let (handle, mut uni_acceptor, _bidi_acceptor) = connect_client(addr, &client_tls)
-            .await
-            .expect("WebTransport セッションを確立できること")
-            .split();
+        let (handle, mut uni_acceptor, _bidi_acceptor, _datagram) =
+            connect_client(addr, &client_tls)
+                .await
+                .expect("WebTransport セッションを確立できること")
+                .split();
         let mut recv = uni_acceptor
             .accept()
             .await
@@ -1364,7 +1367,7 @@ async fn run_datagram_server(
     tls: TlsAcceptor,
 ) -> std::result::Result<(), String> {
     let mut server = TestServer::accept(listener, tls, build_wt_config()).await?;
-    // zakuro-moq は datagram を使わないが、受信しても接続を壊さないことを確かめる
+    // datagram を送っても接続とストリームが壊れないことを確かめる
     server
         .wt
         .send_datagram(b"unused-datagram")
@@ -1399,18 +1402,25 @@ async fn run_datagram_server(
     Ok(())
 }
 
-/// 受信した WT_DATAGRAM を破棄しても接続とストリームが壊れないこと
+/// 受信した WT_DATAGRAM が datagram 受信口へ渡り、接続とストリームが壊れないこと
 #[tokio::test(flavor = "multi_thread")]
-async fn received_datagram_is_discarded() {
+async fn received_datagram_is_forwarded() {
     let (listener, addr) = bind_listener().await;
     let (server_tls, client_tls) = test_tls_pair();
     let server = tokio::spawn(run_datagram_server(listener, server_tls));
 
     timeout(TEST_TIMEOUT, async {
-        let (handle, mut uni_acceptor, _bidi_acceptor) = connect_client(addr, &client_tls)
-            .await
-            .expect("WebTransport セッションを確立できること")
-            .split();
+        let (handle, mut uni_acceptor, _bidi_acceptor, mut datagram) =
+            connect_client(addr, &client_tls)
+                .await
+                .expect("WebTransport セッションを確立できること")
+                .split();
+        let datagram = datagram.recv().await.expect("datagram を受信できること");
+        assert_eq!(
+            datagram,
+            b"unused-datagram".to_vec(),
+            "受信した datagram がそのまま渡ること"
+        );
         let mut recv = uni_acceptor
             .accept()
             .await
@@ -1421,7 +1431,7 @@ async fn received_datagram_is_discarded() {
                 .await
                 .expect("datagram の後のストリームを読み込めること"),
             b"after-datagram",
-            "datagram を破棄してもストリームを受信できること"
+            "datagram を受信してもストリームを受信できること"
         );
         handle.close(0).await;
     })
@@ -1636,10 +1646,11 @@ async fn large_payload_received_across_receive_window_growth() {
     let server = tokio::spawn(run_large_payload_server(listener, server_tls, payload));
 
     timeout(TEST_TIMEOUT, async {
-        let (handle, mut uni_acceptor, _bidi_acceptor) = connect_client(addr, &client_tls)
-            .await
-            .expect("WebTransport セッションを確立できること")
-            .split();
+        let (handle, mut uni_acceptor, _bidi_acceptor, _datagram) =
+            connect_client(addr, &client_tls)
+                .await
+                .expect("WebTransport セッションを確立できること")
+                .split();
         let mut recv = uni_acceptor
             .accept()
             .await
@@ -1727,7 +1738,7 @@ async fn open_stream_resumes_after_stream_limit_growth() {
     let server = tokio::spawn(run_stream_limit_server(listener, server_tls));
 
     timeout(TEST_TIMEOUT, async {
-        let (handle, _uni_acceptor, _bidi_acceptor) = connect_client(addr, &client_tls)
+        let (handle, _uni_acceptor, _bidi_acceptor, _datagram) = connect_client(addr, &client_tls)
             .await
             .expect("WebTransport セッションを確立できること")
             .split();
@@ -1797,10 +1808,11 @@ async fn peer_close_ends_acceptors() {
     let server = tokio::spawn(run_peer_close_server(listener, server_tls));
 
     timeout(TEST_TIMEOUT, async {
-        let (handle, mut uni_acceptor, _bidi_acceptor) = connect_client(addr, &client_tls)
-            .await
-            .expect("WebTransport セッションを確立できること")
-            .split();
+        let (handle, mut uni_acceptor, _bidi_acceptor, _datagram) =
+            connect_client(addr, &client_tls)
+                .await
+                .expect("WebTransport セッションを確立できること")
+                .split();
         let mut recv = uni_acceptor
             .accept()
             .await
@@ -1881,7 +1893,7 @@ async fn dropping_all_handles_closes_connection() {
         .await
         .expect("テストがタイムアウトしないこと")
         .expect("WebTransport セッションを確立できること");
-    let (handle, recv_acceptor, bidi_acceptor) = connection.split();
+    let (handle, recv_acceptor, bidi_acceptor, _datagram) = connection.split();
     drop(handle);
     drop(recv_acceptor);
     drop(bidi_acceptor);
@@ -1923,7 +1935,7 @@ async fn keep_alive_sends_periodic_pings() {
     let server = tokio::spawn(run_keep_alive_server(listener, server_tls));
 
     timeout(TEST_TIMEOUT, async {
-        let (handle, _uni_acceptor, _bidi_acceptor) = connect_client(addr, &client_tls)
+        let (handle, _uni_acceptor, _bidi_acceptor, _datagram) = connect_client(addr, &client_tls)
             .await
             .expect("WebTransport セッションを確立できること")
             .split();
@@ -1982,10 +1994,11 @@ async fn peer_session_close_gets_end_stream_response() {
     let server = tokio::spawn(run_peer_session_close_server(listener, server_tls, 0x10));
 
     timeout(TEST_TIMEOUT, async {
-        let (handle, mut uni_acceptor, mut bidi_acceptor) = connect_client(addr, &client_tls)
-            .await
-            .expect("WebTransport セッションを確立できること")
-            .split();
+        let (handle, mut uni_acceptor, mut bidi_acceptor, _datagram) =
+            connect_client(addr, &client_tls)
+                .await
+                .expect("WebTransport セッションを確立できること")
+                .split();
         // ピアの WT_CLOSE_SESSION で駆動タスクが CONNECT ストリームを閉じて終了する
         assert!(
             uni_acceptor
@@ -2061,7 +2074,7 @@ async fn handle_close_sends_moqt_code() {
     let server = tokio::spawn(run_close_code_server(listener, server_tls, 0x1234));
 
     timeout(TEST_TIMEOUT, async {
-        let (handle, _uni_acceptor, _bidi_acceptor) = connect_client(addr, &client_tls)
+        let (handle, _uni_acceptor, _bidi_acceptor, _datagram) = connect_client(addr, &client_tls)
             .await
             .expect("WebTransport セッションを確立できること")
             .split();
@@ -2161,7 +2174,7 @@ async fn discarded_data_after_stop_sending_returns_session_credit() {
     };
 
     timeout(TEST_TIMEOUT, async {
-        let (handle, mut uni_acceptor, _bidi_acceptor) =
+        let (handle, mut uni_acceptor, _bidi_acceptor, _datagram) =
             connect_client_with_wt_config(addr, &client_tls, &wt_config)
                 .await
                 .expect("WebTransport セッションを確立できること")
@@ -2189,4 +2202,57 @@ async fn discarded_data_after_stop_sending_returns_session_credit() {
         .await
         .expect("サーバータスクの join に成功すること")
         .expect("サーバーがエラーなく終了すること");
+}
+
+/// datagram を 1 つ受け取るまでサーバーを駆動する
+async fn run_datagram_receiver_server(
+    listener: TcpListener,
+    tls: TlsAcceptor,
+) -> std::result::Result<Vec<u8>, String> {
+    let mut server = TestServer::accept(listener, tls, build_wt_config()).await?;
+    loop {
+        match server.step().await? {
+            ServerStep::Closed => {
+                return Err("datagram を受け取る前に接続が閉じました".to_string());
+            }
+            ServerStep::Events { events, ended } => {
+                for event in events {
+                    if let WtEvent::DatagramReceived { data } = event {
+                        return Ok(data);
+                    }
+                }
+                if ended {
+                    return Err("datagram を受け取る前に接続が終了しました".to_string());
+                }
+            }
+        }
+    }
+}
+
+/// クライアントから送った datagram が `WT_DATAGRAM` capsule で届くこと
+#[tokio::test(flavor = "multi_thread")]
+async fn send_datagram_over_http2() {
+    let (listener, addr) = bind_listener().await;
+    let (server_tls, client_tls) = test_tls_pair();
+    let server = tokio::spawn(run_datagram_receiver_server(listener, server_tls));
+
+    timeout(TEST_TIMEOUT, async {
+        let (handle, _uni_acceptor, _bidi_acceptor, _datagram) = connect_client(addr, &client_tls)
+            .await
+            .expect("WebTransport セッションを確立できること")
+            .split();
+        let payload = b"client datagram";
+        handle
+            .send_datagram(payload)
+            .await
+            .expect("datagram を送信できること");
+        let received = server
+            .await
+            .expect("サーバータスクの join に成功すること")
+            .expect("サーバーが datagram を受け取ること");
+        assert_eq!(received, payload, "送信した datagram が受信できること");
+        handle.close(0).await;
+    })
+    .await
+    .expect("テストがタイムアウトしないこと");
 }

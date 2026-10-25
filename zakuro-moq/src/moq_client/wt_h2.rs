@@ -14,8 +14,9 @@
 //! WT-Available-Protocols / WT-Protocol ヘッダーで交渉する
 //! (draft-ietf-moq-transport-22 §6.2 (Session establishment))。
 //!
-//! zakuro-moq は object を subgroup stream で送るため DATAGRAM を送信しない。受信した
-//! datagram は破棄し、接続を壊さない (draft-ietf-webtrans-http2-15 §7)。
+//! zakuro-moq は object を subgroup stream で送り、datagram 配送を指定したトラックは
+//! `WT_DATAGRAM` capsule で送る。受信した datagram はアプリへ渡す
+//! (draft-ietf-webtrans-http2-15 §6.13)。
 //!
 //! 節番号・要求項目は IETF draft 由来であり、draft の改訂や RFC 化で変わりうる。
 
@@ -639,6 +640,11 @@ enum Command {
         fin: bool,
         reply: oneshot::Sender<io::Result<()>>,
     },
+    /// OBJECT_DATAGRAM を送る
+    SendDatagram {
+        data: Vec<u8>,
+        reply: oneshot::Sender<io::Result<()>>,
+    },
     /// ストリームの送信方向を reset する
     Reset {
         stream_id: WtStreamId,
@@ -808,6 +814,27 @@ impl Handle {
                 bidirectional,
                 reply,
             }))
+            .map_err(|_| connection_closed())?;
+        result.await.map_err(|_| connection_closed())?
+    }
+
+    /// OBJECT_DATAGRAM を 1 つ送る
+    ///
+    /// WebTransport over HTTP/2 の DATAGRAM は capsule で運ばれ、HTTP/2 の送信ウィンドウに
+    /// 応じて駆動タスクが書き出す。この future は capsule を HTTP/2 の出力へ流し終えた
+    /// 時点で完了する (TCP まで書き終えたことは保証しない)。
+    ///
+    /// # Errors
+    ///
+    /// 接続が終了している場合、セッションが datagram を送れない状態の場合はエラーになる。
+    pub(crate) async fn send_datagram(&self, data: &[u8]) -> io::Result<()> {
+        let (reply, result) = oneshot::channel();
+        self.0
+            .commands
+            .send(Command::SendDatagram {
+                data: data.to_vec(),
+                reply,
+            })
             .map_err(|_| connection_closed())?;
         result.await.map_err(|_| connection_closed())?
     }
@@ -1106,6 +1133,8 @@ pub(crate) struct Connection {
     recv: RecvAcceptor,
     /// ピア起動の双方向ストリームの受け入れ口
     bidi: BidiAcceptor,
+    /// 駆動タスクが転送する受信 datagram
+    datagram: mpsc::UnboundedReceiver<Vec<u8>>,
 }
 
 impl Connection {
@@ -1114,6 +1143,7 @@ impl Connection {
         let (commands, requests) = mpsc::unbounded_channel();
         let (uni_tx, uni_rx) = mpsc::unbounded_channel();
         let (bidi_tx, bidi_rx) = mpsc::unbounded_channel();
+        let (datagram_tx, datagram_rx) = mpsc::unbounded_channel();
         let owner = Arc::new(Owner {
             commands,
             cancel: CancellationToken::new(),
@@ -1128,6 +1158,7 @@ impl Connection {
             cancel: owner.cancel.clone(),
             uni_tx,
             bidi_tx,
+            datagram_tx,
             recv_streams: HashMap::new(),
             peer_streams: HashMap::new(),
             pending_sends: HashMap::new(),
@@ -1154,13 +1185,21 @@ impl Connection {
                 incoming: bidi_rx,
                 _handle: handle.clone(),
             },
+            datagram: datagram_rx,
             handle,
         }
     }
 
-    /// 接続ハンドル、単方向 acceptor、双方向 acceptor へ分割する
-    pub(crate) fn split(self) -> (Handle, RecvAcceptor, BidiAcceptor) {
-        (self.handle, self.recv, self.bidi)
+    /// 接続ハンドル、単方向 acceptor、双方向 acceptor、datagram の受け口へ分割する
+    pub(crate) fn split(
+        self,
+    ) -> (
+        Handle,
+        RecvAcceptor,
+        BidiAcceptor,
+        mpsc::UnboundedReceiver<Vec<u8>>,
+    ) {
+        (self.handle, self.recv, self.bidi, self.datagram)
     }
 }
 
@@ -1189,6 +1228,8 @@ struct Driver {
     uni_tx: mpsc::UnboundedSender<RecvStream>,
     /// ピア起動の双方向ストリームをアプリへ渡すチャネル
     bidi_tx: mpsc::UnboundedSender<(RecvStream, SendStream)>,
+    /// 受信した datagram をアプリへ渡すチャネル
+    datagram_tx: mpsc::UnboundedSender<Vec<u8>>,
     /// 受信中のストリームの状態
     recv_streams: HashMap<WtStreamId, RecvState>,
     /// ピア起動ストリームの終端状態 (WT_MAX_STREAMS を返すため)
@@ -1435,6 +1476,17 @@ impl Driver {
                     .entry(stream_id)
                     .or_default()
                     .push_back(PendingSend { data, fin, reply });
+                true
+            }
+            Command::SendDatagram { data, reply } => {
+                // DATAGRAM capsule を WT セッションの出力へ積み、次の flush_cycle で
+                // HTTP/2 へ流す。reply は flush 後に返す
+                match self.wt.send_datagram(&data) {
+                    Ok(()) => self.after_flush.push(reply),
+                    Err(error) => {
+                        let _ = reply.send(Err(io_error(error)));
+                    }
+                }
                 true
             }
             Command::Reset {
@@ -1726,9 +1778,8 @@ impl Driver {
                 true
             }
             WtEvent::DatagramReceived { data } => {
-                // zakuro-moq は object を subgroup stream で送るため datagram を使わない。
-                // 受信した datagram は破棄して接続を壊さない
-                tracing::trace!("Discarding a WebTransport datagram: {} bytes", data.len());
+                // MOQT の datagram の解釈は session 層が行う。ここでは受信キューへ渡す
+                let _ = self.datagram_tx.send(data);
                 true
             }
             WtEvent::SessionDraining => {

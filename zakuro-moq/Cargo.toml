@@ -17,6 +17,8 @@ path = "src/main.rs"
 [dependencies]
 # CA 証明書を ngtcp2 に 1 枚ずつ渡すための PEM エンコード
 base64ct = { version = "1.8", features = ["alloc"] }
+# s2n-quic の datagram 送受信 API が要求するバイト列型
+bytes = "1.12"
 # ログのファサード (共有クレート zakuro-core も使う)
 log = "0.4"
 # CLI 引数パース

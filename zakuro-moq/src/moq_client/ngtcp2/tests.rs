@@ -112,7 +112,7 @@ async fn backends_stream_round_trip() {
     for backend in [QuicBackend::S2nQuic, QuicBackend::Ngtcp2] {
         timeout(TEST_TIMEOUT, async {
             let (client, mut server) = pair(backend, TransportParams::new()).await;
-            let (mut handle, mut uni, mut bidi) = client.split();
+            let (mut handle, mut uni, mut bidi, _datagram) = client.split();
             let peer = tokio::spawn(async move {
                 assert_eq!(receive_stream(&mut server, 2).await, b"hello");
                 let id = server
@@ -214,7 +214,7 @@ async fn reliable_reset_and_fallback() {
                 server.supports_reset_stream_at(),
                 "クライアントが RESET_STREAM_AT を広告すること"
             );
-            let (mut handle, _, _) = client.split();
+            let (mut handle, _, _, _datagram) = client.split();
             let peer = tokio::spawn(async move {
                 let mut data = Vec::new();
                 loop {
@@ -258,7 +258,7 @@ async fn flow_control_and_stream_credit() {
             .with_initial_max_data(1024)
             .with_initial_max_stream_data_uni(1024);
         let (client, mut server) = pair(QuicBackend::Ngtcp2, params).await;
-        let (mut handle, _, _) = client.split();
+        let (mut handle, _, _, _datagram) = client.split();
         let peer = tokio::spawn(async move {
             for index in 0..3 {
                 let data = receive_stream(&mut server, 2 + index * 4).await;
@@ -305,7 +305,7 @@ async fn receive_reset_and_connection_close() {
             TransportParams::new().with_reset_stream_at(true),
         )
         .await;
-        let (mut handle, mut uni, _) = client.split();
+        let (mut handle, mut uni, _, _datagram) = client.split();
         let peer = tokio::spawn(async move {
             let id = server.open_uni_stream().expect("stream を開けること");
             server
@@ -377,7 +377,7 @@ async fn receive_flow_control_and_dropped_stream() {
         let (client, mut server) =
             pair_with_client_params(QuicBackend::Ngtcp2, TransportParams::new(), Some(params))
                 .await;
-        let (handle, mut uni, _) = client.split();
+        let (handle, mut uni, _, _datagram) = client.split();
         let peer = tokio::spawn(async move {
             for index in 0..3 {
                 // 初期枠が 1 本のため、次のストリームは MAX_STREAMS を受け取るまで待つ。
@@ -443,4 +443,58 @@ async fn receive_flow_control_and_dropped_stream() {
     })
     .await
     .expect("放棄後も受信枠を回復して読み続けられること");
+}
+
+/// 両実装で datagram の送受信ができること
+///
+/// s2n-quic と ngtcp2 の両バックエンドで、QUIC DATAGRAM を送ってサーバーで受け取り、
+/// サーバーから返した datagram をクライアントで受け取れることを確かめる。
+#[tokio::test]
+async fn backends_datagram_round_trip() {
+    for backend in [QuicBackend::S2nQuic, QuicBackend::Ngtcp2] {
+        timeout(TEST_TIMEOUT, async {
+            // サーバーも datagram を受け取れるよう max_datagram_frame_size を広告する
+            let params = TransportParams::new().with_datagram(65535);
+            let (client, mut server) = pair(backend, params).await;
+            let (handle, _uni, _bidi, mut receiver) = client.split();
+
+            let payload = b"audio object";
+            handle
+                .send_datagram(payload)
+                .await
+                .expect("datagram を送信できること");
+
+            // サーバーが datagram を受け取る
+            let mut received = None;
+            while received.is_none() {
+                if let ConnectionEvent::Datagram { data } =
+                    server.recv_event().await.expect("イベントを受信できること")
+                {
+                    received = Some(data);
+                }
+            }
+            assert_eq!(
+                received.expect("datagram が届いていること"),
+                payload,
+                "送信した datagram が受信できること"
+            );
+
+            // サーバーから返した datagram をクライアントで受け取る
+            server
+                .send_datagram(b"audio reply")
+                .await
+                .expect("サーバーから datagram を送信できること");
+            let datagrams = receiver
+                .recv_datagrams()
+                .await
+                .expect("datagram を受信できること")
+                .expect("接続が閉じていないこと");
+            assert!(
+                datagrams.iter().any(|datagram| datagram == b"audio reply"),
+                "返送した datagram が受信できること: {datagrams:?}"
+            );
+        })
+        .await
+        .expect("datagram の送受信がタイムアウトしないこと");
+    }
 }

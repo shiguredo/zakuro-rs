@@ -91,8 +91,9 @@ WT_CLOSE_SESSION の Application Error Code は 32 ビットである。MOQT の
 
 ### 1.7 DATAGRAM
 
-zakuro-moq は object を subgroup stream で送るため DATAGRAM を送信しない。受信した
-`WT_DATAGRAM` は破棄し、接続を壊さない (§7)。
+zakuro-moq は datagram 配送を指定したトラックの object を `WT_DATAGRAM` capsule で送受信する
+(draft-ietf-webtrans-http2-15 §6.13)。capsule は HTTP/2 の DATA 上を流れるため、QUIC
+DATAGRAM と違い経路損失では失われない。
 
 ### 1.8 TLS
 
@@ -131,7 +132,8 @@ MOQT には PING が無く、wt-h2 は HTTP/2 の上で動くため QUIC の idl
 - relay が WT の初期ストリーム上限を SETTINGS で広告せず `WT_MAX_STREAMS` も送らない場合、
   クライアントのストリーム open は空きを待ち続ける。接続確立 (SETTINGS と CONNECT) には
   タイムアウトを設けているが、ストリーム open 自体のタイムアウトは無い (QUIC 経路と同じ性質)。
-- MOQT の object を DATAGRAM で送る機能は未対応 (QUIC 経路と同じ)。
+- `WT_DATAGRAM` は TCP 上で信頼的に届く。QUIC DATAGRAM のような経路損失は無いが、遅延特性は
+  QUIC 直接接続と異なる。
 - WT_CLOSE_SESSION のコードが 32 ビットのため、MOQT のローカル専用クローズコードは
   wire に載せられない。
 - 実リレー E2E: リレー再構築後の 2026-10-25 に、テスト用リレー (接続先のホスト名は
@@ -161,7 +163,8 @@ MOQT には PING が無く、wt-h2 は HTTP/2 の上で動くため QUIC の idl
   18 MiB 受信による HTTP/2 ウィンドウ拡張、WT_MAX_STREAMS による open の再開、
   WT_STOP_SENDING 後の破棄データによるセッションクレジット回復、keep-alive PING、
   WT_CLOSE_SESSION の送受信と END_STREAM 応答、接続断で acceptor が `Ok(None)` を返す
-  ことを検証する。
+  ことを検証する。WT_DATAGRAM capsule の送受信は `received_datagram_is_forwarded` と
+  `send_datagram_over_http2` で検証する。
 - 実リレー E2E (2026-10-25 に確認):
 
   ```bash

@@ -189,9 +189,15 @@ async fn run_instance(
     receive_counters: moq_client::ReceiveCounters,
 ) -> Result<()> {
     let endpoint = moq_client::MoqEndpoint::parse(&instance.url)?;
-    let track_names: Vec<String> = instance.tracks.iter().map(|t| t.name.clone()).collect();
+    // 配送方式が設定どおりに効いているかを起動ログで確認できるようにする。datagram 配送の
+    // 試験で誤って subgroup のまま負荷をかけ続ける事故を防ぐ
+    let track_names: Vec<String> = instance
+        .tracks
+        .iter()
+        .map(|t| format!("{}:{}", t.name, t.delivery.as_str()))
+        .collect();
     tracing::info!(
-        "Zakuro instance {} (MOQ): transport={} vcs={} vcs-hatch-rate={} duration={:?} repeat-interval={:?} reconnect-on-goaway={} namespace={} tracks=[{}] subscribe-tracks=[{}] verify-payload={}",
+        "Zakuro instance {} (MOQ): transport={} vcs={} vcs-hatch-rate={} duration={:?} repeat-interval={:?} reconnect-on-goaway={} namespace={} tracks=[{}] datagram-max-size={} subscribe-tracks=[{}] verify-payload={}",
         instance_id,
         instance.transport.as_str(),
         instance.vcs,
@@ -201,6 +207,7 @@ async fn run_instance(
         instance.reconnect_on_goaway,
         instance.namespace,
         track_names.join(", "),
+        instance.datagram_max_size,
         instance.subscribe_tracks.join(", "),
         instance.verify_payload,
     );
@@ -228,6 +235,7 @@ async fn run_instance(
         quic_backend: instance.quic_backend,
         namespace: instance.namespace.clone(),
         tracks: instance.tracks.clone(),
+        datagram_max_size: instance.datagram_max_size,
         subscribe_tracks: instance.subscribe_tracks.clone(),
         verify_payload: instance.verify_payload,
         payload: payload.into(),

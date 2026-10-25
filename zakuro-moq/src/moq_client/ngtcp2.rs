@@ -119,6 +119,11 @@ enum Command {
         code: u64,
         reply: oneshot::Sender<io::Result<()>>,
     },
+    /// OBJECT_DATAGRAM を送信する
+    SendDatagram {
+        data: Vec<u8>,
+        reply: oneshot::Sender<io::Result<()>>,
+    },
     Consumed {
         id: i64,
         size: u64,
@@ -188,6 +193,28 @@ impl Handle {
         if self.0.commands.send(Command::Close { code, reply }).is_ok() {
             let _ = result.await;
         }
+    }
+
+    /// OBJECT_DATAGRAM を 1 つ送信する
+    ///
+    /// QUIC DATAGRAM は輻輳制御の制約で送れない場合に破棄され得る (RFC 9221 §3 は再送を
+    /// 定めない)。ngtcp2 の `send_datagram` はその場合も `Ok` を返すため、ワイヤへ出た
+    /// ことは保証されない。呼び出し側は購読側の受信数と併せて確認すること。
+    ///
+    /// # Errors
+    ///
+    /// ピアが datagram 非対応の場合、サイズが上限を超える場合、接続が閉じている場合は
+    /// エラーになる。
+    pub(crate) async fn send_datagram(&self, data: &[u8]) -> io::Result<()> {
+        let (reply, result) = oneshot::channel();
+        self.0
+            .commands
+            .send(Command::SendDatagram {
+                data: data.to_vec(),
+                reply,
+            })
+            .map_err(|_| closed())?;
+        result.await.map_err(|_| closed())?
     }
 }
 
@@ -372,6 +399,8 @@ pub(crate) struct Connection {
     handle: Handle,
     recv: RecvAcceptor,
     bidi: BidiAcceptor,
+    /// 駆動タスクが転送する受信 datagram
+    datagram: mpsc::UnboundedReceiver<Vec<u8>>,
 }
 
 impl Connection {
@@ -383,6 +412,7 @@ impl Connection {
         let (commands, requests) = mpsc::unbounded_channel();
         let (uni_tx, uni_rx) = mpsc::unbounded_channel();
         let (bidi_tx, bidi_rx) = mpsc::unbounded_channel();
+        let (datagram_tx, datagram_rx) = mpsc::unbounded_channel();
         let handle = Handle(Arc::new(Owner {
             commands,
             cancel: CancellationToken::new(),
@@ -395,6 +425,7 @@ impl Connection {
             cancel: handle.0.cancel.clone(),
             uni_tx,
             bidi_tx,
+            datagram_tx,
             receivers: HashMap::new(),
             senders: HashSet::new(),
             opens: VecDeque::new(),
@@ -417,13 +448,21 @@ impl Connection {
                 incoming: bidi_rx,
                 _handle: handle.clone(),
             },
+            datagram: datagram_rx,
             handle,
         }
     }
 
-    /// 接続ハンドル、単方向 acceptor、双方向 acceptor へ分割する
-    pub(crate) fn split(self) -> (Handle, RecvAcceptor, BidiAcceptor) {
-        (self.handle, self.recv, self.bidi)
+    /// 接続ハンドル、単方向 acceptor、双方向 acceptor、datagram の受け口へ分割する
+    pub(crate) fn split(
+        self,
+    ) -> (
+        Handle,
+        RecvAcceptor,
+        BidiAcceptor,
+        mpsc::UnboundedReceiver<Vec<u8>>,
+    ) {
+        (self.handle, self.recv, self.bidi, self.datagram)
     }
 }
 
@@ -435,6 +474,8 @@ struct Driver {
     cancel: CancellationToken,
     uni_tx: mpsc::UnboundedSender<RecvStream>,
     bidi_tx: mpsc::UnboundedSender<(RecvStream, SendStream)>,
+    /// 受信した datagram をアプリへ渡すチャネル
+    datagram_tx: mpsc::UnboundedSender<Vec<u8>>,
     // 受信チャネルのバイト数は QUIC の 64 MiB の接続枠で制限される。bounded チャネルで
     // 接続タスクを止めると他ストリームの ACK やフロー制御も止まるため、ここでは待たない。
     receivers: HashMap<i64, mpsc::UnboundedSender<Received>>,
@@ -649,6 +690,25 @@ impl Driver {
                 self.senders.remove(&id);
                 let _ = reply.send(result);
             }
+            Command::SendDatagram { data, reply } => {
+                // WebTransport 経路は HTTP Datagram のフレーミング (Quarter Stream ID) を
+                // 付けてから QUIC DATAGRAM で送る。QUIC 直接接続は MOQT の datagram を
+                // そのまま送る
+                let result = if let Some(wt) = &mut self.wt {
+                    let session_id = wt.session.session_id();
+                    match wt.h3.send_datagram(session_id, &data) {
+                        Ok(encoded) => self
+                            .connection
+                            .send_datagram(&encoded)
+                            .await
+                            .map_err(io_error),
+                        Err(e) => Err(io_error(format!("HTTP/3 datagram encode error: {e}"))),
+                    }
+                } else {
+                    self.connection.send_datagram(&data).await.map_err(io_error)
+                };
+                let _ = reply.send(result);
+            }
             Command::Consumed { id, size } => {
                 if size > 0 {
                     self.connection
@@ -765,6 +825,11 @@ impl Driver {
                         self.connection.extend_max_streams_uni(1);
                     }
                 }
+            }
+            ConnectionEvent::Datagram { data } => {
+                // QUIC DATAGRAM の中身 (MOQT の datagram type と OBJECT_DATAGRAM) の解釈は
+                // Session が行う。ここでは受信キューへ渡すだけにする
+                let _ = self.datagram_tx.send(data);
             }
             ConnectionEvent::ConnectionClosed {
                 error_code, reason, ..

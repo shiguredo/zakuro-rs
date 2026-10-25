@@ -1,17 +1,20 @@
-//! MOQT の I/O 層で使うストリームと接続ハンドルの抽象化
+//! MOQT の I/O 層で使うストリーム、datagram、接続ハンドルの抽象化
 //!
 //! `shiguredo_moqt::Session` は Sans I/O の状態機械であり、ワイヤの読み書きは呼び出し側の
 //! 責務である。zakuro-moq は QUIC 直接接続 (s2n-quic / ngtcp2)、WebTransport over HTTP/3、QMux の経路を持ち、
 //! `session.rs` は経路を意識せずにセッションを駆動したい。そこでストリーム・接続ハンドル・
-//! accept を enum で包み、必要な操作だけを提供する。
+//! accept・datagram の送受信を enum で包み、必要な操作だけを提供する。
 //!
 //! トレイトは作らない (時雨堂 Rust 規約)。各経路が同じ操作を提供する
 //! ため、enum の match で十分である。
 
 use std::sync::Arc;
+use std::task::Poll;
 
+use bytes::Bytes;
 use s2n_quic::connection::{BidirectionalStreamAcceptor, Handle, ReceiveStreamAcceptor};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{ngtcp2, qmux, wt_h2};
@@ -272,6 +275,44 @@ impl MoqConnectionHandle {
             }
         }
     }
+
+    /// OBJECT_DATAGRAM を 1 つ送信する
+    ///
+    /// datagram は再送されない (RFC 9221 §3) ため、失敗しても再送しない。QUIC の送信キューが
+    /// 満杯の場合は空きができるまで待つ。待たずに捨てると音声の欠落として現れるが、
+    /// 負荷試験では送信できた object 数を正しく数えたいため待つ。
+    ///
+    /// # Errors
+    ///
+    /// datagram を送信できない場合 (接続終了、ピアが datagram 非対応、サイズ超過など) は
+    /// エラーになる。
+    pub(crate) async fn send_datagram(&self, data: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Quic(handle) => {
+                let mut bytes = Bytes::copy_from_slice(data);
+                // `poll_send_datagram` は空きが無いとき `Waker` を登録するため、
+                // ポーリングで待たずに空きができ次第おきる
+                std::future::poll_fn(|cx| {
+                    let result = handle.datagram_mut(
+                        |sender: &mut s2n_quic::provider::datagram::default::Sender| {
+                            sender.poll_send_datagram(&mut bytes, cx)
+                        },
+                    );
+                    match result {
+                        Ok(poll) => poll.map_err(|e| io_error(format!("datagram send error: {e}"))),
+                        Err(e) => Poll::Ready(Err(io_error(format!("datagram query error: {e}")))),
+                    }
+                })
+                .await
+            }
+            Self::Ngtcp2(handle) => handle.send_datagram(data).await,
+            Self::WtH2(handle) => handle.send_datagram(data).await,
+            Self::Qmux(connection) => connection
+                .send_datagram(data)
+                .await
+                .map_err(|e| io_error(format!("QMux datagram send error: {e}"))),
+        }
+    }
 }
 
 /// ピア起動の単方向ストリーム (data stream) を受け入れる口
@@ -368,6 +409,107 @@ impl MoqBidiAcceptor {
                         .map(|(send, recv)| (MoqRecvStream::Qmux(recv), MoqSendStream::Qmux(send)))
                 })
                 .map_err(io_error),
+        }
+    }
+}
+
+/// ピアから届く datagram の受け口
+///
+/// MOQT の OBJECT_DATAGRAM は QUIC DATAGRAM で運ばれる
+/// (draft-ietf-moq-transport-22 §11.2 (Datagrams))。経路ごとに受信の仕組みが異なるため、
+/// 駆動タスクのチャネル (ngtcp2 / WebTransport over HTTP/2) と s2n-quic の datagram
+/// provider を enum で包む。QMux は接続が受信キューを持つため接続そのものを保持する。
+pub(crate) enum MoqDatagramReceiver {
+    /// QUIC 直接接続 (s2n-quic) の datagram 受信
+    Quic(Handle),
+    /// ngtcp2 (QUIC 直接接続 / WebTransport over HTTP/3) の駆動タスクが転送する datagram
+    Ngtcp2(mpsc::UnboundedReceiver<Vec<u8>>),
+    /// WebTransport over HTTP/2 の駆動タスクが転送する datagram
+    WtH2(mpsc::UnboundedReceiver<Vec<u8>>),
+    /// QMux 接続の datagram 受信
+    Qmux(Arc<tokio_qmux::Connection>),
+}
+
+impl MoqDatagramReceiver {
+    /// 到着済みの datagram をまとめて受け取る
+    ///
+    /// 1 件以上届くまで待ち、その時点で受け取れる分をすべてまとめて返す。返る `Vec` は
+    /// 空にならない。接続が閉じた場合は `Ok(None)` を返す。
+    ///
+    /// # Errors
+    ///
+    /// 接続の datagram 受信に失敗した場合はエラーになる。
+    pub(crate) async fn recv_datagrams(&mut self) -> std::io::Result<Option<Vec<Vec<u8>>>> {
+        match self {
+            Self::Quic(handle) => {
+                let mut first: Option<Bytes> = None;
+                let mut closed = false;
+                // 1 つも無いときに即座に返すと呼び出し側の受信ループが空回りして CPU を
+                // 使い切り、同じ runtime で動く QUIC エンドポイントの I/O を飢えさせる。
+                // 最初の 1 つは届くまで待ち、続けて届いている分はまとめて取る
+                std::future::poll_fn(|cx| {
+                    let result = handle.datagram_mut(
+                        |receiver: &mut s2n_quic::provider::datagram::default::Receiver| {
+                            receiver.poll_recv_datagram(cx)
+                        },
+                    );
+                    match result {
+                        Ok(Poll::Ready(Ok(datagram))) => {
+                            first = Some(datagram);
+                            Poll::Ready(())
+                        }
+                        Ok(Poll::Pending) => Poll::Pending,
+                        // 接続エラー。datagram はもう届かないため、接続の終了として扱う
+                        Ok(Poll::Ready(Err(e))) => {
+                            tracing::debug!("datagram receive ended: {e}");
+                            closed = true;
+                            Poll::Ready(())
+                        }
+                        Err(e) => {
+                            tracing::debug!("datagram query ended: {e}");
+                            closed = true;
+                            Poll::Ready(())
+                        }
+                    }
+                })
+                .await;
+                if closed {
+                    return Ok(None);
+                }
+                let first = first.expect("logical invariant: a datagram is received");
+                let mut datagrams = vec![first.to_vec()];
+                // 続けて届いている分を取る (空になったら返す)
+                let _ = handle.datagram_mut(
+                    |receiver: &mut s2n_quic::provider::datagram::default::Receiver| {
+                        while let Some(next) = receiver.recv_datagram() {
+                            datagrams.push(next.to_vec());
+                        }
+                    },
+                );
+                Ok(Some(datagrams))
+            }
+            Self::Ngtcp2(receiver) | Self::WtH2(receiver) => {
+                let Some(first) = receiver.recv().await else {
+                    return Ok(None);
+                };
+                let mut datagrams = vec![first];
+                while let Ok(next) = receiver.try_recv() {
+                    datagrams.push(next);
+                }
+                Ok(Some(datagrams))
+            }
+            Self::Qmux(connection) => {
+                // QMux は速やかに配送できない DATAGRAM の破棄を許す。取りこぼしを追えるよう
+                // 破棄件数が増えていれば記録する
+                let dropped = connection.dropped_datagrams();
+                if dropped > 0 {
+                    tracing::debug!("QMux dropped datagrams: {dropped}");
+                }
+                connection
+                    .recv_datagrams()
+                    .await
+                    .map_err(|e| io_error(format!("QMux datagram receive error: {e}")))
+            }
         }
     }
 }
@@ -487,5 +629,144 @@ mod tests {
         let (received, filled) = server_task.await.expect("server タスクが完了すること");
         assert_eq!(filled, 5);
         assert_eq!(&received, b"hello");
+    }
+
+    /// QMux の DATAGRAM が送受信できること
+    ///
+    /// QMux の DATAGRAM は QUIC の DATAGRAM と違い信頼的かつ順序どおりに配送される
+    /// (draft-ietf-quic-qmux-02 Section 1.1)。接続の確立 (ピアの transport parameter の
+    /// 交換) 前に送った DATAGRAM は破棄され得るため、受信できるまで再送して確かめる。
+    #[tokio::test]
+    async fn qmux_datagram_round_trip() {
+        let (client, server) = qmux_pair();
+        let handle = MoqConnectionHandle::Qmux(client);
+        let mut receiver = MoqDatagramReceiver::Qmux(server);
+
+        let payload = b"audio object";
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut received = Vec::new();
+        while received.is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "DATAGRAM を受信できること"
+            );
+            handle
+                .send_datagram(payload)
+                .await
+                .expect("DATAGRAM を送信できること");
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                receiver.recv_datagrams(),
+            )
+            .await
+            {
+                Ok(Ok(Some(datagrams))) => received = datagrams,
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => panic!("DATAGRAM の受信に失敗しました: {e}"),
+                Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+        }
+        assert!(
+            received.iter().any(|datagram| datagram == payload),
+            "送信した DATAGRAM が受信できること: {received:?}"
+        );
+    }
+
+    /// s2n-quic の datagram が送受信できること
+    ///
+    /// s2n-quic の QUIC DATAGRAM は再送されない (RFC 9221 §3)。loopback の実 QUIC 接続で、
+    /// datagram を送って反対側の受信口で取り出せることを確かめる。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn quic_datagram_round_trip() {
+        use s2n_quic::provider::datagram::default::Endpoint as DatagramEndpoint;
+
+        // loopback 接続用の自己署名証明書
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("自己署名証明書を生成できること");
+        let certificate = certified.cert.der().to_vec();
+        let private_key = certified.signing_key.serialize_der();
+
+        // s2n-quic の datagram endpoint は送受信のキューの容量が既定で 0 である。
+        // 送信容量が 0 だと datagram を 1 つも送れないため、両方に容量を設定する
+        let datagram_endpoint = || {
+            DatagramEndpoint::builder()
+                .with_send_capacity(64)
+                .expect("datagram の送信キューを設定できること")
+                .with_recv_capacity(64)
+                .expect("datagram の受信キューを設定できること")
+                .build()
+                .expect("datagram endpoint を構築できること")
+        };
+
+        let server_tls = s2n_quic::provider::tls::rustls::Server::builder()
+            .with_certificate(vec![certificate.clone()], private_key)
+            .expect("サーバーの証明書と秘密鍵を設定できること")
+            .with_application_protocols([b"moqt-22".as_slice()].into_iter())
+            .expect("ALPN を設定できること")
+            .build()
+            .expect("サーバーの TLS 設定を構築できること");
+        let mut server = s2n_quic::Server::builder()
+            .with_tls(server_tls)
+            .expect("サーバーの TLS を設定できること")
+            .with_io("127.0.0.1:0")
+            .expect("サーバーの UDP ソケットを作成できること")
+            .with_datagram(datagram_endpoint())
+            .expect("サーバーの datagram endpoint を設定できること")
+            .start()
+            .expect("サーバーを起動できること");
+        let addr = server
+            .local_addr()
+            .expect("サーバーの待ち受けアドレスを取得できること");
+
+        let server_task = tokio::spawn(async move {
+            let connection = server.accept().await.expect("接続を受け入れられること");
+            let (handle, _acceptor) = connection.split();
+            let mut receiver = MoqDatagramReceiver::Quic(handle);
+            receiver
+                .recv_datagrams()
+                .await
+                .expect("datagram を受信できること")
+                .expect("接続が閉じていないこと")
+        });
+
+        let client_tls = s2n_quic::provider::tls::rustls::Client::builder()
+            .with_certificate(vec![certificate])
+            .expect("サーバーの証明書を信頼できること")
+            .with_application_protocols([b"moqt-22".as_slice()].into_iter())
+            .expect("ALPN を設定できること")
+            .build()
+            .expect("クライアントの TLS 設定を構築できること");
+        let client = s2n_quic::Client::builder()
+            .with_tls(client_tls)
+            .expect("クライアントの TLS を設定できること")
+            .with_io("0.0.0.0:0")
+            .expect("クライアントの UDP ソケットを作成できること")
+            .with_datagram(datagram_endpoint())
+            .expect("クライアントの datagram endpoint を設定できること")
+            .start()
+            .expect("クライアントを起動できること");
+        let connection = client
+            .connect(s2n_quic::client::Connect::new(addr).with_server_name("localhost"))
+            .await
+            .expect("MOQ relay 相当のサーバーへ接続できること");
+        let (handle, _acceptor) = connection.split();
+        let handle = MoqConnectionHandle::Quic(handle);
+
+        let payload = b"audio object";
+        handle
+            .send_datagram(payload)
+            .await
+            .expect("datagram を送信できること");
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(10), server_task)
+            .await
+            .expect("datagram の受信がタイムアウトしないこと")
+            .expect("サーバータスクが完了すること");
+        assert!(
+            received.iter().any(|datagram| datagram == payload),
+            "送信した datagram が受信できること: {received:?}"
+        );
     }
 }

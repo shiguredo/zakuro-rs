@@ -194,18 +194,19 @@
 
 | 項目 | 現状 |
 | --- | --- |
-| publish | `--tracks 名前[:レート[:サイズ]]`。VC 1 本が全トラックを publish |
+| publish | `--tracks 名前[:レート[:サイズ[:配送方式]]]`。VC 1 本が全トラックを publish |
 | Track Name | `<指定名>-<インスタンス>-<VC>` で一意化 (moq_client::run の Track Name 解決) |
 | Track Alias | セッション内で 1 からトラック順に払い出し |
 | Group / Subgroup | Group は約 1 秒分の object で FIN して次へ。Subgroup は Group 内 1 本固定 (`SubgroupIdMode::Zero`) |
+| 配送方式 | トラック単位で subgroup / datagram を選択。datagram は Group の最終 object に END_OF_GROUP を立てる |
 | 優先度 | `publisher_priority: None` 固定。CLI / JSONC からの指定は無い (`Publisher::new`) |
 | ペーシング | トラックごとに `period = 1.0 / object_rate` で送信。10 object 分を超える遅れは切り捨てて現在時刻から再開 |
 | LOC プロパティ | Timescale と Timestamp (送信数 / レートから算出した合成値) を付与 (`build_loc_properties`) |
 | REQUEST_UPDATE | FORWARD=0 で該当トラックの送信を停止、FORWARD=1 で再開 (`drain_events` の `SessionEvent::RequestUpdateReceived`) |
 | subscribe | `--subscribe-tracks`。`{instance}` / `{vc}` のプレースホルダで 1 publish に対して N subscribe を構成できる |
-| 受信検証 | `--verify-payload` で `位置 % 251` パターンとの一致のみ検査 (既定は無効) |
+| 受信検証 | `--verify-payload` で `位置 % 251` パターンとの一致のみ検査 (既定は無効)。subgroup / datagram の両方に適用 |
 | 欠落 / 順序 / 遅延 | 計測しない。受信側で Object ID / Group ID を記録していない (`record_received_object`) |
-| DATAGRAM | endpoint (QUIC) と `max_datagram_frame_size` (QMux) は広告しているが、object は subgroup stream のみで送る (`transport.rs` の `build_client` / `qmux.rs` の `build_config`) |
+| DATAGRAM | トラック単位で OBJECT_DATAGRAM の送受信に対応。QUIC / WebTransport / QMux の全経路で送受信する (`stream.rs` の `MoqDatagramReceiver`、`session.rs` の `send_next_datagram`) |
 
 #### メトリクス
 
@@ -378,7 +379,7 @@ MoQ 負荷試験として見たときに、zakuro-moq に足りていないも�
 | QUIC 統計 | RTT / 損失 / 輻輳ウィンドウ / bytes in flight / stream 数を読んでいない (transport.rs / qmux.rs は接続のみ) | h2load の最小 RTT / 平滑化 RTT / 損失宣言数、s2n-quic の接続メトリクス |
 | 輻輳制御と 0-RTT | 輻輳制御アルゴリズムの指定、0-RTT の利用、idle timeout の指定ができない | quic-go/perf のハンドシェイク計測、QUIC 実装のパラメータ指定 |
 | リレーの経路 | 複数ホップのリレー、キャッシュヒット、同一 object を複数 subscriber が受ける場合の挙動を検証する仕組みが無い | moq-relay の hop リストとデバッグ用 HTTP API、moq-stats |
-| プロトコル機能の網羅 | 優先度 (`publisher_priority`) は固定、DATAGRAM は未使用、Subgroup は Group 内 1 本固定、SUBSCRIBE_UPDATE / TRACK_STATUS などは未使用。`--tracks` は固定値のみ | moxygen の転送プリファレンス 4 種、moq-bench の `[min, max]` のレンジ指定 |
+| プロトコル機能の網羅 | 優先度 (`publisher_priority`) は固定、DATAGRAM はトラック単位で選択可 (混在比率は指定不可)、Subgroup は Group 内 1 本固定、SUBSCRIBE_UPDATE / TRACK_STATUS などは未使用。`--tracks` は固定値のみ | moxygen の転送プリファレンス 4 種、moq-bench の `[min, max]` のレンジ指定 |
 | 異常系 | GOAWAY の受信自体は New Session URI への移行として処理するが、意図的に起こす手段は無い。PUBLISH / SUBSCRIBE の拒否、REQUEST_ERROR などを意図的に起こせない。peer 起点の request も扱わない (`run` の `bidi_acceptor.accept_bidirectional_stream`) | moxygen 適合性試験のケース設計 |
 
 ### 試験の制御と出力

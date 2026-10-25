@@ -3309,6 +3309,7 @@ name = "zakuro-moq"
 version = "2026.0.0"
 dependencies = [
  "base64ct",
+ "bytes",
  "log",
  "noargs",
  "nojson",

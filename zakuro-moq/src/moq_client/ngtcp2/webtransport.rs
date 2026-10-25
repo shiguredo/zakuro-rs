@@ -503,6 +503,10 @@ impl Driver {
                         format!("WebTransport session closed: {close_error_code}: {close_message}"),
                     ));
                 }
+                Event::WebTransport(WtEvent::Datagram { payload, .. }) => {
+                    // MOQT の datagram の解釈は session 層が行う。ここでは受信キューへ渡す
+                    let _ = self.datagram_tx.send(payload);
+                }
                 Event::WebTransport(WtEvent::BufferedStreamRejected {
                     stream_id,
                     error_code,
@@ -515,8 +519,8 @@ impl Driver {
                 Event::StreamReset { .. } | Event::StopSending { .. } | Event::StreamEnd { .. } => {
                     return Err(io_error("WebTransport CONNECT stream closed"));
                 }
-                // 負荷ツールの object は subgroup stream で運ぶ。データグラムの構文検証と
-                // セッションへの関連付けは feed_datagram が行い、ここでは保持しない。
+                // 上記以外のイベントは扱わない。datagram の構文検証とセッションへの
+                // 関連付けは feed_datagram が行い、MOQT としての解釈は session 層が行う。
                 _ => {}
             }
         }

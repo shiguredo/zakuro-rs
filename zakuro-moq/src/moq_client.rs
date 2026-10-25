@@ -86,6 +86,8 @@ pub(crate) struct MoqClientConfig {
     pub(crate) namespace: String,
     /// publish するトラック (Track Name は仮想クライアントごとに一意化する)
     pub(crate) tracks: Vec<crate::args::TrackSpec>,
+    /// datagram 配送で送る object 1 個のサイズ上限 (バイト)
+    pub(crate) datagram_max_size: usize,
     /// subscribe するトラック名 (Full Track Name は仮想クライアントごとに一意化する)
     pub(crate) subscribe_tracks: Vec<String>,
     /// 受信 payload が zakuro-moq の publisher のパターンと一致するかを検査する
@@ -131,6 +133,7 @@ pub(crate) async fn run(
             name: format!("{}-{}-{}", track.name, instance_id, vc_id),
             object_rate: track.object_rate,
             object_size: track.object_size,
+            delivery: track.delivery,
         })
         .collect();
     let track_names: Vec<String> = tracks.iter().map(|t| t.name.clone()).collect();
@@ -157,6 +160,7 @@ pub(crate) async fn run(
             authority: &current_endpoint.authority,
             path: &current_endpoint.path,
             payload: std::sync::Arc::clone(&config.payload),
+            datagram_max_size: config.datagram_max_size,
             subscribe_tracks: &subscribe_tracks,
             verify_payload: config.verify_payload,
             migrate_on_goaway: config.reconnect_on_goaway,

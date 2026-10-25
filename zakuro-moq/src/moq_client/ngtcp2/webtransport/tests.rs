@@ -106,12 +106,30 @@ impl Peer {
                         self.quic.extend_max_streams_uni(1);
                     }
                 }
+                ConnectionEvent::Datagram { data } => {
+                    self.h3
+                        .feed_datagram(&data)
+                        .expect("HTTP/3 へ datagram を渡せること");
+                }
                 ConnectionEvent::ConnectionClosed { error_code, .. } => {
                     panic!("WT イベントの前に接続が閉じた: {error_code:#x}")
                 }
                 _ => {}
             }
         }
+    }
+
+    /// WebTransport の datagram をエンコードして QUIC DATAGRAM で送る
+    async fn send_datagram(&mut self, payload: &[u8]) {
+        let encoded = self
+            .h3
+            .send_datagram(0, payload)
+            .expect("HTTP Datagram をエンコードできること");
+        self.quic
+            .send_datagram(&encoded)
+            .await
+            .expect("QUIC DATAGRAM を送信できること");
+        self.flush().await;
     }
 
     fn open(&mut self, bidi: bool, data: &[u8], fin: bool) -> i64 {
@@ -331,7 +349,8 @@ async fn pair_with_transport(
 async fn streams_and_flow_control() {
     timeout(TEST_TIMEOUT, async {
         let (client, mut peer) = pair(200).await;
-        let (handle, mut uni, mut bidi) = client.expect("CONNECT が成功すること").split();
+        let (handle, mut uni, mut bidi, _datagram) =
+            client.expect("CONNECT が成功すること").split();
         let expected = vec![0x5a; 4096];
         let expected_peer = expected.clone();
         let server = tokio::spawn(async move {
@@ -479,7 +498,7 @@ async fn rejects_unnegotiated_moqt_protocol() {
 async fn fragmented_stream_header() {
     timeout(TEST_TIMEOUT, async {
         let (client, mut peer) = pair(200).await;
-        let (handle, mut uni, _) = client.expect("CONNECT が成功すること").split();
+        let (handle, mut uni, _, _datagram) = client.expect("CONNECT が成功すること").split();
         let server = tokio::spawn(async move {
             let id = peer.quic.open_uni_stream().expect("uni を開けること");
             peer.h3
@@ -528,7 +547,7 @@ async fn fragmented_stream_header() {
 async fn verifies_ip_certificate() {
     timeout(TEST_TIMEOUT, async {
         let (client, mut peer) = pair_with_name(200, "127.0.0.1").await;
-        let (handle, _, _) = client.expect("IP SAN を検証して接続できること").split();
+        let (handle, _, _, _datagram) = client.expect("IP SAN を検証して接続できること").split();
         let close = handle.close(0);
         let receive = async {
             loop {
@@ -552,7 +571,7 @@ async fn verifies_ip_certificate() {
 async fn reliable_resets() {
     timeout(TEST_TIMEOUT, async {
         let (client, mut peer) = pair(200).await;
-        let (handle, mut uni, _) = client.expect("CONNECT が成功すること").split();
+        let (handle, mut uni, _, _datagram) = client.expect("CONNECT が成功すること").split();
         let server = tokio::spawn(async move {
             let mut body = Vec::new();
             loop {
@@ -636,7 +655,7 @@ async fn reset_waits_for_stream_header() {
         let params = TransportParams::new().with_initial_max_stream_data_uni(1);
         let (client, mut peer) =
             pair_with_transport(200, "localhost", Some("moqt-22"), Some(params)).await;
-        let (handle, _, _) = client
+        let (handle, _, _, _datagram) = client
             .expect("1 バイトずつの受信枠でも CONNECT できること")
             .split();
         let (reset_tx, reset_rx) = oneshot::channel();
@@ -680,7 +699,7 @@ async fn reset_waits_for_stream_header() {
 async fn stop_sending_unblocks_writer() {
     timeout(TEST_TIMEOUT, async {
         let (client, mut peer) = pair(200).await;
-        let (handle, _, _) = client.expect("CONNECT が成功すること").split();
+        let (handle, _, _, _datagram) = client.expect("CONNECT が成功すること").split();
         let server = tokio::spawn(async move {
             loop {
                 if let WtEvent::UniStreamOpen { stream_id, .. } = peer.next().await {
@@ -722,7 +741,7 @@ async fn stop_sending_unblocks_writer() {
 async fn drain_and_peer_close() {
     timeout(TEST_TIMEOUT, async {
         let (client, mut peer) = pair(200).await;
-        let (handle, mut uni, _) = client.expect("CONNECT が成功すること").split();
+        let (handle, mut uni, _, _datagram) = client.expect("CONNECT が成功すること").split();
         let server = tokio::spawn(async move {
             let mut body = Vec::new();
             loop {
@@ -781,7 +800,7 @@ async fn closes_with_http3_error_code() {
     timeout(TEST_TIMEOUT, async {
         for expected_code in [0x104, 0x33] {
             let (client, mut peer) = pair(200).await;
-            let (_handle, mut uni, _) = client.expect("CONNECT が成功すること").split();
+            let (_handle, mut uni, _, _datagram) = client.expect("CONNECT が成功すること").split();
             let server = tokio::spawn(async move {
                 if expected_code == 0x104 {
                     // サーバーの control stream は最初のサーバー開始 uni (ID 3)。
@@ -820,4 +839,43 @@ async fn closes_with_http3_error_code() {
     })
     .await
     .expect("プロトコルエラーで接続を閉じること");
+}
+
+/// WebTransport over HTTP/3 で datagram を送受信できること
+///
+/// QUIC DATAGRAM の中の HTTP Datagram を実際の H3 状態機械でエンコード・デコードし、
+/// 双方向の送受信を確かめる。
+#[tokio::test]
+async fn datagrams_are_sent_and_received() {
+    timeout(TEST_TIMEOUT, async {
+        let (client, mut peer) = pair(200).await;
+        let client = client.expect("CONNECT が成功すること");
+        let (handle, _uni, _bidi, mut receiver) = client.split();
+
+        // クライアント -> サーバー
+        let payload = b"client datagram";
+        handle
+            .send_datagram(payload)
+            .await
+            .expect("datagram を送信できること");
+        let received = loop {
+            if let WtEvent::Datagram { payload, .. } = peer.next().await {
+                break payload;
+            }
+        };
+        assert_eq!(received, payload, "送信した datagram が受信できること");
+
+        // サーバー -> クライアント
+        peer.send_datagram(b"server datagram").await;
+        let datagram = receiver.recv().await.expect("datagram を受信できること");
+        assert_eq!(
+            datagram,
+            b"server datagram".to_vec(),
+            "返送した datagram が受信できること"
+        );
+
+        handle.close(0).await;
+    })
+    .await
+    .expect("datagram の送受信がタイムアウトしないこと");
 }

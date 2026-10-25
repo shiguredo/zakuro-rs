@@ -29,9 +29,10 @@ use shiguredo_moqt::parameter::{
 };
 use shiguredo_moqt::session::core::Session;
 use shiguredo_moqt::session::types::{
-    DataStreamId, RequestKind, RequestStreamEnd, SendRequestError, SessionEvent,
-    TrackDataAcceptance, Transport,
+    DataStreamId, DatagramAcceptance, RequestKind, RequestStreamEnd, SendRequestError,
+    SessionEvent, TrackDataAcceptance, Transport,
 };
+use shiguredo_moqt::stream::datagram::ObjectDatagram;
 use shiguredo_moqt::stream::decoder::{DecodedSubgroupObject, SubgroupStreamDecoder};
 use shiguredo_moqt::stream::encode_control_stream_setup;
 use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode, SubgroupObject};
@@ -39,8 +40,11 @@ use shiguredo_moqt::track_properties::TrackProperties;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::stream::{MoqConnectionHandle, MoqRecvAcceptor, MoqRecvStream, MoqSendStream};
+use super::stream::{
+    MoqConnectionHandle, MoqDatagramReceiver, MoqRecvAcceptor, MoqRecvStream, MoqSendStream,
+};
 use super::transport::{MoqConnection, MoqTransport};
+use crate::args::DeliveryMode;
 use crate::error::{ErrorMessage, Result};
 
 /// SETUP Option の MOQT_IMPLEMENTATION に載せる実装名
@@ -96,6 +100,8 @@ pub(crate) struct TrackConfig {
     pub(crate) object_rate: f64,
     /// 1 object の payload サイズ (バイト)
     pub(crate) object_size: usize,
+    /// object の配送方式
+    pub(crate) delivery: DeliveryMode,
 }
 
 /// PUBLISH するトラックと object の設定
@@ -110,6 +116,8 @@ pub(crate) struct SessionConfig<'a> {
     pub(crate) path: &'a str,
     /// object の payload (最大サイズで 1 つ作り、トラック間で共有する)
     pub(crate) payload: Arc<[u8]>,
+    /// datagram 配送で送る object 1 個のサイズ上限 (バイト)
+    pub(crate) datagram_max_size: usize,
     /// subscribe するトラックの Full Track Name (空なら購読しない)
     pub(crate) subscribe_tracks: &'a [String],
     /// 受信 payload が zakuro-moq の publisher のパターンと一致するかを検査する
@@ -310,11 +318,18 @@ struct Publisher {
     scratch: Vec<u8>,
     /// subgroup stream への書き込みが連続で失敗した回数
     consecutive_write_failures: u32,
+    /// datagram 配送で送る object 1 個のサイズ上限 (バイト)
+    datagram_max_size: usize,
 }
 
 impl Publisher {
     /// publisher を作る
-    fn new(config: TrackConfig, track_alias: u64, now: tokio::time::Instant) -> Self {
+    fn new(
+        config: TrackConfig,
+        track_alias: u64,
+        now: tokio::time::Instant,
+        datagram_max_size: usize,
+    ) -> Self {
         let period = Duration::from_secs_f64(1.0 / config.object_rate);
         let objects_per_group = config.object_rate.round().max(1.0) as u64;
         Self {
@@ -334,6 +349,7 @@ impl Publisher {
             sent_objects: 0,
             scratch: Vec::new(),
             consecutive_write_failures: 0,
+            datagram_max_size,
         }
     }
 
@@ -389,6 +405,13 @@ impl Publisher {
         let request_id = self
             .request_id
             .expect("logical invariant: send_next_object is called only after publish is sent");
+
+        // datagram 配送は subgroup stream を開かず、object ごとに OBJECT_DATAGRAM を送る
+        if self.config.delivery == DeliveryMode::Datagram {
+            return self
+                .send_next_datagram(session, handle, payload, objects_sent)
+                .await;
+        }
 
         // Group の終わりに達していたら FIN で閉じ、次の Group へ進む
         if self.object_id >= self.objects_per_group {
@@ -484,6 +507,114 @@ impl Publisher {
 
         self.consecutive_write_failures = 0;
         self.prev_object_id = Some(object_id);
+        self.object_id += 1;
+        self.sent_objects += 1;
+        objects_sent.fetch_add(1, Ordering::Relaxed);
+
+        self.advance_next_send();
+        Ok(())
+    }
+
+    /// 次の object を OBJECT_DATAGRAM で 1 つ送る
+    ///
+    /// datagram には subgroup stream の FIN に相当する Group 終端の通知が無いため、
+    /// Group の最終 object に END_OF_GROUP bit を立てる
+    /// (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))。
+    ///
+    /// # Errors
+    ///
+    /// datagram のサイズが上限を超える場合、または datagram を送信できない場合は
+    /// エラーになる。
+    async fn send_next_datagram(
+        &mut self,
+        session: &mut Session,
+        handle: &mut MoqConnectionHandle,
+        payload: &Arc<[u8]>,
+        objects_sent: &AtomicU64,
+    ) -> Result<()> {
+        let request_id = self
+            .request_id
+            .expect("logical invariant: send_next_datagram is called only after publish is sent");
+
+        // Group の終わりに達していたら次の Group へ進む (datagram では stream を閉じない)
+        if self.object_id >= self.objects_per_group {
+            self.group_id += 1;
+            self.object_id = 0;
+        }
+
+        let object_id = self.object_id;
+        // 最終 object に END_OF_GROUP を立て、subgroup stream の FIN に相当させる
+        let end_of_group = is_end_of_group(object_id, self.objects_per_group);
+
+        let properties = build_loc_properties(self.sent_objects, self.config.object_rate);
+        let properties_bytes = properties.encode().map_err(|e| {
+            ErrorMessage::new(format!("LOC プロパティのエンコードに失敗しました: {e:?}"))
+        })?;
+        let header = ObjectDatagram {
+            track_alias: self.track_alias,
+            group_id: self.group_id,
+            object_id,
+            // DEFAULT_PRIORITY bit を立て、優先度はトラックの既定値に任せる
+            publisher_priority: None,
+            properties_data: Some(properties_bytes.clone()),
+            end_of_group,
+            status: None,
+        }
+        .encode()
+        .map_err(|e| {
+            ErrorMessage::new(format!("OBJECT_DATAGRAM のエンコードに失敗しました: {e:?}"))
+        })?;
+
+        let payload_bytes = &payload[..self.config.object_size];
+        // datagram は分割できず、経路の上限を超えた object は通知なく破棄される
+        // (draft-ietf-moq-transport-22 §11.2 (Datagrams))。送信前に判定してエラーにする
+        let datagram_size = header.len() + payload_bytes.len();
+        if datagram_size > self.datagram_max_size {
+            return Err(ErrorMessage::new(format!(
+                "OBJECT_DATAGRAM が --datagram-max-size を超えました (track={} object_id={} size={} max={})",
+                self.config.name,
+                object_id,
+                datagram_size,
+                self.datagram_max_size,
+            ))
+            .into());
+        }
+
+        // Session への登録はワイヤへ送る前に行う。フィルタ不通過の場合はワイヤへ出さない
+        // (draft-ietf-moq-transport-22 §3.3.3 (Combining Filters))
+        if let Err(e) = session.send_object_datagram(
+            request_id,
+            self.group_id,
+            object_id,
+            Some(properties_bytes),
+            None,
+            end_of_group,
+        ) {
+            if matches!(e, SendRequestError::LocalFilterMismatch) {
+                // フィルタ不通過でワイヤへ出さない場合も次の送信時刻を進める。進めないと
+                // 直後のループで再び期日到来と判定され、sleep せずに回り続ける
+                self.object_id += 1;
+                self.advance_next_send();
+                return Ok(());
+            }
+            return Err(
+                ErrorMessage::new(format!("OBJECT_DATAGRAM の登録に失敗しました: {e:?}")).into(),
+            );
+        }
+
+        let mut buf = std::mem::take(&mut self.scratch);
+        buf.clear();
+        buf.extend_from_slice(&header);
+        buf.extend_from_slice(payload_bytes);
+        let send_result = handle.send_datagram(&buf).await;
+        self.scratch = buf;
+        send_result.map_err(|e| {
+            ErrorMessage::new(format!(
+                "OBJECT_DATAGRAM の送信に失敗しました (track={}): {e}",
+                self.config.name,
+            ))
+        })?;
+
         self.object_id += 1;
         self.sent_objects += 1;
         objects_sent.fetch_add(1, Ordering::Relaxed);
@@ -610,6 +741,16 @@ fn object_id_delta(prev_object_id: Option<u64>, object_id: u64) -> u64 {
     }
 }
 
+/// OBJECT_DATAGRAM に END_OF_GROUP bit を立てる object かどうかを返す
+///
+/// datagram には subgroup stream の FIN に相当する Group 終端の通知が無いため、Group の
+/// 最終 object に END_OF_GROUP bit を立てる (draft-ietf-moq-transport-22 §11.2.1
+/// (Object Datagram))。bit は「同じ Group ID で、この Object ID より大きい Object は
+/// 存在しない」ことを宣言する。
+fn is_end_of_group(object_id: u64, objects_per_group: u64) -> bool {
+    object_id + 1 == objects_per_group
+}
+
 /// GOAWAY を受信していて、新セッションへ移行する条件を満たすか
 ///
 /// 移行が無効な場合と、プロセス終了 (token キャンセル) の場合は移行しない。
@@ -643,7 +784,7 @@ pub(crate) async fn run(
         MoqTransport::WtH3 | MoqTransport::WtH2 => Transport::WebTransport,
         MoqTransport::Qmux => Transport::Qmux,
     };
-    let (mut handle, mut recv_acceptor, mut bidi_acceptor) = connection.split();
+    let (mut handle, mut recv_acceptor, mut bidi_acceptor, datagram_receiver) = connection.split();
 
     // Forward State 0 の間は object を送らないため、無通信で idle timeout に達しないよう
     // keep-alive を有効にする。QMux は PING を送るタスクを起動する
@@ -706,7 +847,9 @@ pub(crate) async fn run(
         .tracks
         .iter()
         .enumerate()
-        .map(|(i, track)| Publisher::new(track.clone(), i as u64 + 1, now))
+        .map(|(i, track)| {
+            Publisher::new(track.clone(), i as u64 + 1, now, config.datagram_max_size)
+        })
         .collect();
 
     // 購読するトラック (Full Track Name は呼び出し側で解決済み)
@@ -715,6 +858,17 @@ pub(crate) async fn run(
         .iter()
         .map(|name| SubscriptionState::new(name.clone()))
         .collect();
+
+    // 購読しているトラックの object は datagram でも届く
+    // (draft-ietf-moq-transport-22 §11.2 (Datagrams))。publish 専用のセッションでは
+    // datagram を受信する必要が無いため、購読がある場合だけ受信する
+    let mut datagram_receive = DatagramReceiveState {
+        receiver: if subscriptions.is_empty() {
+            None
+        } else {
+            Some(datagram_receiver)
+        },
+    };
 
     // 受信した uni data stream はストリームごとのタスクで読み、ここで受ける
     let (data_tx, mut data_rx) = mpsc::channel::<DataMessage>(256);
@@ -923,6 +1077,20 @@ pub(crate) async fn run(
                     }
                     Ok(None) => break,
                     Err(e) => return Err(ErrorMessage::new(format!("bidi stream の受信に失敗しました: {e}")).into()),
+                }
+            }
+            maybe_datagrams = datagram_receive.recv() => {
+                // 受信を終えた場合は `None` が返り、以降この分岐は起きない
+                if let Some(datagrams) = maybe_datagrams {
+                    for datagram in datagrams {
+                        handle_received_datagram(
+                            &mut session,
+                            &mut subscriptions,
+                            &receive_counters,
+                            config.verify_payload,
+                            &datagram,
+                        )?;
+                    }
                 }
             }
             _ = progress_timer.tick() => {
@@ -1286,6 +1454,88 @@ fn record_received_object(
         }
     }
     counters.record(payload_length, payload_ok);
+}
+
+/// datagram 受信の状態
+///
+/// 受信を終えた後も `select!` の分岐が空回りしないよう、受け口が無くなったら永久に待つ
+/// future を返す。
+struct DatagramReceiveState {
+    /// datagram の受け口 (受信を終えたら `None`)
+    receiver: Option<MoqDatagramReceiver>,
+}
+
+impl DatagramReceiveState {
+    /// datagram を 1 件以上受け取り、到着済みの分をまとめて返す
+    ///
+    /// 受信を終えた場合は `None` を返し、以降は永久に待つ。
+    async fn recv(&mut self) -> Option<Vec<Vec<u8>>> {
+        if self.receiver.is_none() {
+            return std::future::pending().await;
+        }
+        let result = self
+            .receiver
+            .as_mut()
+            .expect("logical invariant: datagram receiver exists while it is polled")
+            .recv_datagrams()
+            .await;
+        match result {
+            Ok(Some(datagrams)) => Some(datagrams),
+            Ok(None) => {
+                self.receiver = None;
+                None
+            }
+            Err(e) => {
+                // datagram の受信だけを止める。接続の終了は制御ストリームや data stream の
+                // 読み込みでも観測されるため、セッションをここで終わらせない
+                tracing::warn!("MOQT: datagram receive failed: {e}");
+                self.receiver = None;
+                None
+            }
+        }
+    }
+}
+
+/// 受信した datagram を Session に渡し、object なら購読状態と統計へ記録する
+///
+/// # Errors
+///
+/// 受信した datagram が MOQT の規則に反する場合はエラーになる (セッションを閉じる)。
+fn handle_received_datagram(
+    session: &mut Session,
+    subscriptions: &mut [SubscriptionState],
+    counters: &ReceiveCounters,
+    verify_payload: bool,
+    raw: &[u8],
+) -> Result<()> {
+    let acceptance = session
+        .recv_datagram(raw)
+        .map_err(|e| ErrorMessage::new(format!("受信 datagram の受理に失敗しました: {e:?}")))?;
+    let DatagramAcceptance::Object(acceptance) = acceptance else {
+        return Ok(());
+    };
+    // 未知の Track Alias・フィルタ不通過など、購読に紐づかない object は捨てる
+    if !matches!(acceptance, TrackDataAcceptance::Accepted) {
+        return Ok(());
+    }
+
+    // payload の長さと内容を検査するために、受理済みの datagram をもう一度デコードする
+    // (`Session::recv_datagram` は受理結果だけを返すため)
+    let (datagram, consumed) = ObjectDatagram::decode(raw).map_err(|e| {
+        ErrorMessage::new(format!(
+            "受理済み datagram の再デコードに失敗しました: {e:?}"
+        ))
+    })?;
+    let payload = &raw[consumed..];
+    let payload_ok = !verify_payload || payload_matches_pattern(payload);
+    record_received_object(
+        subscriptions,
+        Some(datagram.track_alias),
+        payload.len() as u64,
+        payload_ok,
+        counters,
+    );
+    Ok(())
 }
 
 /// peer の STOP_SENDING / reset に由来するエラーのアプリケーションエラーコードを返す
@@ -2011,6 +2261,22 @@ mod tests {
         assert_eq!(object_id_delta(Some(2), 5), 2);
     }
 
+    /// Group の最終 object だけが END_OF_GROUP の対象になること
+    ///
+    /// datagram には FIN が無いため、Group の最終 object に END_OF_GROUP bit を立てて
+    /// Group の終端を伝える (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))。
+    #[test]
+    fn end_of_group_is_only_the_last_object_of_a_group() {
+        // 1 Group 1 object の場合は毎回 End of Group になる
+        assert!(is_end_of_group(0, 1));
+        // Group の途中は End of Group ではない
+        assert!(!is_end_of_group(0, 2));
+        assert!(!is_end_of_group(48, 50));
+        // Group の最終 object は End of Group になる
+        assert!(is_end_of_group(1, 2));
+        assert!(is_end_of_group(49, 50));
+    }
+
     /// SETUP Options に PATH と AUTHORITY が載ること
     #[test]
     fn setup_options_include_path_and_authority() {
@@ -2018,6 +2284,7 @@ mod tests {
             name: "video-0-0".to_string(),
             object_rate: 30.0,
             object_size: 1000,
+            delivery: DeliveryMode::Subgroup,
         }];
         let config = SessionConfig {
             namespace: "zakuro",
@@ -2025,6 +2292,7 @@ mod tests {
             authority: "relay.example.com:4433",
             path: "/",
             payload: vec![0u8; 1000].into(),
+            datagram_max_size: 1160,
             subscribe_tracks: &[],
             verify_payload: false,
             migrate_on_goaway: false,
@@ -2082,9 +2350,11 @@ mod tests {
                 name: "video".to_string(),
                 object_rate: 40.0,
                 object_size: 100,
+                delivery: DeliveryMode::Subgroup,
             },
             1,
             now,
+            1160,
         );
         assert_eq!(publisher.period, Duration::from_millis(25));
         assert_eq!(publisher.objects_per_group, 40);
@@ -2101,9 +2371,10 @@ mod tests {
             name: name.to_string(),
             object_rate: 30.0,
             object_size: 100,
+            delivery: DeliveryMode::Subgroup,
         };
-        let mut video = Publisher::new(track("video"), 1, now);
-        let mut audio = Publisher::new(track("audio"), 2, now);
+        let mut video = Publisher::new(track("video"), 1, now, 1160);
+        let mut audio = Publisher::new(track("audio"), 2, now, 1160);
         video.on_accepted(0);
         audio.on_accepted(2);
 
@@ -2143,9 +2414,11 @@ mod tests {
                 name: "video".to_string(),
                 object_rate: 30.0,
                 object_size: 100,
+                delivery: DeliveryMode::Subgroup,
             },
             1,
             now,
+            1160,
         );
         publisher.on_accepted(0);
         let before = publisher.next_send;
@@ -2167,9 +2440,11 @@ mod tests {
                 name: "video".to_string(),
                 object_rate: 30.0,
                 object_size: 100,
+                delivery: DeliveryMode::Subgroup,
             },
             1,
             now,
+            1160,
         );
         assert!(publisher.deadline().is_none(), "受理前は送信予定が無いこと");
         publisher.on_accepted(0);
@@ -2193,9 +2468,11 @@ mod tests {
                 name: "video".to_string(),
                 object_rate: 30.0,
                 object_size: 100,
+                delivery: DeliveryMode::Subgroup,
             },
             1,
             tokio::time::Instant::now(),
+            1160,
         );
         // PUBLISH の送信前は受理待ちの対象外
         assert!(publishers_ready_for_subscribe(std::slice::from_ref(

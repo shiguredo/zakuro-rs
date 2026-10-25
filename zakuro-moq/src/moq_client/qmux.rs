@@ -31,8 +31,7 @@ use super::transport::ALPN;
 ///
 /// QMux の 1 Record の上限 (`max_record_size` の既定値) に合わせる。QMux は DATAGRAM を
 /// Record に載せるため、ピアが Record に収まる DATAGRAM を受け入れられる値を広告する。
-/// zakuro-moq は現状 DATAGRAM を送受信しない (QUIC 経路と同じ) が、ピアの送信可否を
-/// 不必要に狭めないよう capability だけは揃える。
+/// zakuro-moq は datagram 配送を指定したトラックの object をこの上限内で送受信する。
 const MAX_DATAGRAM_FRAME_SIZE: u64 = shiguredo_qmux::record::DEFAULT_MAX_RECORD_SIZE;
 
 /// QMux 接続で広告する `max_idle_timeout` (ミリ秒)
