@@ -16,6 +16,7 @@ use shiguredo_ngtcp2_tokio::{
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use super::StreamReset;
 use super::transport::{ALPN, MoqTlsOptions};
 use crate::error::{ErrorMessage, Result};
 
@@ -266,22 +267,6 @@ impl Drop for SendStream {
         });
     }
 }
-
-/// 受信した RESET_STREAM のエラーコード
-///
-/// ngtcp2 の公開イベントには reliable size が無いため、その値を推測しない。
-#[derive(Debug)]
-pub(crate) struct StreamReset(
-    /// ピアが指定したアプリケーションエラーコード
-    pub(crate) u64,
-);
-
-impl std::fmt::Display for StreamReset {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "stream reset: {}", self.0)
-    }
-}
-impl std::error::Error for StreamReset {}
 
 /// 受信ストリーム。読み込みはキャンセルされても未読データを失わない
 pub(crate) struct RecvStream {

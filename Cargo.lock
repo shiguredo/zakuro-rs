@@ -2272,6 +2272,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521929c2893005420ccee04aada685000c967cbcae36cd46117b40bf5495e5ab"
 
 [[package]]
+name = "shiguredo_http2"
+version = "2026.1.0-canary.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8efc2214c85ca267c8c3a7b24029c18cf572e49b9a7f2213c4d0750a55b33200"
+
+[[package]]
 name = "shiguredo_http3"
 version = "2026.1.0-canary.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3309,6 +3315,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "s2n-quic",
+ "shiguredo_http2",
  "shiguredo_http3",
  "shiguredo_moqt",
  "shiguredo_ngtcp2_tokio",

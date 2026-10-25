@@ -14,7 +14,7 @@ use s2n_quic::connection::{BidirectionalStreamAcceptor, Handle, ReceiveStreamAcc
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
-use super::{ngtcp2, qmux};
+use super::{ngtcp2, qmux, wt_h2};
 
 /// 送信ストリーム
 pub(crate) enum MoqSendStream {
@@ -22,6 +22,8 @@ pub(crate) enum MoqSendStream {
     Quic(s2n_quic::stream::SendStream),
     /// ngtcp2 の送信ストリーム
     Ngtcp2(ngtcp2::SendStream),
+    /// WebTransport over HTTP/2 の送信ストリーム
+    WtH2(wt_h2::SendStream),
     /// QMux の送信ストリーム
     Qmux(tokio_qmux::SendStream),
 }
@@ -35,6 +37,7 @@ impl MoqSendStream {
         match self {
             Self::Quic(stream) => stream.id(),
             Self::Ngtcp2(stream) => stream.id(),
+            Self::WtH2(stream) => stream.id(),
             Self::Qmux(stream) => stream.id().as_u64(),
         }
     }
@@ -49,6 +52,7 @@ impl MoqSendStream {
             // s2n-quic の SendStream は AsyncWrite を実装している
             Self::Quic(stream) => stream.write_all(buf).await,
             Self::Ngtcp2(stream) => stream.write_all(buf).await,
+            Self::WtH2(stream) => stream.write_all(buf).await,
             // tokio-qmux の write は渡したデータをすべて受け付けるまで待つ
             Self::Qmux(stream) => stream.write(buf).await.map(|_| ()).map_err(io_error),
         }
@@ -63,6 +67,7 @@ impl MoqSendStream {
         match self {
             Self::Quic(stream) => stream.finish().map_err(io_error),
             Self::Ngtcp2(stream) => stream.finish().await,
+            Self::WtH2(stream) => stream.finish().await,
             Self::Qmux(stream) => stream.finish().await.map_err(io_error),
         }
     }
@@ -85,6 +90,7 @@ impl MoqSendStream {
                 .map_err(io_error),
             Self::Qmux(stream) => stream.reset(error_code).await.map_err(io_error),
             Self::Ngtcp2(stream) => stream.reset(error_code).await,
+            Self::WtH2(stream) => stream.reset(error_code).await,
         }
     }
 }
@@ -95,6 +101,8 @@ pub(crate) enum MoqRecvStream {
     Quic(s2n_quic::stream::ReceiveStream),
     /// ngtcp2 の受信ストリーム
     Ngtcp2(ngtcp2::RecvStream),
+    /// WebTransport over HTTP/2 の受信ストリーム
+    WtH2(wt_h2::RecvStream),
     /// QMux の受信ストリーム
     Qmux(tokio_qmux::RecvStream),
 }
@@ -105,6 +113,7 @@ impl MoqRecvStream {
         match self {
             Self::Quic(stream) => stream.id(),
             Self::Ngtcp2(stream) => stream.id(),
+            Self::WtH2(stream) => stream.id(),
             Self::Qmux(stream) => stream.id().as_u64(),
         }
     }
@@ -114,11 +123,12 @@ impl MoqRecvStream {
     /// # Errors
     ///
     /// 読み込みとストリームの reset はエラーになる。ngtcp2 の reset エラーは
-    /// [`ngtcp2::StreamReset`] としてエラーコードを保持する。
+    /// [`super::StreamReset`] としてエラーコードを保持する。
     pub(crate) async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Self::Quic(stream) => stream.read(buf).await,
             Self::Ngtcp2(stream) => stream.read(buf).await,
+            Self::WtH2(stream) => stream.read(buf).await,
             Self::Qmux(stream) => match stream.read(buf).await {
                 Ok(Some(size)) => Ok(size),
                 // QMux の read は FIN を Ok(None) で表す
@@ -134,6 +144,7 @@ impl std::fmt::Debug for MoqRecvStream {
         match self {
             Self::Quic(stream) => f.debug_tuple("Quic").field(stream).finish(),
             Self::Ngtcp2(stream) => f.debug_tuple("Ngtcp2").field(&stream.id()).finish(),
+            Self::WtH2(stream) => f.debug_tuple("WtH2").field(&stream.id()).finish(),
             Self::Qmux(stream) => f.debug_tuple("Qmux").field(stream).finish(),
         }
     }
@@ -142,13 +153,16 @@ impl std::fmt::Debug for MoqRecvStream {
 /// 接続のハンドル
 ///
 /// 複数タスクから clone して使う (ストリームの open と接続の close)。s2n-quic は
-/// `Handle`、ngtcp2 は駆動タスクへのチャネル、QMux は `Arc<tokio_qmux::Connection>` を持つ。
+/// `Handle`、ngtcp2 と WebTransport over HTTP/2 は駆動タスクへのチャネル、QMux は
+/// `Arc<tokio_qmux::Connection>` を持つ。
 #[derive(Clone)]
 pub(crate) enum MoqConnectionHandle {
     /// QUIC 直接接続のハンドル
     Quic(Handle),
     /// ngtcp2 の接続ハンドル
     Ngtcp2(ngtcp2::Handle),
+    /// WebTransport over HTTP/2 の接続ハンドル
+    WtH2(wt_h2::Handle),
     /// QMux 接続のハンドル
     Qmux(Arc<tokio_qmux::Connection>),
 }
@@ -172,6 +186,7 @@ impl MoqConnectionHandle {
                 .map(MoqSendStream::Qmux)
                 .map_err(io_error),
             Self::Ngtcp2(handle) => handle.open_send_stream().await.map(MoqSendStream::Ngtcp2),
+            Self::WtH2(handle) => handle.open_send_stream().await.map(MoqSendStream::WtH2),
         }
     }
 
@@ -189,6 +204,10 @@ impl MoqConnectionHandle {
             Self::Ngtcp2(handle) => {
                 let (recv, send) = handle.open_bidirectional_stream().await?;
                 Ok((MoqRecvStream::Ngtcp2(recv), MoqSendStream::Ngtcp2(send)))
+            }
+            Self::WtH2(handle) => {
+                let (recv, send) = handle.open_bidirectional_stream().await?;
+                Ok((MoqRecvStream::WtH2(recv), MoqSendStream::WtH2(send)))
             }
             Self::Quic(handle) => {
                 let stream = handle.open_bidirectional_stream().await.map_err(io_error)?;
@@ -212,6 +231,7 @@ impl MoqConnectionHandle {
         match self {
             Self::Quic(handle) => handle.close(application_error(error_code)),
             Self::Ngtcp2(handle) => handle.close(error_code).await,
+            Self::WtH2(handle) => handle.close(error_code).await,
             Self::Qmux(connection) => {
                 // QMux の CONNECTION_CLOSE は理由文字列を要求する。値は可変長整数の範囲に
                 // 収まる必要があり、収まらない場合は送信されない (RFC 9000 Section 19.19)
@@ -227,16 +247,25 @@ impl MoqConnectionHandle {
     /// s2n-quic の keep-alive を有効にする。ngtcp2 は接続構築時に有効にしている。
     /// QMux には keep-alive の API が無いため、
     /// QX_PING を定期的に送るタスクを起動する ([`qmux::spawn_keep_alive`])。
+    /// WebTransport over HTTP/2 は駆動タスクに HTTP/2 PING を定期送信させる
+    /// ([`wt_h2::Handle::enable_keep_alive`])。
     ///
     /// # Errors
     ///
-    /// QUIC の keep-alive の有効化に失敗した場合はエラーになる。QMux の PING タスクの起動は
-    /// 失敗しない (タスクは接続終了で自ら止まる)。
+    /// QUIC の keep-alive の有効化に失敗した場合はエラーになる。QMux / WebTransport over
+    /// HTTP/2 の keep-alive は駆動タスクへの通知のみで失敗しない (接続終了で自ら止まる)。
     pub(crate) fn keep_alive(&mut self, token: &CancellationToken) -> std::io::Result<()> {
         match self {
             Self::Quic(handle) => handle.keep_alive(true).map_err(io_error),
             // ngtcp2 の keep-alive は接続作成時に設定済みである
             Self::Ngtcp2(_) => Ok(()),
+            // HTTP/2 の PING を駆動タスクが送る。MOQT には PING が無いため、
+            // 無通信の接続 (Forward State 0 など) を relay の idle timeout で切られない
+            // ようにする
+            Self::WtH2(handle) => {
+                handle.enable_keep_alive();
+                Ok(())
+            }
             Self::Qmux(connection) => {
                 qmux::spawn_keep_alive(connection, token);
                 Ok(())
@@ -251,6 +280,8 @@ pub(crate) enum MoqRecvAcceptor {
     Quic(ReceiveStreamAcceptor),
     /// ngtcp2 の単方向ストリーム acceptor
     Ngtcp2(ngtcp2::RecvAcceptor),
+    /// WebTransport over HTTP/2 の単方向ストリーム acceptor
+    WtH2(wt_h2::RecvAcceptor),
     /// QMux 接続 (accept は `&self` で待てる)
     Qmux(Arc<tokio_qmux::Connection>),
 }
@@ -269,6 +300,10 @@ impl MoqRecvAcceptor {
                 .accept()
                 .await
                 .map(|stream| stream.map(MoqRecvStream::Ngtcp2)),
+            Self::WtH2(acceptor) => acceptor
+                .accept()
+                .await
+                .map(|stream| stream.map(MoqRecvStream::WtH2)),
             Self::Quic(acceptor) => acceptor
                 .accept_receive_stream()
                 .await
@@ -289,6 +324,8 @@ pub(crate) enum MoqBidiAcceptor {
     Quic(BidirectionalStreamAcceptor),
     /// ngtcp2 の双方向ストリーム acceptor
     Ngtcp2(ngtcp2::BidiAcceptor),
+    /// WebTransport over HTTP/2 の双方向ストリーム acceptor
+    WtH2(wt_h2::BidiAcceptor),
     /// QMux 接続 (accept は `&self` で待てる)
     Qmux(Arc<tokio_qmux::Connection>),
 }
@@ -308,6 +345,9 @@ impl MoqBidiAcceptor {
             Self::Ngtcp2(acceptor) => acceptor.accept().await.map(|stream| {
                 stream
                     .map(|(recv, send)| (MoqRecvStream::Ngtcp2(recv), MoqSendStream::Ngtcp2(send)))
+            }),
+            Self::WtH2(acceptor) => acceptor.accept().await.map(|stream| {
+                stream.map(|(recv, send)| (MoqRecvStream::WtH2(recv), MoqSendStream::WtH2(send)))
             }),
             Self::Quic(acceptor) => acceptor
                 .accept_bidirectional_stream()

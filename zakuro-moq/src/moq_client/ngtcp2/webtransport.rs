@@ -8,8 +8,9 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use super::{ALPN, Connection, Driver, MoqTlsOptions, Received, StreamReset, closed, io_error};
+use super::{ALPN, Connection, Driver, MoqTlsOptions, Received, closed, io_error};
 use crate::error::Result;
+use crate::moq_client::StreamReset;
 use shiguredo_http3::WebTransportEvent as WtEvent;
 use shiguredo_http3::webtransport::{
     ApplicationErrorCode, Capsule, ConnectRequest, FlowControlLimits, Session, StreamHeader,

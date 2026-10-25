@@ -235,9 +235,9 @@ cargo run -p zakuro-moq -- \
 ```
 
 TLS は既定で証明書を検証します。relay の CA 証明書を指定する場合は `--ca-cert <PEM>`、
-検証をスキップする場合は `--insecure` を使います。s2n-quic / QMux は WebPKI のルート証明書を使い、
-`--ca-cert` を指定するとその PEM だけを信頼します。ngtcp2 はシステムの信頼ストアを使い、
-`--ca-cert` の証明書を追加で信頼します。
+検証をスキップする場合は `--insecure` を使います。s2n-quic / WebTransport over HTTP/2 / QMux は
+WebPKI のルート証明書を使い、`--ca-cert` を指定するとその PEM だけを信頼します。ngtcp2 は
+システムの信頼ストアを使い、`--ca-cert` の証明書を追加で信頼します。
 
 ### トランスポート (`--transport`)
 
@@ -247,6 +247,11 @@ TLS は既定で証明書を検証します。relay の CA 証明書を指定す
 - `wt-h3`: ngtcp2 による WebTransport over HTTP/3 接続。UDP が必要です。
   ALPN は `h3`、WebTransport のサブプロトコルは `moqt-22` です。
   URL は `moqt://` のまま指定し、パスとクエリーは HTTPS の Extended CONNECT に渡します。
+- `wt-h2`: WebTransport over HTTP/2 接続。TCP + TLS 上で動くため UDP は不要です。
+  ALPN は `h2`、WebTransport のサブプロトコルは `moqt-22` です。URL は `moqt://` のまま
+  指定し、パスとクエリーは Extended CONNECT に渡します。reset は `WT_RESET_STREAM`
+  capsule で行うため RESET_STREAM_AT は不要ですが、relay の WebTransport capsule 対応に
+  依存する experimental な経路です。QUIC を使わないため `--quic-backend` は指定できません。
 - `qmux`: QMux (draft-ietf-quic-qmux-02) 経由。TLS over TCP の 1 本のバイトストリームに
   QUIC version 1 のストリームと DATAGRAM を多重化するため、UDP が使えない環境でも接続できます。
   QMux 上の MOQT は experimental であり、QMux を終端できる relay が必要です。TCP の再送で
@@ -263,6 +268,13 @@ ngtcp2 は DNS 名と IP アドレスの両方に対応し、IP アドレスで�
 HTTP/3 SETTINGS と QUIC transport parameter を検証してから接続し、単方向・双方向ストリーム、
 WT フロー制御、reset / STOP_SENDING、drain / close を処理します。
 MOQT の object は subgroup stream で送信します。
+
+`wt-h2` は tokio + `shiguredo_http2` (Sans I/O) + rustls で実装しています。HTTP/2 SETTINGS
+(`SETTINGS_ENABLE_CONNECT_PROTOCOL` / `SETTINGS_WT_ENABLED` / WT 初期フロー制御) と
+Extended CONNECT、`WT-Available-Protocols` / `WT-Protocol` を検証してから接続し、
+単方向・双方向ストリーム、WT フロー制御、`WT_RESET_STREAM` / `WT_STOP_SENDING` を処理します。
+接続ごとに TCP ソケットと駆動タスクを作ります。無通信の接続が relay に切られないよう、
+HTTP/2 PING を 5 秒間隔で送ります。
 
 ```bash
 cargo run -p zakuro-moq -- \
@@ -282,6 +294,17 @@ cargo run -p zakuro-moq -- \
   --vcs 10
 ```
 
+WebTransport over HTTP/2 経由で接続する場合は次のように指定します。relay が WebTransport
+over HTTP/2 を終端できる必要があります。
+
+```bash
+cargo run -p zakuro-moq -- \
+  --url moqt://relay.example.com:4433/moq \
+  --transport wt-h2 \
+  --tracks video:30:1000 \
+  --vcs 10
+```
+
 QMux 経由で接続する場合は次のように指定します。
 
 ```bash
@@ -294,6 +317,8 @@ cargo run -p zakuro-moq -- \
 ```
 
 仕様上の判断と制約は [docs/MOQ_QMUX.md](docs/MOQ_QMUX.md) にまとめています。
+WebTransport over HTTP/2 の実装方針と制約は
+[docs/MOQ_WEBTRANSPORT_H2.md](docs/MOQ_WEBTRANSPORT_H2.md) にまとめています。
 
 MOQT では、購読者がいないトラックの送信を止めるよう relay から `REQUEST_UPDATE`
 (FORWARD=0) が届くことがあります。zakuro-moq はこれに従います (FORWARD はトラック単位で
@@ -355,8 +380,8 @@ relay へ接続する場合は誤検知になるため既定では無効です�
 | オプション | 説明 |
 | --- | --- |
 | `--url` | MOQ relay の URL (`moqt://host:port`)。必須 |
-| `--transport` | 下位トランスポート (`quic` / `wt-h3` / `qmux`、デフォルト: `quic`) |
-| `--quic-backend` | QUIC 実装 (`s2n-quic` / `ngtcp2`)。`quic` の既定は `s2n-quic`、`wt-h3` は `ngtcp2` |
+| `--transport` | 下位トランスポート (`quic` / `wt-h3` / `wt-h2` / `qmux`、デフォルト: `quic`) |
+| `--quic-backend` | QUIC 実装 (`s2n-quic` / `ngtcp2`)。`quic` の既定は `s2n-quic`、`wt-h3` は `ngtcp2`。`wt-h2` と `qmux` では指定できない |
 | `--namespace` | Track Namespace (デフォルト: `zakuro`) |
 | `--tracks` | publish するトラック (`名前[:レート[:サイズ]]` のカンマ区切り、デフォルト: `video`。`--subscribe-tracks` 指定時は publish しない) |
 | `--subscribe-tracks` | 購読するトラック名のカンマ区切り。`{instance}` / `{vc}` を書くと置換し、書かなければ `<名前>-<インスタンス>-<仮想クライアント>` になる |

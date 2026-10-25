@@ -23,8 +23,10 @@ log = "0.4"
 noargs = "0.4"
 # JSON パース / 生成
 nojson = "0.3"
-# TLS (s2n-quic の rustls provider と QMux 経路の TLS over TCP で利用)
+# TLS (s2n-quic の rustls provider、WebTransport over HTTP/2 と QMux の TLS over TCP で利用)
 rustls = "0.23"
+# HTTP/2 と WebTransport over HTTP/2 の Sans I/O 実装
+shiguredo_http2 = "2026.1.0-canary.16"
 # HTTP/3 と WebTransport の Sans I/O 実装
 shiguredo_http3 = "2026.1.0-canary.12"
 # ngtcp2 による QUIC 接続 (RESET_STREAM_AT 対応の Tokio 統合)

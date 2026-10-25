@@ -550,18 +550,19 @@ impl Publisher {
     /// subgroup stream への書き込みが失敗したときの処理
     ///
     /// peer が STOP_SENDING を送ると s2n-quic は送信側を reset 状態にし、以降の書き込みは
-    /// 失敗する。公開 API から STOP_SENDING の受信を直接観測できないため、書き込み失敗を
-    /// stream の終端とみなして Session へ通知し (draft-ietf-moq-transport-22 §11.3.2)、
-    /// 次の Group を新しい stream で送り直す。
+    /// 失敗する。ngtcp2 と WebTransport over HTTP/2 は STOP_SENDING / WT_STOP_SENDING の
+    /// アプリケーションエラーコードを [`StreamReset`](super::StreamReset) として書き込み
+    /// エラーに載せるため、それを Session へ渡す (s2n-quic / QMux は公開 API から観測
+    /// できないため `None` になる)。書き込み失敗を stream の終端とみなして Session へ
+    /// 通知し (draft-ietf-moq-transport-22 §11.3.2)、次の Group を新しい stream で送り直す。
     fn on_stream_write_failure(
         &mut self,
         session: &mut Session,
         stream_id: DataStreamId,
         cause: std::io::Error,
     ) -> Result<()> {
-        // 第 2 引数は peer が STOP_SENDING に載せたアプリケーションエラーコードである。
-        // 上記のとおり観測できないため `None` (アプリケーションエラーコード無し) を渡す
-        let _ = session.recv_data_stream_stop_sending(stream_id, None);
+        // 第 2 引数は peer が STOP_SENDING に載せたアプリケーションエラーコードである
+        let _ = session.recv_data_stream_stop_sending(stream_id, stream_reset_code(&cause));
         self.stream = None;
         self.stream_id = None;
         self.group_id += 1;
@@ -635,10 +636,11 @@ pub(crate) async fn run(
     receive_counters: ReceiveCounters,
 ) -> Result<SessionEnd> {
     // 下位トランスポートは SETUP の AUTHORITY / PATH の扱いと、data stream の ID 空間にだけ
-    // 影響する。QMux は native QUIC と同じく AUTHORITY / PATH を送る
+    // 影響する。QMux は native QUIC と同じく AUTHORITY / PATH を送る。
+    // WebTransport (HTTP/3 / HTTP/2) では CONNECT が接続先を運ぶため送らない
     let transport = match connection.transport() {
         MoqTransport::Quic => Transport::Quic,
-        MoqTransport::WtH3 => Transport::WebTransport,
+        MoqTransport::WtH3 | MoqTransport::WtH2 => Transport::WebTransport,
         MoqTransport::Qmux => Transport::Qmux,
     };
     let (mut handle, mut recv_acceptor, mut bidi_acceptor) = connection.split();
@@ -1197,15 +1199,17 @@ async fn run_request_reader(
                 }
             }
             Err(e) => {
-                if let Some(reset) = e
-                    .get_ref()
-                    .and_then(|e| e.downcast_ref::<super::ngtcp2::StreamReset>())
-                {
+                // セッション終了 (token キャンセル) に伴う接続断はストリームの異常では
+                // ない。select! のキャンセル分岐と読み込みエラーの競合でここに来る
+                if token.is_cancelled() {
+                    return;
+                }
+                if let Some(error_code) = stream_reset_code(&e) {
                     let _ = tx
                         .send(RequestMessage::Closed {
                             request_id,
                             end: RequestStreamEnd::Reset {
-                                error_code: Some(reset.0),
+                                error_code: Some(error_code),
                                 reliable_size: None,
                             },
                         })
@@ -1284,15 +1288,24 @@ fn record_received_object(
     counters.record(payload_length, payload_ok);
 }
 
+/// peer の STOP_SENDING / reset に由来するエラーのアプリケーションエラーコードを返す
+///
+/// ngtcp2 と WebTransport over HTTP/2 は受信したコードを
+/// [`StreamReset`](super::StreamReset) として `io::Error` に載せる。s2n-quic / QMux は
+/// 公開 API からコードを観測できないため `None` になる。
+fn stream_reset_code(error: &std::io::Error) -> Option<u64> {
+    error
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<super::StreamReset>())
+        .map(|reset| reset.0)
+}
+
 /// reset のエラーコードを失わずに data stream の読み込みエラーを通知する
 fn data_read_error(stream_id: DataStreamId, error: &std::io::Error) -> DataMessage {
-    match error
-        .get_ref()
-        .and_then(|e| e.downcast_ref::<super::ngtcp2::StreamReset>())
-    {
-        Some(reset) => DataMessage::Reset {
+    match stream_reset_code(error) {
+        Some(error_code) => DataMessage::Reset {
             stream_id,
-            error_code: reset.0,
+            error_code,
         },
         None => DataMessage::Failed {
             stream_id,
@@ -1481,10 +1494,16 @@ async fn read_chunk(
     buf: &mut [u8],
     token: &CancellationToken,
 ) -> std::io::Result<Option<usize>> {
-    let size = tokio::select! {
+    let size = match tokio::select! {
         biased;
         _ = token.cancelled() => return Ok(None),
-        read = stream.read(buf) => read?,
+        read = stream.read(buf) => read,
+    } {
+        Ok(size) => size,
+        // セッション終了 (token キャンセル) に伴う接続断は異常ではない。select! の
+        // キャンセル分岐と読み込みエラーの競合でここに来ることがある
+        Err(_) if token.is_cancelled() => return Ok(None),
+        Err(error) => return Err(error),
     };
     if size == 0 {
         return Ok(None);
@@ -1668,45 +1687,79 @@ async fn drain_events(
                     .map_err(|e| {
                         ErrorMessage::new(format!("request stream の open に失敗しました: {e}"))
                     })?;
-                send.write_all(&message.encode().map_err(|e| {
+                let bytes = message.encode().map_err(|e| {
                     ErrorMessage::new(format!(
                         "request メッセージのエンコードに失敗しました: {e:?}"
                     ))
-                })?)
-                .await
-                .map_err(|e| {
-                    ErrorMessage::new(format!("request メッセージの送信に失敗しました: {e}"))
                 })?;
-                state.request_sends.insert(request_id, send);
-                // 受信方向はストリームごとのタスクで読む
                 let tx = request_tx.clone();
                 let reader_token = token.child_token();
-                tokio::spawn(async move {
-                    run_request_reader(request_id, recv, tx, reader_token).await;
-                });
+                match send.write_all(&bytes).await {
+                    Ok(()) => {
+                        state.request_sends.insert(request_id, send);
+                        // 受信方向はストリームごとのタスクで読む
+                        tokio::spawn(async move {
+                            run_request_reader(request_id, recv, tx, reader_token).await;
+                        });
+                    }
+                    Err(e) => {
+                        if let Some(error_code) = stream_reset_code(&e) {
+                            // peer が STOP_SENDING で送信方向を停止した。request の終端は
+                            // 受信方向のタスクが Session へ伝えるため、セッションは落とさない。
+                            // send を drop すると接続層が reset を送って送信方向を閉じる。
+                            // 受信方向は peer の終端 (FIN / reset) を観測するため読み続ける
+                            tracing::warn!(
+                                "MOQT: request stream write was stopped by the peer: request_id={request_id} error_code={error_code:#x}"
+                            );
+                            tokio::spawn(async move {
+                                run_request_reader(request_id, recv, tx, reader_token).await;
+                            });
+                        } else {
+                            return Err(ErrorMessage::new(format!(
+                                "request メッセージの送信に失敗しました: {e}"
+                            ))
+                            .into());
+                        }
+                    }
+                }
             }
             SessionEvent::SendOnStream {
                 request_id,
                 message,
                 fin,
             } => {
-                let Some(send) = state.request_sends.get_mut(&request_id) else {
-                    tracing::warn!(
-                        "MOQT: no request stream for request_id={request_id} (message is dropped)",
-                    );
-                    continue;
+                let write_result = {
+                    let Some(send) = state.request_sends.get_mut(&request_id) else {
+                        tracing::warn!(
+                            "MOQT: no request stream for request_id={request_id} (message is dropped)",
+                        );
+                        continue;
+                    };
+                    let bytes = message.encode().map_err(|e| {
+                        ErrorMessage::new(format!(
+                            "request メッセージのエンコードに失敗しました: {e:?}"
+                        ))
+                    })?;
+                    let result = send.write_all(&bytes).await;
+                    if result.is_ok() && fin {
+                        let _ = send.finish().await;
+                    }
+                    result
                 };
-                send.write_all(&message.encode().map_err(|e| {
-                    ErrorMessage::new(format!(
-                        "request メッセージのエンコードに失敗しました: {e:?}"
-                    ))
-                })?)
-                .await
-                .map_err(|e| {
-                    ErrorMessage::new(format!("request メッセージの送信に失敗しました: {e}"))
-                })?;
-                if fin {
-                    let _ = send.finish().await;
+                if let Err(e) = write_result {
+                    if let Some(error_code) = stream_reset_code(&e) {
+                        // peer が STOP_SENDING で送信方向を停止した。以降この request の
+                        // 送信は行わず、受信方向のタスクが peer の終端を Session へ伝える
+                        tracing::warn!(
+                            "MOQT: request stream write was stopped by the peer: request_id={request_id} error_code={error_code:#x}"
+                        );
+                        state.request_sends.remove(&request_id);
+                    } else {
+                        return Err(ErrorMessage::new(format!(
+                            "request メッセージの送信に失敗しました: {e}"
+                        ))
+                        .into());
+                    }
                 }
             }
             SessionEvent::Established => {
@@ -2171,5 +2224,22 @@ mod tests {
         assert!(!should_migrate(false, true, false));
         assert!(!should_migrate(true, false, false));
         assert!(!should_migrate(true, true, true));
+    }
+
+    /// 書き込み・読み込みエラーから reset のアプリケーションエラーコードを取り出せること
+    ///
+    /// ngtcp2 と WebTransport over HTTP/2 は STOP_SENDING / reset のコードを
+    /// [`StreamReset`](crate::moq_client::StreamReset) として `io::Error` に載せる。
+    /// 載っていないエラーは `None` になり、呼び出し側は通常の失敗として扱う。
+    #[test]
+    fn stream_reset_code_extracts_application_error_code() {
+        let reset = std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            crate::moq_client::StreamReset(0x1234),
+        );
+        assert_eq!(stream_reset_code(&reset), Some(0x1234));
+
+        let other = std::io::Error::other("connection failed");
+        assert_eq!(stream_reset_code(&other), None);
     }
 }

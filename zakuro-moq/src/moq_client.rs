@@ -9,6 +9,7 @@ mod qmux;
 pub(crate) mod session;
 mod stream;
 pub(crate) mod transport;
+mod wt_h2;
 
 use std::time::Duration;
 
@@ -20,6 +21,25 @@ use zakuro_core::stats::StatsEvent;
 
 pub(crate) use session::ReceiveCounters;
 pub(crate) use transport::{MoqClientContext, MoqEndpoint, MoqTlsOptions, MoqTransport};
+
+/// 受信したストリーム reset のエラーコード
+///
+/// QUIC 直接接続と WebTransport over HTTP/3 (ngtcp2) の公開イベントには reliable size が
+/// 無いため、その値を推測しない。WebTransport over HTTP/2 の `WT_RESET_STREAM` capsule は
+/// アプリケーションエラーコードをそのまま運ぶ。`session.rs` は読み込みエラーからこの型を
+/// downcast し、MOQT のストリーム reset として扱う。
+#[derive(Debug)]
+pub(crate) struct StreamReset(
+    /// ピアが指定したアプリケーションエラーコード
+    pub(crate) u64,
+);
+
+impl std::fmt::Display for StreamReset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stream reset: {}", self.0)
+    }
+}
+impl std::error::Error for StreamReset {}
 
 /// subscribe するトラック名を解決する
 ///

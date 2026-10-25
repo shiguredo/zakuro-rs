@@ -366,7 +366,7 @@ fn parse_instance_args(
         .then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let transport: MoqTransport = noargs::opt("transport")
-        .doc("Transport (quic | wt-h3 | qmux, default: quic)")
+        .doc("Transport (quic | wt-h3 | wt-h2 | qmux, default: quic)")
         .take(&mut args)
         .present_and_then(|o| MoqTransport::parse(o.value()))?
         .unwrap_or_default();
@@ -375,7 +375,9 @@ fn parse_instance_args(
         .doc("QUIC backend (s2n-quic | ngtcp2, default: s2n-quic for quic, ngtcp2 for wt-h3)")
         .take(&mut args)
         .present_and_then(|o| QuicBackend::parse(o.value()))?;
-    if transport == MoqTransport::Qmux && quic_backend.is_some() {
+    // QUIC を使わない経路 (QMux は TLS over TCP、WebTransport over HTTP/2 は TCP 上の
+    // HTTP/2) では --quic-backend を解釈しない。指定された場合は取り違えを防ぐためエラーにする。
+    if matches!(transport, MoqTransport::Qmux | MoqTransport::WtH2) && quic_backend.is_some() {
         return Err(
             ErrorMessage::new("--quic-backend は quic または wt-h3 で指定してください").into(),
         );
@@ -1450,6 +1452,8 @@ mod tests {
             vec!["--transport=qmux", "--quic-backend=ngtcp2"],
             vec!["--transport=qmux", "--quic-backend=s2n-quic"],
             vec!["--transport=wt-h3", "--quic-backend=s2n-quic"],
+            vec!["--transport=wt-h2", "--quic-backend=ngtcp2"],
+            vec!["--transport=wt-h2", "--quic-backend=s2n-quic"],
         ] {
             let mut argv = vec!["--url=moqt://localhost:4433".into()];
             argv.extend(options.into_iter().map(str::to_owned));
@@ -1499,6 +1503,30 @@ mod tests {
         )
         .expect("JSONC のオプションを解釈できること");
         assert_eq!(instance.quic_backend, QuicBackend::Ngtcp2);
+    }
+
+    /// `--transport wt-h2` と JSONC の `"transport": "wt-h2"` を解釈できること
+    ///
+    /// WebTransport over HTTP/2 は TCP + TLS 上で動くため QUIC 実装を選ばず、
+    /// `--quic-backend` の既定値も接続には使われない。
+    #[test]
+    fn transport_accepts_wt_h2() {
+        for options in [vec!["--transport=wt-h2"], vec!["--transport", "wt-h2"]] {
+            let mut argv: Vec<String> = vec!["--url=moqt://relay.example.com:4433".into()];
+            argv.extend(options.into_iter().map(str::to_owned));
+            let (instance, _help) = parse_instance_args("zakuro-moq", argv, &mut Vec::new())
+                .expect("解釈に成功すること");
+            assert_eq!(instance.transport, MoqTransport::WtH2);
+        }
+        let config = parse_jsonc_config(r#"{"url":"moqt://localhost/", "transport":"wt-h2"}"#)
+            .expect("JSONC を解釈できること");
+        let (instance, _) = parse_instance_args(
+            "zakuro-moq",
+            config.instance_argvs[0].clone(),
+            &mut Vec::new(),
+        )
+        .expect("JSONC から wt-h2 経路を選べること");
+        assert_eq!(instance.transport, MoqTransport::WtH2);
     }
 
     /// `--transport qmux` と `--transport=qmux` を解釈できること

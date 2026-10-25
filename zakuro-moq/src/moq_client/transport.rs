@@ -1,8 +1,8 @@
-//! MOQ relay への接続 (QUIC 直接接続 / WebTransport over HTTP/3 / QMux)
+//! MOQ relay への接続 (QUIC 直接接続 / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux)
 //!
 //! MOQT の接続先 URL の解釈、名前解決、TLS 設定、経路ごとのクライアント構築を担当する。
-//! QUIC 直接接続は s2n-quic / ngtcp2 を、QMux は TLS over TCP + tokio-qmux を使う。各経路を
-//! `session.rs` からは [`MoqConnection`] として同じように扱える。
+//! QUIC 直接接続は s2n-quic / ngtcp2 を、WebTransport over HTTP/2 と QMux は TLS over TCP を
+//! 使う。各経路を `session.rs` からは [`MoqConnection`] として同じように扱える。
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -18,12 +18,13 @@ use s2n_quic::provider::tls::rustls as s2n_rustls;
 use crate::error::{ErrorMessage, Result};
 
 use super::stream::{MoqBidiAcceptor, MoqConnectionHandle, MoqRecvAcceptor};
-use super::{ngtcp2, qmux};
+use super::{ngtcp2, qmux, wt_h2};
 
 /// 下位トランスポート種別
 ///
-/// QUIC、WebTransport over HTTP/3、QMux (draft-ietf-quic-qmux-02) を選ぶ。
-/// URL はいずれも `moqt://` で、経路は CLI の `--transport` で選ぶ。
+/// QUIC、WebTransport over HTTP/3、WebTransport over HTTP/2、QMux
+/// (draft-ietf-quic-qmux-02) を選ぶ。URL はいずれも `moqt://` で、経路は CLI の
+/// `--transport` で選ぶ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum MoqTransport {
     /// QUIC 直接接続
@@ -31,6 +32,11 @@ pub(crate) enum MoqTransport {
     Quic,
     /// ngtcp2 による WebTransport over HTTP/3
     WtH3,
+    /// WebTransport over HTTP/2 (TCP + TLS + shiguredo_http2)
+    ///
+    /// reset を `WT_RESET_STREAM` capsule で行うため `RESET_STREAM_AT` は不要だが、
+    /// relay の capsule 対応に依存する。
+    WtH2,
     /// QMux (TLS over TCP + tokio-qmux)
     Qmux,
 }
@@ -74,14 +80,15 @@ impl MoqTransport {
     ///
     /// # Errors
     ///
-    /// `quic` / `wt-h3` / `qmux` 以外の値はエラーになる。
+    /// `quic` / `wt-h3` / `wt-h2` / `qmux` 以外の値はエラーになる。
     pub(crate) fn parse(value: &str) -> Result<Self> {
         match value {
             "quic" => Ok(Self::Quic),
             "wt-h3" => Ok(Self::WtH3),
+            "wt-h2" => Ok(Self::WtH2),
             "qmux" => Ok(Self::Qmux),
             _ => Err(ErrorMessage::new(format!(
-                "--transport は quic、wt-h3、qmux で指定してください: {value:?}"
+                "--transport は quic、wt-h3、wt-h2、qmux で指定してください: {value:?}"
             ))
             .into()),
         }
@@ -92,6 +99,7 @@ impl MoqTransport {
         match self {
             Self::Quic => "quic",
             Self::WtH3 => "wt-h3",
+            Self::WtH2 => "wt-h2",
             Self::Qmux => "qmux",
         }
     }
@@ -431,6 +439,55 @@ impl EndpointState {
             .unwrap_or_else(|| ErrorMessage::new("MOQ relay への接続先がありません"))
             .into())
     }
+
+    /// この接続先へ WebTransport over HTTP/2 接続 (TLS over TCP) を確立する
+    ///
+    /// QUIC 直接接続や QMux と同様に、名前解決で複数のアドレスが得られた場合は順に試し、
+    /// 候補ごとにタイムアウトで打ち切る。仮想クライアントごとに独立した TCP 接続を張る。
+    ///
+    /// # Errors
+    ///
+    /// 全ての接続先への TCP + TLS + HTTP/2 / WebTransport 接続に失敗した場合はエラーになる。
+    async fn connect_wt_h2(
+        &self,
+        tls: &Arc<rustls::ClientConfig>,
+        endpoint: &MoqEndpoint,
+    ) -> Result<wt_h2::Connection> {
+        let mut last_error: Option<ErrorMessage> = None;
+        let last_index = self.addrs.len().saturating_sub(1);
+        for (index, addr) in self.addrs.iter().enumerate() {
+            let timeout = if index == last_index {
+                CONNECT_FINAL_ATTEMPT_TIMEOUT
+            } else {
+                CONNECT_ATTEMPT_TIMEOUT
+            };
+            // TCP 接続、TLS ハンドシェイク、HTTP/2 の SETTINGS 交換、WebTransport の
+            // Extended CONNECT をまとめて打ち切る
+            let connect = wt_h2::connect(
+                *addr,
+                &self.server_name,
+                &endpoint.authority,
+                &endpoint.path,
+                tls,
+            );
+            match tokio::time::timeout(timeout, connect).await {
+                Ok(Ok(connection)) => return Ok(connection),
+                Ok(Err(e)) => {
+                    last_error = Some(ErrorMessage::new(format!(
+                        "MOQ relay への WebTransport over HTTP/2 接続に失敗しました ({addr}): {e}"
+                    )));
+                }
+                Err(_) => {
+                    last_error = Some(ErrorMessage::new(format!(
+                        "MOQ relay への WebTransport over HTTP/2 接続がタイムアウトしました ({addr})"
+                    )));
+                }
+            }
+        }
+        Err(last_error
+            .unwrap_or_else(|| ErrorMessage::new("MOQ relay への接続先がありません"))
+            .into())
+    }
 }
 
 /// 接続先キャッシュのキー
@@ -464,8 +521,8 @@ impl EndpointKey {
 ///
 /// QUIC 直接接続では s2n-quic の `Client` (UDP ソケットとエンドポイントタスク) を接続先ごとに
 /// 共有する。仮想クライアントごとに作るとソケットとタスクが仮想クライアント数だけ増えるため、
-/// インスタンスで 1 つ作って clone する。QMux では TCP + TLS 接続を仮想クライアントごとに
-/// 張るため、ここで共有するのは TLS 設定と接続先ごとの名前解決結果だけである。
+/// インスタンスで 1 つ作って clone する。QMux と WebTransport over HTTP/2 では TCP + TLS 接続を
+/// 仮想クライアントごとに張るため、ここで共有するのは TLS 設定と接続先ごとの名前解決結果だけである。
 /// ngtcp2 も接続ごとに UDP ソケットと駆動タスクを作り、接続設定と名前解決結果を共有する。
 /// GOAWAY の New Session URI で移行先が変わると接続先が増えるため、接続先ごとの状態を
 /// キャッシュして仮想クライアント間で共有する。
@@ -481,6 +538,8 @@ pub(crate) struct MoqClientContext {
     ///
     /// rustls の `ClientConfig` は接続ごとに clone せず `Arc` で共有できる。
     qmux_tls: Option<Arc<rustls::ClientConfig>>,
+    /// WebTransport over HTTP/2 の TLS 設定 (ALPN `h2`、TCP + TLS で使う)
+    wt_h2_tls: Option<Arc<rustls::ClientConfig>>,
     /// 接続先ごとの状態 (GOAWAY の New Session URI で増える)
     ///
     /// `tokio::sync::Mutex` を使う理由: 複数の仮想クライアントが同じ移行先へ同時に接続する
@@ -503,16 +562,17 @@ impl MoqClientContext {
         transport: MoqTransport,
         quic_backend: QuicBackend,
     ) -> Result<Self> {
-        let (quic_tls, ngtcp2_config, qmux_tls) = match (transport, quic_backend) {
+        let (quic_tls, ngtcp2_config, qmux_tls, wt_h2_tls) = match (transport, quic_backend) {
             (MoqTransport::Quic, QuicBackend::S2nQuic) => {
-                (Some(build_quic_tls(tls_options)?), None, None)
+                (Some(build_quic_tls(tls_options)?), None, None, None)
             }
             (MoqTransport::Quic, QuicBackend::Ngtcp2) => {
-                (None, Some(ngtcp2::build_config(tls_options)?), None)
+                (None, Some(ngtcp2::build_config(tls_options)?), None, None)
             }
             (MoqTransport::WtH3, QuicBackend::Ngtcp2) => (
                 None,
                 Some(ngtcp2::webtransport::build_config(tls_options)?),
+                None,
                 None,
             ),
             (MoqTransport::WtH3, QuicBackend::S2nQuic) => {
@@ -520,7 +580,10 @@ impl MoqClientContext {
                     ErrorMessage::new("wt-h3 は ngtcp2 バックエンドで利用してください").into(),
                 );
             }
-            (MoqTransport::Qmux, _) => (None, None, Some(build_qmux_tls(tls_options)?)),
+            // WebTransport over HTTP/2 は TCP + TLS 上で動くため QUIC 実装を使わない。
+            // `--quic-backend` の指定は args.rs で拒否する。
+            (MoqTransport::WtH2, _) => (None, None, None, Some(build_wt_h2_tls(tls_options)?)),
+            (MoqTransport::Qmux, _) => (None, None, Some(build_qmux_tls(tls_options)?), None),
         };
         let state = build_endpoint_state(endpoint, quic_tls.as_ref()).await?;
         let mut endpoints = HashMap::new();
@@ -530,6 +593,7 @@ impl MoqClientContext {
             quic_tls,
             ngtcp2_config,
             qmux_tls,
+            wt_h2_tls,
             endpoints: Arc::new(tokio::sync::Mutex::new(endpoints)),
         })
     }
@@ -587,6 +651,15 @@ impl MoqClientContext {
                     state.connect_ngtcp2(config, Some(endpoint)).await?,
                 ))
             }
+            MoqTransport::WtH2 => {
+                let tls = self
+                    .wt_h2_tls
+                    .as_ref()
+                    .expect("logical invariant: WebTransport over HTTP/2 always has a TLS config");
+                Ok(MoqConnection::WtH2(
+                    state.connect_wt_h2(tls, endpoint).await?,
+                ))
+            }
             MoqTransport::Qmux => {
                 let tls = self
                     .qmux_tls
@@ -608,6 +681,8 @@ pub(crate) enum MoqConnection {
     Ngtcp2(ngtcp2::Connection),
     /// ngtcp2 による WebTransport over HTTP/3 接続
     WebTransport(ngtcp2::Connection),
+    /// WebTransport over HTTP/2 接続
+    WtH2(wt_h2::Connection),
     /// QMux 接続
     Qmux(Arc<tokio_qmux::Connection>),
 }
@@ -618,6 +693,7 @@ impl MoqConnection {
         match self {
             Self::Quic(_) | Self::Ngtcp2(_) => MoqTransport::Quic,
             Self::WebTransport(_) => MoqTransport::WtH3,
+            Self::WtH2(_) => MoqTransport::WtH2,
             Self::Qmux(_) => MoqTransport::Qmux,
         }
     }
@@ -647,14 +723,22 @@ impl MoqConnection {
                     MoqBidiAcceptor::Ngtcp2(bidi),
                 )
             }
+            Self::WtH2(connection) => {
+                let (handle, recv, bidi) = connection.split();
+                (
+                    MoqConnectionHandle::WtH2(handle),
+                    MoqRecvAcceptor::WtH2(recv),
+                    MoqBidiAcceptor::WtH2(bidi),
+                )
+            }
         }
     }
 }
 
 /// 接続先の名前解決と QUIC クライアントの構築を行う
 ///
-/// QMux / ngtcp2 経路では共有 UDP ソケットを使わないため `tls` に `None` を渡し、
-/// `clients` を空にする。
+/// QMux / ngtcp2 / WebTransport over HTTP/2 経路では共有 UDP ソケットを使わないため
+/// `tls` に `None` を渡し、`clients` を空にする。
 ///
 /// # Errors
 ///
@@ -839,6 +923,20 @@ fn build_qmux_tls(options: &MoqTlsOptions) -> Result<Arc<rustls::ClientConfig>> 
     Ok(Arc::new(config))
 }
 
+/// WebTransport over HTTP/2 用の TLS 設定を構築する
+///
+/// HTTP/2 の ALPN 識別子は `h2` である (RFC 9113 §3.3)。WebTransport over HTTP/2 は
+/// relay の `WT_RESET_STREAM` capsule 対応に依存するため、RESET_STREAM_AT を必要としない。
+///
+/// # Errors
+///
+/// TLS 設定の構築に失敗した場合はエラーになる。
+fn build_wt_h2_tls(options: &MoqTlsOptions) -> Result<Arc<rustls::ClientConfig>> {
+    let mut config = build_rustls_config(options)?;
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Ok(Arc::new(config))
+}
+
 /// 証明書検証をスキップする Verifier (`--insecure` 専用)
 #[derive(Debug)]
 struct NoVerifier;
@@ -996,16 +1094,21 @@ mod tests {
             MoqTransport::parse("wt-h3").expect("wt-h3 は受理されること"),
             MoqTransport::WtH3
         );
+        assert_eq!(
+            MoqTransport::parse("wt-h2").expect("wt-h2 は受理されること"),
+            MoqTransport::WtH2
+        );
         // ログと CLI で同じ表記を使う
         assert_eq!(MoqTransport::Quic.as_str(), "quic");
         assert_eq!(MoqTransport::Qmux.as_str(), "qmux");
         assert_eq!(MoqTransport::WtH3.as_str(), "wt-h3");
+        assert_eq!(MoqTransport::WtH2.as_str(), "wt-h2");
     }
 
     /// 未対応の transport 名・表記ゆれ・空文字は拒否すること
     #[test]
     fn parse_transport_rejects_unknown_values() {
-        for value in ["QUIC", "QMux", "quic-direct", ""] {
+        for value in ["QUIC", "QMux", "wt-h2 ", "quic-direct", ""] {
             assert!(
                 MoqTransport::parse(value).is_err(),
                 "受理してはならない: {value:?}"
@@ -1168,6 +1271,47 @@ mod tests {
         assert!(
             state.clients.is_empty(),
             "QMux では QUIC クライアントを作らないこと"
+        );
+    }
+
+    /// WebTransport over HTTP/2 の TLS 設定が `h2` を広告すること
+    ///
+    /// HTTP/2 の ALPN は `h2` である (RFC 9113 §3.3)。MOQT の ALPN (`moqt-22`) は
+    /// WebTransport のサブプロトコル (WT-Available-Protocols) で通知する。
+    #[test]
+    fn wt_h2_tls_advertises_h2_alpn() {
+        let tls = build_wt_h2_tls(&MoqTlsOptions::default()).expect("TLS 設定の構築に成功すること");
+        assert_eq!(tls.alpn_protocols, vec![b"h2".to_vec()]);
+    }
+
+    /// WebTransport over HTTP/2 の接続コンテキストが QUIC の設定を作らないこと
+    ///
+    /// WebTransport over HTTP/2 は TCP + TLS 上で動くため、UDP ソケットも QUIC の設定も
+    /// 作らない。TLS 設定だけを仮想クライアント間で共有する。
+    #[tokio::test]
+    async fn wt_h2_context_does_not_build_quic_clients() {
+        let endpoint =
+            MoqEndpoint::parse("moqt://127.0.0.1:4433/").expect("接続先の解釈に成功すること");
+        let context = MoqClientContext::new(
+            &endpoint,
+            &MoqTlsOptions::default(),
+            MoqTransport::WtH2,
+            QuicBackend::default(),
+        )
+        .await
+        .expect("コンテキストの構築に成功すること");
+        assert!(context.quic_tls.is_none());
+        assert!(context.ngtcp2_config.is_none());
+        assert!(context.qmux_tls.is_none());
+        assert!(context.wt_h2_tls.is_some());
+        let endpoints = context.endpoints.lock().await;
+        let state = endpoints
+            .values()
+            .next()
+            .expect("接続先が登録されていること");
+        assert!(
+            state.clients.is_empty(),
+            "WebTransport over HTTP/2 では QUIC クライアントを作らないこと"
         );
     }
 }
