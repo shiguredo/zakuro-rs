@@ -89,6 +89,9 @@ QMux の実効 idle timeout は両端の広告値のうち 0 でない値の最�
 - 実 QMux relay で動作を確認した (2026-10-21)。接続先のホスト名はリポジトリに書かない。
   TLS の証明書検証を有効にしたまま、VC 1 本 20 秒と VC 3 本 10 秒の publish + subscribe を
   実行し、両方で `publish=1/1` / `subscribe=1/1` / `payload-mismatches=0` だった。
+  リレー再構築後の 2026-10-25 にも確認し、VC 1 本 15 秒で 450 送信 / 448 受信、
+  VC 3 本 12 秒 (video + audio の 2 トラック) で 2878 送信 / 2866 受信、
+  いずれも `payload-mismatches=0` だった (件数の差は停止時の in-flight object)。
   ストリームアダプタは qmux-rs の client と server をメモリ上の duplex で両端に立てても
   検証している (モックではない)。moqt-rs の E2E は QMux を対象外にしているため、この実 relay
   での確認が QMux 経路の E2E にあたる。
@@ -107,4 +110,4 @@ QMux の実効 idle timeout は両端の広告値のうち 0 でない値の最�
 - tombic (`prek run tombi-lint --all-files` / `prek run tombi-format --all-files`)
 - 実 relay の E2E: テスト用 relay へ `--transport qmux` で接続し、
   `--tracks video:30:1000 --subscribe-tracks video --verify-payload --vcs 1 --duration 20` で
-  publish / subscribe が成立すること (2026-10-21 に確認)
+  publish / subscribe が成立すること (2026-10-21 と 2026-10-25 に確認)
