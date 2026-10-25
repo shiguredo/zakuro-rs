@@ -1,7 +1,7 @@
 # MOQ でトラック単位に datagram / subgroup 配送を選べるようにする
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-25
 - Branch: feature/add-moq-datagram-delivery
 - Polished: {YYYY-MM-DD}
 
@@ -50,3 +50,32 @@ Subgroup / Datagram から選べるため、リレーの datagram 経路を zaku
 - 既定 (配送方式を省略) の挙動が従来と変わらないこと
 - `cargo fmt` / `cargo clippy` / `cargo test` / `make smoke` / tombi が通ること
 - 実 relay の E2E で audio datagram の publish / subscribe が成立すること
+
+## 解決方法
+
+- `zakuro-moq/src/args.rs` に `DeliveryMode`、`--datagram-max-size`、`--tracks` の 4 番目と
+  JSONC の `delivery-mode` の解釈、起動時のサイズ検証を追加した。既定は `subgroup` で、
+  datagram 配送のトラックは `object-size + ヘッダ 48 バイト` が上限に収まることと、
+  ngtcp2 経由では 1200 バイト (WebTransport over HTTP/3 は 1199 バイト) 以下であることを
+  確認する。
+- `zakuro-moq/src/moq_client/stream.rs` に `MoqConnectionHandle::send_datagram` と
+  `MoqDatagramReceiver` を追加した。受信は s2n-quic の datagram provider、ngtcp2 と
+  WebTransport over HTTP/2 の駆動タスクのチャネル、QMux の受信キューから取り出す。
+- s2n-quic の datagram endpoint は送受信のキューの容量が既定で 0 のため、QUIC 直接接続の
+  クライアントに送受信 64 件の容量を設定した。設定しないと datagram を 1 つも送れない。
+- `zakuro-moq/src/moq_client/ngtcp2.rs` と `ngtcp2/webtransport.rs` に QUIC DATAGRAM と
+  HTTP Datagram の送受信を追加した。HTTP/3 経路は `feed_datagram` で受けた datagram を
+  WT イベントとして受け取り、送信は `send_datagram` でエンコードして QUIC へ渡す。
+- `zakuro-moq/src/moq_client/wt_h2.rs` に `WT_DATAGRAM` capsule の送受信を追加した。
+- `zakuro-moq/src/moq_client/transport.rs` の `split` が datagram 受信口も返すようにした。
+- `zakuro-moq/src/moq_client/session.rs` に datagram 送信 (`send_next_datagram`) と購読側の
+  datagram 受信 (`DatagramReceiveState` / `handle_received_datagram`) を追加した。payload 長は
+  `ObjectDatagram::decode` で得て、`--verify-payload` の検査にも使う。
+- テストを追加した。配送方式の CLI / JSONC 解釈、上限超過の起動エラー、END_OF_GROUP の
+  判定、s2n-quic / ngtcp2 / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux の
+  datagram 往復を実トランスポートの loopback 接続で検証する。
+- README と `docs/MOQ_QMUX.md` / `docs/MOQ_WEBTRANSPORT_H2.md` / `docs/LOADTEST_GAP.md` を
+  更新し、`docs/MOQ_DELIVERY_MODE.md` に仕様と設計の検討メモを追加した。
+- E2E ワークフローに subgroup 配送と audio datagram 配送の 2 ラウンドを追加した。実 relay の
+  E2E (2026-10-25) で、subgroup 配送は 896 送信 / 891 受信、datagram 配送は 1492 送信 /
+  1484 受信、いずれも payload-mismatches=0 だった。
