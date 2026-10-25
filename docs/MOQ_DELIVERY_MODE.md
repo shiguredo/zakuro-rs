@@ -116,7 +116,8 @@ s2n-quic の datagram endpoint は送受信のキューの容量が既定でど�
 - datagram の冗長送信 (同じ object を複数回送る) は未対応である。
 - datagram の欠落 / 順序 / 遅延の計測は未対応である。ngtcp2 の datagram は輻輳時に破棄
   されるが、その件数を API から取得できないため、送信数と購読側の受信数の差で判断する。
-- 実リレーが publisher 起点の datagram を転送できるかを E2E で確認する必要がある。
+- 実リレーが publisher 起点の datagram を転送できることは実 relay の E2E で確認済みである
+  (第 5 章)。
 
 ## 5. 検証
 
@@ -129,4 +130,10 @@ s2n-quic の datagram endpoint は送受信のキューの容量が既定でど�
   QUIC 直接接続 (`ngtcp2/tests.rs`)、WebTransport over HTTP/3
   (`ngtcp2/webtransport/tests.rs`)、WebTransport over HTTP/2 (`wt_h2/tests.rs`)、QMux
   (`stream.rs`) を実トランスポートの loopback 接続で検証する。
-- 実 relay の E2E: テスト用 relay へ `--tracks video:30:1000,audio:50:200:datagram --subscribe-tracks video,audio --verify-payload` で接続し、publish / subscribe が成立し payload 不一致が 0 であること
+- 実 relay の E2E (2026-10-25 に確認。接続先のホスト名はリポジトリに書かない):
+  - subgroup 配送: `--tracks video:30:1000 --subscribe-tracks video --verify-payload` で
+    publish=1/1、subscribe=1/1、896 送信 / 891 受信、payload-mismatches=0
+  - datagram 配送: `--tracks audio:50:200:datagram --subscribe-tracks audio --verify-payload`
+    で publish=1/1、subscribe=1/1、1492 送信 / 1484 受信、payload-mismatches=0
+  - 件数の差は停止時の in-flight object による。publisher → relay → subscriber の datagram
+    経路が実 relay で成立した。
