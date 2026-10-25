@@ -382,13 +382,20 @@ fn parse_instance_args(
             ErrorMessage::new("--quic-backend は quic または wt-h3 で指定してください").into(),
         );
     }
+    // WebTransport over HTTP/3 は、データストリームの reset で WebTransport のストリーム
+    // ヘッダを失わないよう RESET_STREAM_AT の使用を MUST としている
+    // (draft-ietf-webtrans-http3-16 §4.4)。s2n-quic は RESET_STREAM_AT を送出できないため、
+    // wt-h3 は ngtcp2 のみを許可し、バックエンドを省略した場合も ngtcp2 を既定にする。
     let quic_backend = quic_backend.unwrap_or(if transport == MoqTransport::WtH3 {
         QuicBackend::Ngtcp2
     } else {
         QuicBackend::S2nQuic
     });
     if transport == MoqTransport::WtH3 && quic_backend != QuicBackend::Ngtcp2 {
-        return Err(ErrorMessage::new("wt-h3 は ngtcp2 バックエンドで利用してください").into());
+        return Err(ErrorMessage::new(
+            "wt-h3 は ngtcp2 バックエンドで利用してください (s2n-quic は RESET_STREAM_AT に対応していないため)",
+        )
+        .into());
     }
 
     let namespace: String = noargs::opt("namespace")
@@ -1462,6 +1469,31 @@ mod tests {
                 "無効な組み合わせを拒否すること"
             );
         }
+    }
+
+    /// wt-h3 と s2n-quic の組み合わせは理由付きで拒否すること
+    ///
+    /// WebTransport over HTTP/3 はデータストリーム reset で WebTransport のストリーム
+    /// ヘッダを失わないよう RESET_STREAM_AT を MUST とする
+    /// (draft-ietf-webtrans-http3-16 §4.4)。s2n-quic は RESET_STREAM_AT を送出できない
+    /// ため、wt-h3 では使えない。拒否する理由がエラーメッセージから分かることを確認する。
+    #[test]
+    fn webtransport_rejects_s2n_quic() {
+        let error = parse_instance_args(
+            "zakuro-moq",
+            vec![
+                "--url=moqt://localhost:4433".into(),
+                "--transport=wt-h3".into(),
+                "--quic-backend=s2n-quic".into(),
+            ],
+            &mut Vec::new(),
+        )
+        .expect_err("s2n-quic との組み合わせを拒否すること");
+        let message = format!("{error}");
+        assert!(
+            message.contains("RESET_STREAM_AT"),
+            "RESET_STREAM_AT に対応していないことが分かること: {message}"
+        );
     }
 
     /// WebTransport は ngtcp2 を既定とし、明示指定と JSONC の双方で選択できること

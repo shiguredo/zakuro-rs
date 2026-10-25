@@ -247,6 +247,9 @@ WebPKI のルート証明書を使い、`--ca-cert` を指定するとその PEM
 - `wt-h3`: ngtcp2 による WebTransport over HTTP/3 接続。UDP が必要です。
   ALPN は `h3`、WebTransport のサブプロトコルは `moqt-22` です。
   URL は `moqt://` のまま指定し、パスとクエリーは HTTPS の Extended CONNECT に渡します。
+  WebTransport はデータストリームの reset に RESET_STREAM_AT を MUST とするため
+  (draft-ietf-webtrans-http3-16 §4.4)、RESET_STREAM_AT を送出できない s2n-quic は
+  バックエンドに指定できません。
 - `wt-h2`: WebTransport over HTTP/2 接続。TCP + TLS 上で動くため UDP は不要です。
   ALPN は `h2`、WebTransport のサブプロトコルは `moqt-22` です。URL は `moqt://` のまま
   指定し、パスとクエリーは Extended CONNECT に渡します。reset は `WT_RESET_STREAM`

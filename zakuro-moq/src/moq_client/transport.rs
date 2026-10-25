@@ -575,10 +575,14 @@ impl MoqClientContext {
                 None,
                 None,
             ),
+            // WebTransport over HTTP/3 のデータストリーム reset は RESET_STREAM_AT を
+            // 前提とするため (draft-ietf-webtrans-http3-16 §4.4)、これを送出できない
+            // s2n-quic との組み合わせは受け付けない。
             (MoqTransport::WtH3, QuicBackend::S2nQuic) => {
-                return Err(
-                    ErrorMessage::new("wt-h3 は ngtcp2 バックエンドで利用してください").into(),
-                );
+                return Err(ErrorMessage::new(
+                    "wt-h3 は ngtcp2 バックエンドで利用してください (s2n-quic は RESET_STREAM_AT に対応していないため)",
+                )
+                .into());
             }
             // WebTransport over HTTP/2 は TCP + TLS 上で動くため QUIC 実装を使わない。
             // `--quic-backend` の指定は args.rs で拒否する。
@@ -1312,6 +1316,32 @@ mod tests {
         assert!(
             state.clients.is_empty(),
             "WebTransport over HTTP/2 では QUIC クライアントを作らないこと"
+        );
+    }
+
+    /// wt-h3 と s2n-quic の組み合わせが接続の確立前に拒否されること
+    ///
+    /// WebTransport over HTTP/3 はデータストリーム reset に RESET_STREAM_AT を MUST とし
+    /// (draft-ietf-webtrans-http3-16 §4.4)、s2n-quic はこれを送出できない。この制約は
+    /// 名前解決やソケット作成より前に判定し、理由をエラーメッセージに載せる。
+    #[tokio::test]
+    async fn webtransport_rejects_s2n_quic() {
+        let endpoint =
+            MoqEndpoint::parse("moqt://127.0.0.1:4433/").expect("接続先の解釈に成功すること");
+        let Err(error) = MoqClientContext::new(
+            &endpoint,
+            &MoqTlsOptions::default(),
+            MoqTransport::WtH3,
+            QuicBackend::S2nQuic,
+        )
+        .await
+        else {
+            panic!("s2n-quic との組み合わせを拒否すること");
+        };
+        let message = format!("{error}");
+        assert!(
+            message.contains("RESET_STREAM_AT"),
+            "RESET_STREAM_AT に対応していないことが分かること: {message}"
         );
     }
 }
