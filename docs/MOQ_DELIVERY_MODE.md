@@ -11,7 +11,7 @@ RFC 9000、RFC 9221 を前提とする。節番号は将来の draft 改訂で�
 - Delivery Mode は Original Publisher が object ごとに決める値であり
   (draft-ietf-moq-transport-22 §2.1.1 (Object Fields))、購読側とは交渉しない。したがって
   zakuro-moq の publish 設定として持つのが正しい。
-- datagram 配送を成立させるには、下位トランスポート (s2n-quic / ngtcp2 / WebTransport over
+- datagram 配送を成立させるには、下位トランスポート (tobi-quic / WebTransport over
   HTTP/3 / WebTransport over HTTP/2 / QMux) の datagram 送受信と、購読側の datagram 受信が
   すべて必要になる。publish 側だけにフラグを足す変更ではない。
 - LOC の音声に忠実な Group 構造 (1 object = 1 Group) は今回のスコープ外とし、既存の
@@ -86,14 +86,14 @@ RFC 9000、RFC 9221 を前提とする。節番号は将来の draft 改訂で�
 
 | 経路 | 送信 | 受信 | 特性 |
 | --- | --- | --- | --- |
-| `quic` (s2n-quic) | QUIC DATAGRAM | datagram provider | 再送なし。送信キューが満杯なら待つ |
-| `quic` (ngtcp2) | QUIC DATAGRAM | 駆動タスクのイベント | 輻輳時に破棄され、API からは観測できない |
-| `wt-h3` | HTTP Datagram | HTTP/3 の WT イベント | QUIC DATAGRAM 上で運ぶ。ngtcp2 と同じ制約 |
+| `quic` | QUIC DATAGRAM | tobi-quic の受信 API | 再送なし。送信キューが満杯なら待つ |
+| `wt-h3` | HTTP Datagram | tobi-webtransport の受信キュー | QUIC DATAGRAM 上で運ぶ。再送なし |
 | `wt-h2` | `WT_DATAGRAM` capsule | WT イベント | TCP 上で信頼的。遅延特性は QUIC と異なる |
 | `qmux` | QMux DATAGRAM | 接続の受信キュー | TCP 上で信頼的。バッファ溢れによる破棄はあり得る |
 
-s2n-quic の datagram endpoint は送受信のキューの容量が既定でどちらも 0 であり、送信容量を
-設定しないと datagram を 1 つも送れない。QUIC 直接接続では送受信とも 64 件の容量を設定する。
+tobi-quic の DATAGRAM は `DatagramConfig` で `max_datagram_frame_size` を広告し、送信は
+`send_datagram_wait` で送信キューの空きを待つ。これにより負荷試験では「送信できた object 数」を
+正しく数えられる。
 
 ## 3. 実装構造
 
@@ -103,8 +103,8 @@ s2n-quic の datagram endpoint は送受信のキューの容量が既定でど�
 - `zakuro-moq/src/moq_client/stream.rs`: 接続ハンドルの datagram 送信と、経路ごとの
   datagram 受信口 (`MoqDatagramReceiver`)。
 - `zakuro-moq/src/moq_client/transport.rs`: `split` で datagram 受信口を返す。
-- `zakuro-moq/src/moq_client/ngtcp2.rs` / `ngtcp2/webtransport.rs`: ngtcp2 の QUIC 直接接続と
-  WebTransport over HTTP/3 の datagram 送受信。
+- `zakuro-moq/src/moq_client/quic.rs` / `wt_h3.rs`: tobi-quic の QUIC 直接接続と
+  tobi-webtransport の WebTransport over HTTP/3 の datagram 送受信。
 - `zakuro-moq/src/moq_client/wt_h2.rs`: WebTransport over HTTP/2 の datagram 送受信。
 - `README.md` と各トランスポートのドキュメント: 配送方式の指定方法と制約。
 
@@ -114,8 +114,8 @@ s2n-quic の datagram endpoint は送受信のキューの容量が既定でど�
 - Group 長 (1 Group あたりの object 数) は指定できない。LOC の音声に合わせて 1 object =
   1 Group にすることも未対応である。
 - datagram の冗長送信 (同じ object を複数回送る) は未対応である。
-- datagram の欠落 / 順序 / 遅延の計測は未対応である。ngtcp2 の datagram は輻輳時に破棄
-  されるが、その件数を API から取得できないため、送信数と購読側の受信数の差で判断する。
+- datagram の欠落 / 順序 / 遅延の計測は未対応である。datagram は再送されないため、
+  送信数と購読側の受信数の差で判断する。
 - 実リレーが publisher 起点の datagram を転送できることは実 relay の E2E で確認済みである
   (第 5 章)。
 
@@ -126,10 +126,9 @@ s2n-quic の datagram endpoint は送受信のキューの容量が既定でど�
 - `cargo test --locked --workspace --features fdk-aac`
 - `make smoke` (`zakuro-moq --help` に `--datagram-max-size` が出ること)
 - tombi (`prek run tombi-lint --all-files` / `prek run tombi-format --all-files`)
-- 経路ごとの datagram 往復テスト: s2n-quic (`stream.rs`)、ngtcp2 と s2n-quic の
-  QUIC 直接接続 (`ngtcp2/tests.rs`)、WebTransport over HTTP/3
-  (`ngtcp2/webtransport/tests.rs`)、WebTransport over HTTP/2 (`wt_h2/tests.rs`)、QMux
-  (`stream.rs`) を実トランスポートの loopback 接続で検証する。
+- 経路ごとの datagram 往復テスト: QUIC 直接接続 (`stream.rs`)、WebTransport over HTTP/3
+  (`wt_h3.rs`)、WebTransport over HTTP/2 (`wt_h2/tests.rs`)、QMux (`stream.rs`) を
+  実トランスポートの loopback 接続で検証する。
 - 実 relay の E2E (2026-10-25 に確認。接続先のホスト名はリポジトリに書かない):
   - subgroup 配送: `--tracks video:30:1000 --subscribe-tracks video --verify-payload` で
     publish=1/1、subscribe=1/1、896 送信 / 891 受信、payload-mismatches=0

@@ -680,11 +680,11 @@ impl Publisher {
 
     /// subgroup stream への書き込みが失敗したときの処理
     ///
-    /// peer が STOP_SENDING を送ると s2n-quic は送信側を reset 状態にし、以降の書き込みは
-    /// 失敗する。ngtcp2 と WebTransport over HTTP/2 は STOP_SENDING / WT_STOP_SENDING の
+    /// peer が STOP_SENDING を送ると QUIC 層は送信側を reset 状態にし、以降の書き込みは
+    /// 失敗する。QUIC 直接接続と WebTransport の経路は STOP_SENDING / WT_STOP_SENDING の
     /// アプリケーションエラーコードを [`StreamReset`](super::StreamReset) として書き込み
-    /// エラーに載せるため、それを Session へ渡す (s2n-quic / QMux は公開 API から観測
-    /// できないため `None` になる)。書き込み失敗を stream の終端とみなして Session へ
+    /// エラーに載せるため、それを Session へ渡す (QMux は公開 API から観測できないため
+    /// `None` になる)。書き込み失敗を stream の終端とみなして Session へ
     /// 通知し (draft-ietf-moq-transport-22 §11.3.2)、次の Group を新しい stream で送り直す。
     fn on_stream_write_failure(
         &mut self,
@@ -790,6 +790,7 @@ pub(crate) async fn run(
     // keep-alive を有効にする。QMux は PING を送るタスクを起動する
     handle
         .keep_alive(token)
+        .await
         .map_err(|e| ErrorMessage::new(format!("keep-alive の有効化に失敗しました: {e}")))?;
 
     let mut session = Session::new_client(transport, build_setup_options(config, transport))
@@ -1041,8 +1042,8 @@ pub(crate) async fn run(
                     }
                     DataMessage::Reset { stream_id, error_code } => {
                         stream_aliases.remove(&stream_id);
-                        // ngtcp2 の公開イベントは RESET_STREAM_AT の reliable size を公開しない。
-                        // 受信済みバイト数で代用せず、エラーコードだけを Session へ伝える。
+                        // RESET_STREAM_AT の reliable size は受信済みバイト数で代用せず、
+                        // エラーコードだけを Session へ伝える。
                         let _ = session.recv_data_stream_closed(stream_id, RequestStreamEnd::Reset {
                             error_code: Some(error_code), reliable_size: None,
                         });
@@ -1540,8 +1541,8 @@ fn handle_received_datagram(
 
 /// peer の STOP_SENDING / reset に由来するエラーのアプリケーションエラーコードを返す
 ///
-/// ngtcp2 と WebTransport over HTTP/2 は受信したコードを
-/// [`StreamReset`](super::StreamReset) として `io::Error` に載せる。s2n-quic / QMux は
+/// QUIC 直接接続と WebTransport の経路は受信したコードを
+/// [`StreamReset`](super::StreamReset) として `io::Error` に載せる。QMux は
 /// 公開 API からコードを観測できないため `None` になる。
 fn stream_reset_code(error: &std::io::Error) -> Option<u64> {
     error
@@ -2505,7 +2506,7 @@ mod tests {
 
     /// 書き込み・読み込みエラーから reset のアプリケーションエラーコードを取り出せること
     ///
-    /// ngtcp2 と WebTransport over HTTP/2 は STOP_SENDING / reset のコードを
+    /// QUIC 直接接続と WebTransport の経路は STOP_SENDING / reset のコードを
     /// [`StreamReset`](crate::moq_client::StreamReset) として `io::Error` に載せる。
     /// 載っていないエラーは `None` になり、呼び出し側は通常の失敗として扱う。
     #[test]

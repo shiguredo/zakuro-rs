@@ -1,8 +1,9 @@
 //! MOQ relay への接続 (QUIC 直接接続 / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux)
 //!
 //! MOQT の接続先 URL の解釈、名前解決、TLS 設定、経路ごとのクライアント構築を担当する。
-//! QUIC 直接接続は s2n-quic / ngtcp2 を、WebTransport over HTTP/2 と QMux は TLS over TCP を
-//! 使う。各経路を `session.rs` からは [`MoqConnection`] として同じように扱える。
+//! QUIC 直接接続と WebTransport over HTTP/3 は tobi-quic / tobi-webtransport を、
+//! WebTransport over HTTP/2 と QMux は TLS over TCP を使う。各経路を `session.rs` からは
+//! [`MoqConnection`] として同じように扱える。
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -10,15 +11,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustls::pki_types::pem::PemObject;
-use s2n_quic::Client;
-use s2n_quic::client::Connect;
-use s2n_quic::connection::Connection;
-use s2n_quic::provider::tls::rustls as s2n_rustls;
 
 use crate::error::{ErrorMessage, Result};
 
 use super::stream::{MoqBidiAcceptor, MoqConnectionHandle, MoqDatagramReceiver, MoqRecvAcceptor};
-use super::{ngtcp2, qmux, wt_h2};
+use super::{qmux, quic, wt_h2, wt_h3};
 
 /// 下位トランスポート種別
 ///
@@ -30,7 +27,7 @@ pub(crate) enum MoqTransport {
     /// QUIC 直接接続
     #[default]
     Quic,
-    /// ngtcp2 による WebTransport over HTTP/3
+    /// tobi-webtransport による WebTransport over HTTP/3
     WtH3,
     /// WebTransport over HTTP/2 (TCP + TLS + shiguredo_http2)
     ///
@@ -39,40 +36,6 @@ pub(crate) enum MoqTransport {
     WtH2,
     /// QMux (TLS over TCP + tokio-qmux)
     Qmux,
-}
-
-/// QUIC 直接接続で利用する実装
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum QuicBackend {
-    /// s2n-quic
-    #[default]
-    S2nQuic,
-    /// ngtcp2-rs の Tokio 統合
-    Ngtcp2,
-}
-
-impl QuicBackend {
-    /// CLI と JSONC の値から QUIC 実装を解釈する
-    ///
-    /// 未知の実装名はエラーになる。
-    pub(crate) fn parse(value: &str) -> Result<Self> {
-        match value {
-            "s2n-quic" => Ok(Self::S2nQuic),
-            "ngtcp2" => Ok(Self::Ngtcp2),
-            _ => Err(ErrorMessage::new(format!(
-                "--quic-backend は s2n-quic または ngtcp2 で指定してください: {value:?}"
-            ))
-            .into()),
-        }
-    }
-
-    /// CLI とログに載せる実装名を返す
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::S2nQuic => "s2n-quic",
-            Self::Ngtcp2 => "ngtcp2",
-        }
-    }
 }
 
 impl MoqTransport {
@@ -226,8 +189,8 @@ impl MoqEndpoint {
 
 /// authority からホスト部とポート部を分離する
 ///
-/// IPv6 リテラルはブラケットの内側をホスト部とする。ブラケットが無い場合、複数の `:` を
-/// 含む authority はポートの区切りと区別できないためエラーにする。`name` はエラーメッセージに
+/// IPv6 リテラルはブラケットの内側をホスト部とする。ブラケットが無い場合、複数の `:`
+/// を含む authority はポートの区切りと区別できないためエラーにする。`name` はエラーメッセージに
 /// 載せる呼び名である。
 fn split_host_port(authority: &str, name: &str) -> Result<(String, Option<u16>)> {
     if let Some(rest) = authority.strip_prefix('[') {
@@ -275,19 +238,31 @@ pub(crate) struct MoqTlsOptions {
     pub(crate) insecure: bool,
     /// 信頼する CA 証明書 (PEM) のパス (`--ca-cert`)
     ///
-    /// s2n-quic / QMux は未指定なら WebPKI、指定時はこの PEM だけを信頼する。
-    /// ngtcp2 はシステムの信頼ストアに、この PEM を追加する。
+    /// 未指定なら WebPKI、指定時はこの PEM だけを信頼する。
     pub(crate) ca_cert: Option<String>,
+}
+
+/// 接続先 1 件分の QUIC クライアント
+///
+/// UDP ソケットは異なるアドレスファミリ宛に送信できないため、名前解決の結果に
+/// 含まれるファミリごとにクライアントを作る。bool は IPv6 かどうかを表す。
+enum EndpointClients {
+    /// QUIC 直接接続用の tobi-quic クライアント
+    Quic(Vec<(bool, tobi_quic::Client)>),
+    /// WebTransport over HTTP/3 用の tobi-webtransport クライアント
+    WtH3(Vec<(bool, tobi_webtransport::client::Client)>),
+    /// UDP を使わない経路 (WebTransport over HTTP/2 / QMux)
+    None,
 }
 
 /// 接続先 1 件分の状態
 ///
-/// s2n-quic の `Client` は UDP ソケットとエンドポイントタスクを表す。UDP ソケットは異なる
-/// アドレスファミリ宛に送信できないため、名前解決の結果に含まれるファミリごとに
-/// クライアントを作る。名前解決結果と SNI は接続先ごとに異なるため、接続先ごとに保持する。
+/// 名前解決結果と SNI は接続先ごとに異なるため、接続先ごとに保持する。QUIC の
+/// クライアント (UDP ソケットとエンドポイントタスク) はインスタンス内の仮想
+/// クライアントで共有する。
 struct EndpointState {
-    /// アドレスファミリごとの s2n-quic クライアント (bool は IPv6 かどうか)
-    clients: Vec<(bool, Client)>,
+    /// 経路ごとのクライアント
+    clients: EndpointClients,
     /// TLS の SNI に使うサーバー名
     server_name: String,
     /// 名前解決の結果
@@ -295,63 +270,6 @@ struct EndpointState {
 }
 
 impl EndpointState {
-    /// 各候補のアドレスファミリに合う UDP ソケットで ngtcp2 接続を試す
-    ///
-    /// すべての候補が失敗した場合は最後の接続エラーを返す。
-    async fn connect_ngtcp2(
-        &self,
-        config: &shiguredo_ngtcp2_tokio::ClientConfig,
-        webtransport: Option<&MoqEndpoint>,
-    ) -> Result<ngtcp2::Connection> {
-        let mut last_error = None;
-        let last_index = self.addrs.len().saturating_sub(1);
-        for (index, addr) in self.addrs.iter().enumerate() {
-            let timeout = if index == last_index {
-                CONNECT_FINAL_ATTEMPT_TIMEOUT
-            } else {
-                CONNECT_ATTEMPT_TIMEOUT
-            };
-            let local = if addr.is_ipv6() {
-                "[::]:0"
-            } else {
-                "0.0.0.0:0"
-            }
-            .parse()
-            .expect("logical invariant: local bind address is valid");
-            let connect = async {
-                if let Some(endpoint) = webtransport {
-                    ngtcp2::webtransport::connect(
-                        *addr,
-                        local,
-                        &self.server_name,
-                        config,
-                        &endpoint.authority,
-                        &endpoint.path,
-                    )
-                    .await
-                } else {
-                    ngtcp2::connect(*addr, local, &self.server_name, config).await
-                }
-            };
-            match tokio::time::timeout(timeout, connect).await {
-                Ok(Ok(connection)) => return Ok(connection),
-                Ok(Err(e)) => {
-                    last_error = Some(ErrorMessage::new(format!(
-                        "MOQ relay への ngtcp2 接続に失敗しました ({addr}): {e}"
-                    )))
-                }
-                Err(_) => {
-                    last_error = Some(ErrorMessage::new(format!(
-                        "MOQ relay への ngtcp2 接続がタイムアウトしました ({addr})"
-                    )))
-                }
-            }
-        }
-        Err(last_error
-            .unwrap_or_else(|| ErrorMessage::new("MOQ relay への接続先がありません"))
-            .into())
-    }
-
     /// この接続先へ QUIC 接続を確立する
     ///
     /// 名前解決で複数のアドレスが得られた場合は順に試す。全て失敗した場合は最後のエラーを返す。
@@ -359,14 +277,16 @@ impl EndpointState {
     /// # Errors
     ///
     /// 全ての接続先への接続に失敗した場合はエラーになる。
-    async fn connect_quic(&self) -> Result<Connection> {
+    async fn connect_quic(&self) -> Result<tobi_quic::Connection> {
+        let EndpointClients::Quic(clients) = &self.clients else {
+            return Err(ErrorMessage::new("QUIC クライアントが構築されていません").into());
+        };
         let mut last_error: Option<ErrorMessage> = None;
         let last_index = self.addrs.len().saturating_sub(1);
         for (index, addr) in self.addrs.iter().enumerate() {
             // 接続先のアドレスファミリに合うソケットを選ぶ
             // (IPv4 ソケットから IPv6 宛には送信できないため)
-            let Some((_, client)) = self
-                .clients
+            let Some((_, client)) = clients
                 .iter()
                 .find(|(is_ipv6, _)| *is_ipv6 == addr.is_ipv6())
             else {
@@ -377,18 +297,78 @@ impl EndpointState {
             } else {
                 CONNECT_ATTEMPT_TIMEOUT
             };
-            let connect = Connect::new(*addr).with_server_name(self.server_name.clone());
-            match tokio::time::timeout(timeout, client.connect(connect)).await {
+            match tokio::time::timeout(timeout, quic::connect(client, *addr, &self.server_name))
+                .await
+            {
                 Ok(Ok(connection)) => return Ok(connection),
                 Ok(Err(e)) => {
                     last_error = Some(ErrorMessage::new(format!(
                         "MOQ relay への接続に失敗しました ({addr}): {e}"
-                    )));
+                    )))
                 }
                 Err(_) => {
                     last_error = Some(ErrorMessage::new(format!(
                         "MOQ relay への接続がタイムアウトしました ({addr})"
-                    )));
+                    )))
+                }
+            }
+        }
+        Err(last_error
+            .unwrap_or_else(|| ErrorMessage::new("MOQ relay への接続先がありません"))
+            .into())
+    }
+
+    /// この接続先へ WebTransport over HTTP/3 接続を確立する
+    ///
+    /// QUIC 直接接続と同様に、名前解決で複数のアドレスが得られた場合は順に試し、
+    /// 候補ごとにタイムアウトで打ち切る。
+    ///
+    /// # Errors
+    ///
+    /// 全ての接続先への QUIC + HTTP/3 + WebTransport 接続に失敗した場合はエラーになる。
+    async fn connect_wt_h3(&self, endpoint: &MoqEndpoint) -> Result<wt_h3::Connection> {
+        let EndpointClients::WtH3(clients) = &self.clients else {
+            return Err(ErrorMessage::new(
+                "WebTransport over HTTP/3 のクライアントが構築されていません",
+            )
+            .into());
+        };
+        let mut last_error: Option<ErrorMessage> = None;
+        let last_index = self.addrs.len().saturating_sub(1);
+        for (index, addr) in self.addrs.iter().enumerate() {
+            let Some((_, client)) = clients
+                .iter()
+                .find(|(is_ipv6, _)| *is_ipv6 == addr.is_ipv6())
+            else {
+                continue;
+            };
+            let timeout = if index == last_index {
+                CONNECT_FINAL_ATTEMPT_TIMEOUT
+            } else {
+                CONNECT_ATTEMPT_TIMEOUT
+            };
+            match tokio::time::timeout(
+                timeout,
+                wt_h3::connect(
+                    client,
+                    *addr,
+                    &self.server_name,
+                    &endpoint.authority,
+                    &endpoint.path,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(connection)) => return Ok(connection),
+                Ok(Err(e)) => {
+                    last_error = Some(ErrorMessage::new(format!(
+                        "MOQ relay への WebTransport over HTTP/3 接続に失敗しました ({addr}): {e}"
+                    )))
+                }
+                Err(_) => {
+                    last_error = Some(ErrorMessage::new(format!(
+                        "MOQ relay への WebTransport over HTTP/3 接続がタイムアウトしました ({addr})"
+                    )))
                 }
             }
         }
@@ -426,12 +406,12 @@ impl EndpointState {
                 Ok(Err(e)) => {
                     last_error = Some(ErrorMessage::new(format!(
                         "MOQ relay への QMux 接続に失敗しました ({addr}): {e}"
-                    )));
+                    )))
                 }
                 Err(_) => {
                     last_error = Some(ErrorMessage::new(format!(
                         "MOQ relay への QMux 接続がタイムアウトしました ({addr})"
-                    )));
+                    )))
                 }
             }
         }
@@ -475,12 +455,12 @@ impl EndpointState {
                 Ok(Err(e)) => {
                     last_error = Some(ErrorMessage::new(format!(
                         "MOQ relay への WebTransport over HTTP/2 接続に失敗しました ({addr}): {e}"
-                    )));
+                    )))
                 }
                 Err(_) => {
                     last_error = Some(ErrorMessage::new(format!(
                         "MOQ relay への WebTransport over HTTP/2 接続がタイムアウトしました ({addr})"
-                    )));
+                    )))
                 }
             }
         }
@@ -519,21 +499,21 @@ impl EndpointKey {
 
 /// インスタンス内の仮想クライアントで共有する接続コンテキスト
 ///
-/// QUIC 直接接続では s2n-quic の `Client` (UDP ソケットとエンドポイントタスク) を接続先ごとに
-/// 共有する。仮想クライアントごとに作るとソケットとタスクが仮想クライアント数だけ増えるため、
-/// インスタンスで 1 つ作って clone する。QMux と WebTransport over HTTP/2 では TCP + TLS 接続を
-/// 仮想クライアントごとに張るため、ここで共有するのは TLS 設定と接続先ごとの名前解決結果だけである。
-/// ngtcp2 も接続ごとに UDP ソケットと駆動タスクを作り、接続設定と名前解決結果を共有する。
+/// QUIC 直接接続と WebTransport over HTTP/3 では tobi-quic の `Client` (UDP ソケットと
+/// エンドポイントタスク) を接続先ごとに共有する。仮想クライアントごとに作るとソケットと
+/// タスクが仮想クライアント数だけ増えるため、インスタンスで 1 つ作って clone する。
+/// QMux と WebTransport over HTTP/2 では TCP + TLS 接続を仮想クライアントごとに張るため、
+/// ここで共有するのは TLS 設定と接続先ごとの名前解決結果だけである。
 /// GOAWAY の New Session URI で移行先が変わると接続先が増えるため、接続先ごとの状態を
 /// キャッシュして仮想クライアント間で共有する。
 #[derive(Clone)]
 pub(crate) struct MoqClientContext {
     /// 下位トランスポート種別 (インスタンス内で固定)
     transport: MoqTransport,
-    /// QUIC 直接接続の TLS クライアント (移行先が増えても作り直さない)
-    quic_tls: Option<s2n_rustls::Client>,
-    /// ngtcp2 の接続設定 (接続ごとの UDP ソケットは共有しない)
-    ngtcp2_config: Option<shiguredo_ngtcp2_tokio::ClientConfig>,
+    /// QUIC と WebTransport over HTTP/3 の TLS 設定 (移行先が増えても作り直さない)
+    ///
+    /// ALPN は経路ごとに異なるため、経路のクライアントを構築するときに設定する。
+    quic_tls: Option<Arc<rustls::ClientConfig>>,
     /// QMux の TLS 設定 (TCP + TLS のハンドシェイクに使う)
     ///
     /// rustls の `ClientConfig` は接続ごとに clone せず `Arc` で共有できる。
@@ -560,42 +540,21 @@ impl MoqClientContext {
         endpoint: &MoqEndpoint,
         tls_options: &MoqTlsOptions,
         transport: MoqTransport,
-        quic_backend: QuicBackend,
     ) -> Result<Self> {
-        let (quic_tls, ngtcp2_config, qmux_tls, wt_h2_tls) = match (transport, quic_backend) {
-            (MoqTransport::Quic, QuicBackend::S2nQuic) => {
-                (Some(build_quic_tls(tls_options)?), None, None, None)
+        let (quic_tls, qmux_tls, wt_h2_tls) = match transport {
+            MoqTransport::Quic | MoqTransport::WtH3 => {
+                (Some(build_quic_tls(tls_options)?), None, None)
             }
-            (MoqTransport::Quic, QuicBackend::Ngtcp2) => {
-                (None, Some(ngtcp2::build_config(tls_options)?), None, None)
-            }
-            (MoqTransport::WtH3, QuicBackend::Ngtcp2) => (
-                None,
-                Some(ngtcp2::webtransport::build_config(tls_options)?),
-                None,
-                None,
-            ),
-            // WebTransport over HTTP/3 のデータストリーム reset は RESET_STREAM_AT を
-            // 前提とするため (draft-ietf-webtrans-http3-16 §4.4)、これを送出できない
-            // s2n-quic との組み合わせは受け付けない。
-            (MoqTransport::WtH3, QuicBackend::S2nQuic) => {
-                return Err(ErrorMessage::new(
-                    "wt-h3 は ngtcp2 バックエンドで利用してください (s2n-quic は RESET_STREAM_AT に対応していないため)",
-                )
-                .into());
-            }
-            // WebTransport over HTTP/2 は TCP + TLS 上で動くため QUIC 実装を使わない。
-            // `--quic-backend` の指定は args.rs で拒否する。
-            (MoqTransport::WtH2, _) => (None, None, None, Some(build_wt_h2_tls(tls_options)?)),
-            (MoqTransport::Qmux, _) => (None, None, Some(build_qmux_tls(tls_options)?), None),
+            // WebTransport over HTTP/2 は TCP + TLS 上で動くため QUIC 実装を使わない
+            MoqTransport::WtH2 => (None, None, Some(build_wt_h2_tls(tls_options)?)),
+            MoqTransport::Qmux => (None, Some(build_qmux_tls(tls_options)?), None),
         };
-        let state = build_endpoint_state(endpoint, quic_tls.as_ref()).await?;
+        let state = build_endpoint_state(endpoint, transport, quic_tls.as_ref()).await?;
         let mut endpoints = HashMap::new();
         endpoints.insert(EndpointKey::new(endpoint), Arc::new(state));
         Ok(Self {
             transport,
             quic_tls,
-            ngtcp2_config,
             qmux_tls,
             wt_h2_tls,
             endpoints: Arc::new(tokio::sync::Mutex::new(endpoints)),
@@ -627,7 +586,9 @@ impl MoqClientContext {
                 // クライアントが同時に接続した場合は、先に登録された状態を使い、余分に
                 // 作った状態は drop する (UDP ソケットも閉じる)。名前解決の失敗でロック待ちが
                 // 連鎖しないことを優先する
-                let built = Arc::new(build_endpoint_state(endpoint, self.quic_tls.as_ref()).await?);
+                let built = Arc::new(
+                    build_endpoint_state(endpoint, self.transport, self.quic_tls.as_ref()).await?,
+                );
                 self.endpoints
                     .lock()
                     .await
@@ -637,24 +598,8 @@ impl MoqClientContext {
             }
         };
         match self.transport {
-            MoqTransport::Quic => {
-                if let Some(config) = &self.ngtcp2_config {
-                    Ok(MoqConnection::Ngtcp2(
-                        state.connect_ngtcp2(config, None).await?,
-                    ))
-                } else {
-                    Ok(MoqConnection::Quic(state.connect_quic().await?))
-                }
-            }
-            MoqTransport::WtH3 => {
-                let config = self
-                    .ngtcp2_config
-                    .as_ref()
-                    .expect("WT 経路には ngtcp2 設定があること");
-                Ok(MoqConnection::WebTransport(
-                    state.connect_ngtcp2(config, Some(endpoint)).await?,
-                ))
-            }
+            MoqTransport::Quic => Ok(MoqConnection::Quic(state.connect_quic().await?)),
+            MoqTransport::WtH3 => Ok(MoqConnection::WtH3(state.connect_wt_h3(endpoint).await?)),
             MoqTransport::WtH2 => {
                 let tls = self
                     .wt_h2_tls
@@ -680,11 +625,9 @@ impl MoqClientContext {
 /// `session.rs` は経路を意識せずにこの型を分割し、ストリームの送受信と接続の終了を行う。
 pub(crate) enum MoqConnection {
     /// QUIC 直接接続
-    Quic(Connection),
-    /// ngtcp2 による QUIC 直接接続
-    Ngtcp2(ngtcp2::Connection),
-    /// ngtcp2 による WebTransport over HTTP/3 接続
-    WebTransport(ngtcp2::Connection),
+    Quic(tobi_quic::Connection),
+    /// WebTransport over HTTP/3 接続
+    WtH3(wt_h3::Connection),
     /// WebTransport over HTTP/2 接続
     WtH2(wt_h2::Connection),
     /// QMux 接続
@@ -695,8 +638,8 @@ impl MoqConnection {
     /// この接続のトランスポート種別を返す
     pub(crate) fn transport(&self) -> MoqTransport {
         match self {
-            Self::Quic(_) | Self::Ngtcp2(_) => MoqTransport::Quic,
-            Self::WebTransport(_) => MoqTransport::WtH3,
+            Self::Quic(_) => MoqTransport::Quic,
+            Self::WtH3(_) => MoqTransport::WtH3,
             Self::WtH2(_) => MoqTransport::WtH2,
             Self::Qmux(_) => MoqTransport::Qmux,
         }
@@ -713,28 +656,24 @@ impl MoqConnection {
     ) {
         match self {
             Self::Quic(connection) => {
-                let (handle, acceptor) = connection.split();
-                let (bidi, recv) = acceptor.split();
+                // 単方向と双方向で acceptor を分ける。`split` は呼ぶたびに新しい
+                // `StreamAcceptor` を作るため、2 回呼んで 1 つずつ使う
+                let (handle, recv_acceptor) = connection.split();
+                let (_, bidi_acceptor) = connection.split();
                 (
-                    MoqConnectionHandle::Quic(handle.clone()),
-                    MoqRecvAcceptor::Quic(recv),
-                    MoqBidiAcceptor::Quic(bidi),
-                    MoqDatagramReceiver::Quic(handle),
+                    MoqConnectionHandle::Quic(handle),
+                    MoqRecvAcceptor::Quic(recv_acceptor),
+                    MoqBidiAcceptor::Quic(bidi_acceptor),
+                    MoqDatagramReceiver::Quic(connection),
                 )
             }
-            Self::Qmux(connection) => (
-                MoqConnectionHandle::Qmux(Arc::clone(&connection)),
-                MoqRecvAcceptor::Qmux(Arc::clone(&connection)),
-                MoqBidiAcceptor::Qmux(Arc::clone(&connection)),
-                MoqDatagramReceiver::Qmux(connection),
-            ),
-            Self::Ngtcp2(connection) | Self::WebTransport(connection) => {
+            Self::WtH3(connection) => {
                 let (handle, recv, bidi, datagram) = connection.split();
                 (
-                    MoqConnectionHandle::Ngtcp2(handle),
-                    MoqRecvAcceptor::Ngtcp2(recv),
-                    MoqBidiAcceptor::Ngtcp2(bidi),
-                    MoqDatagramReceiver::Ngtcp2(datagram),
+                    MoqConnectionHandle::WtH3(handle),
+                    MoqRecvAcceptor::WtH3(recv),
+                    MoqBidiAcceptor::WtH3(bidi),
+                    MoqDatagramReceiver::WtH3(datagram),
                 )
             }
             Self::WtH2(connection) => {
@@ -746,32 +685,55 @@ impl MoqConnection {
                     MoqDatagramReceiver::WtH2(datagram),
                 )
             }
+            Self::Qmux(connection) => (
+                MoqConnectionHandle::Qmux(Arc::clone(&connection)),
+                MoqRecvAcceptor::Qmux(Arc::clone(&connection)),
+                MoqBidiAcceptor::Qmux(Arc::clone(&connection)),
+                MoqDatagramReceiver::Qmux(connection),
+            ),
         }
     }
 }
 
-/// 接続先の名前解決と QUIC クライアントの構築を行う
+/// 接続先の名前解決と経路ごとのクライアントの構築を行う
 ///
-/// QMux / ngtcp2 / WebTransport over HTTP/2 経路では共有 UDP ソケットを使わないため
-/// `tls` に `None` を渡し、`clients` を空にする。
+/// WebTransport over HTTP/2 と QMux は UDP を使わないため `tls` に `None` を渡し、
+/// クライアントを作らない。
 ///
 /// # Errors
 ///
 /// 名前解決に失敗した場合、またはソケットのバインドに失敗した場合はエラーになる。
 async fn build_endpoint_state(
     endpoint: &MoqEndpoint,
-    tls: Option<&s2n_rustls::Client>,
+    transport: MoqTransport,
+    tls: Option<&Arc<rustls::ClientConfig>>,
 ) -> Result<EndpointState> {
     let addrs = resolve(&endpoint.host, endpoint.port).await?;
-    let mut clients = Vec::new();
-    if let Some(tls) = tls {
-        for is_ipv6 in [false, true] {
-            if !addrs.iter().any(|addr| addr.is_ipv6() == is_ipv6) {
-                continue;
+    let clients = match transport {
+        MoqTransport::Quic => {
+            let tls = tls.expect("logical invariant: QUIC transport always has a TLS config");
+            let mut clients = Vec::new();
+            for is_ipv6 in [false, true] {
+                if !addrs.iter().any(|addr| addr.is_ipv6() == is_ipv6) {
+                    continue;
+                }
+                clients.push((is_ipv6, quic::build_client(tls, is_ipv6)?));
             }
-            clients.push((is_ipv6, build_client(tls, is_ipv6)?));
+            EndpointClients::Quic(clients)
         }
-    }
+        MoqTransport::WtH3 => {
+            let tls = tls.expect("logical invariant: wt-h3 transport always has a TLS config");
+            let mut clients = Vec::new();
+            for is_ipv6 in [false, true] {
+                if !addrs.iter().any(|addr| addr.is_ipv6() == is_ipv6) {
+                    continue;
+                }
+                clients.push((is_ipv6, wt_h3::build_client(Arc::clone(tls), is_ipv6)?));
+            }
+            EndpointClients::WtH3(clients)
+        }
+        MoqTransport::WtH2 | MoqTransport::Qmux => EndpointClients::None,
+    };
     Ok(EndpointState {
         clients,
         server_name: endpoint.host.clone(),
@@ -808,43 +770,6 @@ async fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
         .into());
     }
     Ok(addrs)
-}
-
-/// 指定したアドレスファミリ用の s2n-quic クライアントを構築する
-///
-/// # Errors
-///
-/// TLS 設定、UDP ソケットの作成、limits の設定、クライアントの起動に失敗した場合は
-/// エラーになる。
-fn build_client(tls: &s2n_rustls::Client, is_ipv6: bool) -> Result<Client> {
-    // s2n-quic の datagram endpoint は送受信のキューの容量が既定でどちらも 0 である。
-    // 送信容量が 0 のままだと `poll_send_datagram` が空きを待ち続けて datagram を 1 つも
-    // 送れないため、送信にも容量を設定する
-    let datagram_endpoint = s2n_quic::provider::datagram::default::Endpoint::builder()
-        .with_send_capacity(64)
-        .map_err(|e| ErrorMessage::new(format!("datagram endpoint の構築に失敗しました: {e}")))?
-        .with_recv_capacity(64)
-        .map_err(|e| ErrorMessage::new(format!("datagram endpoint の構築に失敗しました: {e}")))?
-        .build()
-        .expect("datagram endpoint must build after capacities are set");
-
-    let client = Client::builder()
-        .with_tls(tls.clone())
-        .map_err(|e| ErrorMessage::new(format!("TLS 設定に失敗しました: {e}")))?
-        .with_io(local_bind_addr(is_ipv6))
-        .map_err(|e| ErrorMessage::new(format!("UDP ソケットの作成に失敗しました: {e}")))?
-        .with_datagram(datagram_endpoint)
-        .map_err(|e| ErrorMessage::new(format!("datagram provider の設定に失敗しました: {e}")))?
-        .with_limits(build_limits()?)
-        .map_err(|e| ErrorMessage::new(format!("limits provider の設定に失敗しました: {e}")))?
-        .start()
-        .map_err(|e| ErrorMessage::new(format!("QUIC クライアントの起動に失敗しました: {e}")))?;
-    Ok(client)
-}
-
-/// アドレスファミリに合わせたローカルバインドアドレスを返す
-fn local_bind_addr(is_ipv6: bool) -> &'static str {
-    if is_ipv6 { "[::]:0" } else { "0.0.0.0:0" }
 }
 
 /// rustls のクライアント設定を構築する (ALPN は呼び出し側が設定する)
@@ -921,15 +846,15 @@ fn build_root_store(options: &MoqTlsOptions) -> Result<rustls::RootCertStore> {
     Ok(roots)
 }
 
-/// QUIC 直接接続用の TLS クライアントを構築する
+/// QUIC と WebTransport over HTTP/3 の TLS 設定を構築する
+///
+/// ALPN は経路ごとに異なる (`moqt-22` と `h3`) ため、ここでは設定しない。
 ///
 /// # Errors
 ///
 /// TLS 設定の構築に失敗した場合はエラーになる。
-fn build_quic_tls(options: &MoqTlsOptions) -> Result<s2n_rustls::Client> {
-    let mut config = build_rustls_config(options)?;
-    config.alpn_protocols = vec![ALPN.to_vec()];
-    Ok(s2n_rustls::Client::from(config))
+fn build_quic_tls(options: &MoqTlsOptions) -> Result<Arc<rustls::ClientConfig>> {
+    Ok(Arc::new(build_rustls_config(options)?))
 }
 
 /// QMux 用の TLS 設定を構築する
@@ -996,37 +921,6 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
             .signature_verification_algorithms
             .supported_schemes()
     }
-}
-
-/// QUIC の接続 limits を構築する
-///
-/// 既定値 (remote uni stream 100 本) のままだと、relay が開けるストリームの累積上限に
-/// 達して購読が止まる。負荷試験では購読側の本数も増えるため余裕を持たせる。
-///
-/// # Errors
-///
-/// いずれかの limits 値が s2n-quic の許容範囲外の場合はエラーになる。
-fn build_limits() -> Result<s2n_quic::provider::limits::Limits> {
-    let limits = s2n_quic::provider::limits::Limits::new()
-        .with_max_open_remote_unidirectional_streams(10_000)
-        .map_err(|e| {
-            ErrorMessage::new(format!("remote uni stream limit の設定に失敗しました: {e}"))
-        })?
-        .with_max_open_remote_bidirectional_streams(1_000)
-        .map_err(|e| {
-            ErrorMessage::new(format!(
-                "remote bidi stream limit の設定に失敗しました: {e}"
-            ))
-        })?
-        .with_data_window(64 * 1024 * 1024)
-        .map_err(|e| ErrorMessage::new(format!("data window の設定に失敗しました: {e}")))?
-        .with_unidirectional_data_window(16 * 1024 * 1024)
-        .map_err(|e| ErrorMessage::new(format!("uni stream window の設定に失敗しました: {e}")))?
-        .with_bidirectional_local_data_window(16 * 1024 * 1024)
-        .map_err(|e| ErrorMessage::new(format!("bidi local window の設定に失敗しました: {e}")))?
-        .with_bidirectional_remote_data_window(16 * 1024 * 1024)
-        .map_err(|e| ErrorMessage::new(format!("bidi remote window の設定に失敗しました: {e}")))?;
-    Ok(limits)
 }
 
 #[cfg(test)]
@@ -1134,13 +1028,6 @@ mod tests {
                 "受理してはならない: {value:?}"
             );
         }
-    }
-
-    /// 接続先のアドレスファミリに合わせてローカルアドレスを選ぶこと
-    #[test]
-    fn local_bind_addr_matches_address_family() {
-        assert_eq!(local_bind_addr(false), "0.0.0.0:0");
-        assert_eq!(local_bind_addr(true), "[::]:0");
     }
 
     /// クエリのみの URL はパスを `/` で補うこと
@@ -1255,6 +1142,16 @@ mod tests {
         assert_eq!(tls.alpn_protocols, vec![b"moqt-22".to_vec()]);
     }
 
+    /// QUIC の TLS 設定には ALPN を載せないこと
+    ///
+    /// QUIC 直接接続は `moqt-22`、WebTransport over HTTP/3 は `h3` と経路で ALPN が
+    /// 異なるため、共有する TLS 設定には載せず、クライアント構築時に設定する。
+    #[test]
+    fn quic_tls_does_not_set_alpn() {
+        let tls = build_quic_tls(&MoqTlsOptions::default()).expect("TLS 設定の構築に成功すること");
+        assert!(tls.alpn_protocols.is_empty());
+    }
+
     /// 存在しない `--ca-cert` はエラーになること
     #[test]
     fn ca_cert_missing_file_is_error() {
@@ -1268,19 +1165,15 @@ mod tests {
     /// QMux の接続コンテキストが QUIC の UDP ソケットを作らないこと
     ///
     /// QMux は仮想クライアントごとに TCP を張るため、QUIC の `EndpointState` に
-    /// s2n-quic のクライアントを持たせてはならない。
+    /// tobi-quic のクライアントを持たせてはならない。
     #[tokio::test]
     async fn qmux_context_does_not_build_quic_clients() {
         let endpoint =
             MoqEndpoint::parse("moqt://127.0.0.1:4433/").expect("接続先の解釈に成功すること");
-        let context = MoqClientContext::new(
-            &endpoint,
-            &MoqTlsOptions::default(),
-            MoqTransport::Qmux,
-            QuicBackend::default(),
-        )
-        .await
-        .expect("コンテキストの構築に成功すること");
+        let context =
+            MoqClientContext::new(&endpoint, &MoqTlsOptions::default(), MoqTransport::Qmux)
+                .await
+                .expect("コンテキストの構築に成功すること");
         assert!(context.quic_tls.is_none());
         assert!(context.qmux_tls.is_some());
         let endpoints = context.endpoints.lock().await;
@@ -1289,7 +1182,7 @@ mod tests {
             .next()
             .expect("接続先が登録されていること");
         assert!(
-            state.clients.is_empty(),
+            matches!(state.clients, EndpointClients::None),
             "QMux では QUIC クライアントを作らないこと"
         );
     }
@@ -1312,16 +1205,11 @@ mod tests {
     async fn wt_h2_context_does_not_build_quic_clients() {
         let endpoint =
             MoqEndpoint::parse("moqt://127.0.0.1:4433/").expect("接続先の解釈に成功すること");
-        let context = MoqClientContext::new(
-            &endpoint,
-            &MoqTlsOptions::default(),
-            MoqTransport::WtH2,
-            QuicBackend::default(),
-        )
-        .await
-        .expect("コンテキストの構築に成功すること");
+        let context =
+            MoqClientContext::new(&endpoint, &MoqTlsOptions::default(), MoqTransport::WtH2)
+                .await
+                .expect("コンテキストの構築に成功すること");
         assert!(context.quic_tls.is_none());
-        assert!(context.ngtcp2_config.is_none());
         assert!(context.qmux_tls.is_none());
         assert!(context.wt_h2_tls.is_some());
         let endpoints = context.endpoints.lock().await;
@@ -1330,34 +1218,52 @@ mod tests {
             .next()
             .expect("接続先が登録されていること");
         assert!(
-            state.clients.is_empty(),
+            matches!(state.clients, EndpointClients::None),
             "WebTransport over HTTP/2 では QUIC クライアントを作らないこと"
         );
     }
 
-    /// wt-h3 と s2n-quic の組み合わせが接続の確立前に拒否されること
+    /// QUIC の接続コンテキストがアドレスファミリごとのクライアントを作ること
     ///
-    /// WebTransport over HTTP/3 はデータストリーム reset に RESET_STREAM_AT を MUST とし
-    /// (draft-ietf-webtrans-http3-16 §4.4)、s2n-quic はこれを送出できない。この制約は
-    /// 名前解決やソケット作成より前に判定し、理由をエラーメッセージに載せる。
+    /// 名前解決の結果に IPv6 が含まれなければ IPv4 用の 1 つだけを作る。UDP ソケットの
+    /// バインドまで含めて確認するため、loopback の実アドレスを使う。
     #[tokio::test]
-    async fn webtransport_rejects_s2n_quic() {
+    async fn quic_context_builds_client_per_address_family() {
         let endpoint =
             MoqEndpoint::parse("moqt://127.0.0.1:4433/").expect("接続先の解釈に成功すること");
-        let Err(error) = MoqClientContext::new(
-            &endpoint,
-            &MoqTlsOptions::default(),
-            MoqTransport::WtH3,
-            QuicBackend::S2nQuic,
-        )
-        .await
-        else {
-            panic!("s2n-quic との組み合わせを拒否すること");
+        let context =
+            MoqClientContext::new(&endpoint, &MoqTlsOptions::default(), MoqTransport::Quic)
+                .await
+                .expect("コンテキストの構築に成功すること");
+        let endpoints = context.endpoints.lock().await;
+        let state = endpoints
+            .values()
+            .next()
+            .expect("接続先が登録されていること");
+        let EndpointClients::Quic(clients) = &state.clients else {
+            panic!("QUIC のクライアントが構築されること");
         };
-        let message = format!("{error}");
-        assert!(
-            message.contains("RESET_STREAM_AT"),
-            "RESET_STREAM_AT に対応していないことが分かること: {message}"
-        );
+        assert_eq!(clients.len(), 1, "IPv4 のクライアントだけを作ること");
+        assert!(!clients[0].0, "IPv4 用のクライアントであること");
+    }
+
+    /// WebTransport over HTTP/3 の接続コンテキストがクライアントを作ること
+    #[tokio::test]
+    async fn wt_h3_context_builds_client_per_address_family() {
+        let endpoint =
+            MoqEndpoint::parse("moqt://127.0.0.1:4433/").expect("接続先の解釈に成功すること");
+        let context =
+            MoqClientContext::new(&endpoint, &MoqTlsOptions::default(), MoqTransport::WtH3)
+                .await
+                .expect("コンテキストの構築に成功すること");
+        let endpoints = context.endpoints.lock().await;
+        let state = endpoints
+            .values()
+            .next()
+            .expect("接続先が登録されていること");
+        let EndpointClients::WtH3(clients) = &state.clients else {
+            panic!("WebTransport over HTTP/3 のクライアントが構築されること");
+        };
+        assert_eq!(clients.len(), 1, "IPv4 のクライアントだけを作ること");
     }
 }

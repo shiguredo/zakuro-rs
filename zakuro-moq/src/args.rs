@@ -6,7 +6,6 @@ use nojson::{JsonValueKind, RawJson, RawJsonValue};
 use crate::error::{ErrorMessage, Result};
 use crate::logging::LogLevel;
 use crate::moq_client::MoqTransport;
-use crate::moq_client::transport::QuicBackend;
 
 /// `--tracks` で object レートを省略したときの既定値 (objects/sec)
 const DEFAULT_OBJECT_RATE: f64 = 30.0;
@@ -34,19 +33,6 @@ const DATAGRAM_MAX_SIZE_RANGE: std::ops::RangeInclusive<usize> = 1..=65535;
 /// LOC の Timestamp / Timescale プロパティ (最大 15 バイト) を保守的に見積もる。
 /// 起動時に object サイズが datagram に収まるかを判定するために使う。
 const DATAGRAM_HEADER_MAX_SIZE: usize = 48;
-
-/// ngtcp2 の `DatagramConfig` が既定で許可する DATAGRAM の最大サイズ (バイト)
-///
-/// `shiguredo_ngtcp2_tokio::DatagramConfig::default().max_tx_datagram_size` は
-/// 1 パケットに収まる 1200 バイトである。これを超える datagram は送信時にエラーになるため、
-/// 起動時に判定する。
-const NGTCP2_DATAGRAM_MAX_SIZE: usize = 1200;
-
-/// WebTransport over HTTP/3 の HTTP Datagram が付ける Quarter Stream ID の最大バイト数
-///
-/// RFC 9297 §2.1 の Quarter Stream ID は varint であり、WebTransport のセッション ID が
-/// 小さい間は 1 バイトである。保守的に 1 バイトを見積もる。
-const WT_H3_DATAGRAM_OVERHEAD: usize = 1;
 
 /// `--tracks` を省略したときのトラック名
 const DEFAULT_TRACK_NAME: &str = "video";
@@ -157,8 +143,6 @@ pub(crate) struct InstanceArgs {
     pub(crate) url: String,
     /// 下位トランスポート種別 (QUIC / WebTransport over HTTP/3 / QMux)
     pub(crate) transport: MoqTransport,
-    /// QUIC 直接接続で利用する実装
-    pub(crate) quic_backend: QuicBackend,
     /// Track Namespace
     pub(crate) namespace: String,
     /// publish するトラック (1 仮想クライアントが全トラックを publish する)
@@ -449,33 +433,6 @@ fn parse_instance_args(
         .present_and_then(|o| MoqTransport::parse(o.value()))?
         .unwrap_or_default();
 
-    let quic_backend = noargs::opt("quic-backend")
-        .doc("QUIC backend (s2n-quic | ngtcp2, default: s2n-quic for quic, ngtcp2 for wt-h3)")
-        .take(&mut args)
-        .present_and_then(|o| QuicBackend::parse(o.value()))?;
-    // QUIC を使わない経路 (QMux は TLS over TCP、WebTransport over HTTP/2 は TCP 上の
-    // HTTP/2) では --quic-backend を解釈しない。指定された場合は取り違えを防ぐためエラーにする。
-    if matches!(transport, MoqTransport::Qmux | MoqTransport::WtH2) && quic_backend.is_some() {
-        return Err(
-            ErrorMessage::new("--quic-backend は quic または wt-h3 で指定してください").into(),
-        );
-    }
-    // WebTransport over HTTP/3 は、データストリームの reset で WebTransport のストリーム
-    // ヘッダを失わないよう RESET_STREAM_AT の使用を MUST としている
-    // (draft-ietf-webtrans-http3-16 §4.4)。s2n-quic は RESET_STREAM_AT を送出できないため、
-    // wt-h3 は ngtcp2 のみを許可し、バックエンドを省略した場合も ngtcp2 を既定にする。
-    let quic_backend = quic_backend.unwrap_or(if transport == MoqTransport::WtH3 {
-        QuicBackend::Ngtcp2
-    } else {
-        QuicBackend::S2nQuic
-    });
-    if transport == MoqTransport::WtH3 && quic_backend != QuicBackend::Ngtcp2 {
-        return Err(ErrorMessage::new(
-            "wt-h3 は ngtcp2 バックエンドで利用してください (s2n-quic は RESET_STREAM_AT に対応していないため)",
-        )
-        .into());
-    }
-
     let namespace: String = noargs::opt("namespace")
         .doc("Track Namespace (default: zakuro)")
         .take(&mut args)
@@ -560,7 +517,6 @@ fn parse_instance_args(
     let instance = validate_instance_args(
         &url,
         transport,
-        quic_backend,
         &namespace,
         tracks_arg.as_deref(),
         datagram_max_size,
@@ -583,7 +539,6 @@ fn parse_instance_args(
 fn validate_instance_args(
     url: &str,
     transport: MoqTransport,
-    quic_backend: QuicBackend,
     namespace: &str,
     tracks_arg: Option<&str>,
     datagram_max_size: usize,
@@ -652,28 +607,6 @@ fn validate_instance_args(
         }
     }
 
-    // ngtcp2 の DatagramConfig は送信できる DATAGRAM を 1 パケット分 (1200 バイト) に
-    // 制限している。WebTransport over HTTP/3 は HTTP Datagram の Quarter Stream ID
-    // (1 バイト以上) を足すため、MOQT の datagram はさらに小さくする必要がある
-    if tracks
-        .iter()
-        .any(|track| track.delivery == DeliveryMode::Datagram)
-    {
-        let ngtcp2_limit = match (transport, quic_backend) {
-            (MoqTransport::Quic, QuicBackend::Ngtcp2) => Some(NGTCP2_DATAGRAM_MAX_SIZE),
-            (MoqTransport::WtH3, _) => Some(NGTCP2_DATAGRAM_MAX_SIZE - WT_H3_DATAGRAM_OVERHEAD),
-            _ => None,
-        };
-        if let Some(limit) = ngtcp2_limit
-            && datagram_max_size > limit
-        {
-            return Err(ErrorMessage::new(format!(
-                "ngtcp2 経由の datagram は {limit} バイトまでです: --datagram-max-size={datagram_max_size}"
-            ))
-            .into());
-        }
-    }
-
     if vcs == 0 || vcs > 1000 {
         return Err(ErrorMessage::new("--vcs は 1 から 1000 の範囲で指定してください").into());
     }
@@ -710,7 +643,6 @@ fn validate_instance_args(
     Ok(InstanceArgs {
         url: url.to_string(),
         transport,
-        quic_backend,
         namespace: namespace.to_string(),
         tracks,
         datagram_max_size,
@@ -1183,7 +1115,6 @@ mod tests {
             validate_instance_args(
                 "moqt://relay.example.com:4433",
                 MoqTransport::Quic,
-                QuicBackend::default(),
                 "zakuro",
                 Some("video"),
                 DEFAULT_DATAGRAM_MAX_SIZE,
@@ -1434,7 +1365,6 @@ mod tests {
             validate_instance_args(
                 "moqt://relay.example.com:4433",
                 MoqTransport::Quic,
-                QuicBackend::default(),
                 "zakuro",
                 tracks,
                 datagram_max_size,
@@ -1469,58 +1399,6 @@ mod tests {
         // 上限の範囲外は拒否する
         assert!(validate(Some("audio:50:200:datagram"), 0).is_err());
         assert!(validate(Some("audio:50:200:datagram"), 65536).is_err());
-    }
-
-    /// ngtcp2 経由の datagram サイズ上限を起動時に検証すること
-    ///
-    /// ngtcp2 の `DatagramConfig` は送信できる datagram を 1 パケット (1200 バイト) に
-    /// 制限する。WebTransport over HTTP/3 は HTTP Datagram の Quarter Stream ID を
-    /// 足すため、MOQT の datagram はさらに小さくする必要がある。
-    #[test]
-    fn validate_rejects_datagram_max_size_over_ngtcp2_limit() {
-        let validate =
-            |transport: MoqTransport, quic_backend: QuicBackend, datagram_max_size: usize| {
-                validate_instance_args(
-                    "moqt://relay.example.com:4433",
-                    transport,
-                    quic_backend,
-                    "zakuro",
-                    Some("audio:50:200:datagram"),
-                    datagram_max_size,
-                    None,
-                    false,
-                    None,
-                    1,
-                    1.0,
-                    None,
-                    None,
-                    0,
-                    60.0,
-                    true,
-                )
-            };
-
-        // ngtcp2 (QUIC 直接接続) は 1200 バイトまで
-        assert!(
-            validate(MoqTransport::Quic, QuicBackend::Ngtcp2, 1200).is_ok(),
-            "上限ちょうどの datagram を拒否してはならない"
-        );
-        assert!(
-            validate(MoqTransport::Quic, QuicBackend::Ngtcp2, 1300).is_err(),
-            "ngtcp2 の上限を超える datagram を許容してはならない"
-        );
-        // WebTransport over HTTP/3 は Quarter Stream ID の 1 バイト分だけ小さくなる
-        assert!(
-            validate(MoqTransport::WtH3, QuicBackend::Ngtcp2, 1199).is_ok(),
-            "WT over HTTP/3 の上限ちょうどの datagram を拒否してはならない"
-        );
-        assert!(
-            validate(MoqTransport::WtH3, QuicBackend::Ngtcp2, 1200).is_err(),
-            "WT over HTTP/3 の上限を超える datagram を許容してはならない"
-        );
-        // s2n-quic / QMux にはこの上限を適用しない
-        assert!(validate(MoqTransport::Quic, QuicBackend::S2nQuic, 1300).is_ok());
-        assert!(validate(MoqTransport::Qmux, QuicBackend::Ngtcp2, 1300).is_ok());
     }
 
     /// `--datagram-max-size` を解釈できること
@@ -1763,84 +1641,22 @@ mod tests {
         )
         .expect("解釈に成功すること");
         assert_eq!(instance.transport, MoqTransport::Quic);
-        assert_eq!(instance.quic_backend, QuicBackend::S2nQuic);
     }
 
-    /// QUIC 実装の指定形式と未知の値、QMux との併用を検証する
+    /// WebTransport over HTTP/3 を CLI と JSONC の双方で選べること
     #[test]
-    fn quic_backend_selection() {
-        for (option, expected) in [
-            ("--quic-backend=s2n-quic", QuicBackend::S2nQuic),
-            ("--quic-backend=ngtcp2", QuicBackend::Ngtcp2),
-        ] {
-            let (instance, _) = parse_instance_args(
-                "zakuro-moq",
-                vec!["--url=moqt://localhost:4433".into(), option.into()],
-                &mut Vec::new(),
-            )
-            .expect("指定した QUIC 実装を解釈できること");
-            assert_eq!(instance.quic_backend, expected);
-            assert_eq!(
-                expected.as_str(),
-                option.split_once('=').expect("値があること").1
-            );
-        }
-        for options in [
-            vec!["--quic-backend=unknown"],
-            vec!["--transport=qmux", "--quic-backend=ngtcp2"],
-            vec!["--transport=qmux", "--quic-backend=s2n-quic"],
-            vec!["--transport=wt-h3", "--quic-backend=s2n-quic"],
-            vec!["--transport=wt-h2", "--quic-backend=ngtcp2"],
-            vec!["--transport=wt-h2", "--quic-backend=s2n-quic"],
-        ] {
-            let mut argv = vec!["--url=moqt://localhost:4433".into()];
-            argv.extend(options.into_iter().map(str::to_owned));
-            assert!(
-                parse_instance_args("zakuro-moq", argv, &mut Vec::new()).is_err(),
-                "無効な組み合わせを拒否すること"
-            );
-        }
-    }
-
-    /// wt-h3 と s2n-quic の組み合わせは理由付きで拒否すること
-    ///
-    /// WebTransport over HTTP/3 はデータストリーム reset で WebTransport のストリーム
-    /// ヘッダを失わないよう RESET_STREAM_AT を MUST とする
-    /// (draft-ietf-webtrans-http3-16 §4.4)。s2n-quic は RESET_STREAM_AT を送出できない
-    /// ため、wt-h3 では使えない。拒否する理由がエラーメッセージから分かることを確認する。
-    #[test]
-    fn webtransport_rejects_s2n_quic() {
-        let error = parse_instance_args(
+    fn webtransport_selects_wt_h3() {
+        let (instance, _) = parse_instance_args(
             "zakuro-moq",
             vec![
-                "--url=moqt://localhost:4433".into(),
+                "--url=moqt://localhost/moq?room=test".into(),
                 "--transport=wt-h3".into(),
-                "--quic-backend=s2n-quic".into(),
             ],
             &mut Vec::new(),
         )
-        .expect_err("s2n-quic との組み合わせを拒否すること");
-        let message = format!("{error}");
-        assert!(
-            message.contains("RESET_STREAM_AT"),
-            "RESET_STREAM_AT に対応していないことが分かること: {message}"
-        );
-    }
+        .expect("WT 経路を選べること");
+        assert_eq!(instance.transport, MoqTransport::WtH3);
 
-    /// WebTransport は ngtcp2 を既定とし、明示指定と JSONC の双方で選択できること
-    #[test]
-    fn webtransport_selects_ngtcp2() {
-        for options in [
-            vec!["--transport=wt-h3"],
-            vec!["--transport=wt-h3", "--quic-backend=ngtcp2"],
-        ] {
-            let mut argv = vec!["--url=moqt://localhost/moq?room=test".into()];
-            argv.extend(options.into_iter().map(str::to_owned));
-            let (instance, _) = parse_instance_args("zakuro-moq", argv, &mut Vec::new())
-                .expect("WT 経路を選べること");
-            assert_eq!(instance.transport, MoqTransport::WtH3);
-            assert_eq!(instance.quic_backend, QuicBackend::Ngtcp2);
-        }
         let config = parse_jsonc_config(r#"{"url":"moqt://localhost/", "transport":"wt-h3"}"#)
             .expect("JSONC を解釈できること");
         let (instance, _) = parse_instance_args(
@@ -1850,28 +1666,11 @@ mod tests {
         )
         .expect("JSONC から WT 経路を選べること");
         assert_eq!(instance.transport, MoqTransport::WtH3);
-        assert_eq!(instance.quic_backend, QuicBackend::Ngtcp2);
-    }
-
-    /// JSONC の値が CLI と同じ経路でバックエンドの選択に反映されること
-    #[test]
-    fn jsonc_quic_backend_selection() {
-        let config =
-            parse_jsonc_config(r#"{"url":"moqt://localhost:4433", "quic-backend":"ngtcp2"}"#)
-                .expect("JSONC を解釈できること");
-        let (instance, _) = parse_instance_args(
-            "zakuro-moq",
-            config.instance_argvs[0].clone(),
-            &mut Vec::new(),
-        )
-        .expect("JSONC のオプションを解釈できること");
-        assert_eq!(instance.quic_backend, QuicBackend::Ngtcp2);
     }
 
     /// `--transport wt-h2` と JSONC の `"transport": "wt-h2"` を解釈できること
     ///
-    /// WebTransport over HTTP/2 は TCP + TLS 上で動くため QUIC 実装を選ばず、
-    /// `--quic-backend` の既定値も接続には使われない。
+    /// WebTransport over HTTP/2 は TCP + TLS 上で動くため QUIC を使わない。
     #[test]
     fn transport_accepts_wt_h2() {
         for options in [vec!["--transport=wt-h2"], vec!["--transport", "wt-h2"]] {

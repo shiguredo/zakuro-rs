@@ -3,13 +3,16 @@
 //! 1 仮想クライアント = 1 QUIC 接続 = 1 MOQT セッションで、仮想クライアントごとに一意な
 //! Track Name へ object を送り続ける。接続・切断・リトライのライフサイクルは
 //! `crate::virtual_client` の Sora 版と同じ規則に従う。
+//!
+//! QUIC は時雨堂の tobi-quic を、WebTransport over HTTP/3 は tobi-webtransport を使う。
 
-mod ngtcp2;
 mod qmux;
+mod quic;
 pub(crate) mod session;
 mod stream;
 pub(crate) mod transport;
 mod wt_h2;
+mod wt_h3;
 
 use std::time::Duration;
 
@@ -24,7 +27,7 @@ pub(crate) use transport::{MoqClientContext, MoqEndpoint, MoqTlsOptions, MoqTran
 
 /// 受信したストリーム reset のエラーコード
 ///
-/// QUIC 直接接続と WebTransport over HTTP/3 (ngtcp2) の公開イベントには reliable size が
+/// QUIC 直接接続と WebTransport over HTTP/3 の公開イベントには reliable size が
 /// 無いため、その値を推測しない。WebTransport over HTTP/2 の `WT_RESET_STREAM` capsule は
 /// アプリケーションエラーコードをそのまま運ぶ。`session.rs` は読み込みエラーからこの型を
 /// downcast し、MOQT のストリーム reset として扱う。
@@ -80,8 +83,6 @@ pub(crate) struct MoqClientConfig {
     pub(crate) tls: MoqTlsOptions,
     /// 下位トランスポート種別 (QUIC / WebTransport over HTTP/3 / QMux)
     pub(crate) transport: MoqTransport,
-    /// QUIC 直接接続で利用する実装
-    pub(crate) quic_backend: transport::QuicBackend,
     /// Track Namespace
     pub(crate) namespace: String,
     /// publish するトラック (Track Name は仮想クライアントごとに一意化する)
@@ -434,16 +435,7 @@ pub(crate) async fn build_context(config: &MoqClientConfig) -> Result<MoqClientC
         tracing::warn!("MOQ TLS certificate verification is disabled (--insecure)");
     }
     tracing::info!("MOQ transport: {}", config.transport.as_str());
-    if config.transport == MoqTransport::Quic {
-        tracing::info!("MOQ QUIC backend: {}", config.quic_backend.as_str());
-    }
-    MoqClientContext::new(
-        &config.endpoint,
-        &config.tls,
-        config.transport,
-        config.quic_backend,
-    )
-    .await
+    MoqClientContext::new(&config.endpoint, &config.tls, config.transport).await
 }
 
 /// セッション future の終了処理を待つ

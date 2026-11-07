@@ -10,12 +10,12 @@ draft 由来であり、改訂や RFC 化で変わりうる。
 - `--transport wt-h2` を追加する。TCP + TLS (ALPN `h2`) の 1 本の HTTP/2 接続の上で
   Extended CONNECT と Capsule Protocol を使い、MOQT のストリームと DATAGRAM を運ぶ。
 - UDP が不要である。reset を `WT_RESET_STREAM` capsule で行うため `RESET_STREAM_AT` も
-  不要であり、wt-h3 と違って ngtcp2 を必要としない。
+  不要であり、wt-h3 と違って QUIC の実装を必要としない。
 - relay が WebTransport over HTTP/2 を終端できる必要がある experimental な経路である。
-- QUIC を使わないため `--quic-backend` は指定できない (qmux と同じ扱い)。
+- QUIC を使わないため、QUIC のクライアント (UDP ソケット) を作らない (qmux と同じ扱い)。
 - 実装は `zakuro-moq/src/moq_client/wt_h2.rs` に閉じ、HTTP/2 と WebTransport の状態機械は
   `shiguredo_http2` (Sans I/O) に委譲する。駆動タスクが I/O とセッションを所有し、
-  `Handle` / ストリーム / acceptor がチャネルで操作する ngtcp2 経路と同形式にする。
+  `Handle` / ストリーム / acceptor がチャネルで操作する wt-h3 経路と同形式にする。
 
 ## 1. 仕様上の位置づけと判断
 
@@ -104,8 +104,8 @@ DATAGRAM と違い経路損失では失われない。
 
 MOQT には PING が無く、wt-h2 は HTTP/2 の上で動くため QUIC の idle timeout に相当する
 機構が無い。無通信の接続 (Forward State 0 など) が relay や中間装置の idle timeout で
-切られないよう、HTTP/2 PING を 5 秒間隔で送る。間隔は ngtcp2 経路の
-`keep_alive_timeout=5s` に合わせる。
+切られないよう、HTTP/2 PING を 5 秒間隔で送る。間隔は QUIC 直接接続の keep-alive
+(5 秒間隔) に合わせる。
 
 ## 2. 実装構造
 
@@ -119,7 +119,7 @@ MOQT には PING が無く、wt-h2 は HTTP/2 の上で動くため QUIC の idl
   タイムアウト付き接続。
 - `session.rs`: `Transport::WebTransport`、読み込み・書き込みエラーの `StreamReset`
   downcast (request stream の STOP_SENDING ではセッションを落とさない)。
-- `args.rs`: `--transport wt-h2` の解釈と `--quic-backend` 併用の拒否。
+- `args.rs`: `--transport wt-h2` の解釈。
 
 ## 3. 制約と未対応
 

@@ -232,7 +232,6 @@ async fn run_instance(
             ca_cert: instance.ca_cert.clone(),
         },
         transport: instance.transport,
-        quic_backend: instance.quic_backend,
         namespace: instance.namespace.clone(),
         tracks: instance.tracks.clone(),
         datagram_max_size: instance.datagram_max_size,

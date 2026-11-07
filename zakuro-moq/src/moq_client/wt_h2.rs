@@ -7,7 +7,7 @@
 //! Protocol でストリーム (WT_STREAM) と DATAGRAM を多重化する。セッションの状態は CONNECT
 //! ストリーム 1 本に閉じるため、このモジュールの駆動タスクが `Connection` と `WtSession` を
 //! 所有し、公開する [`Handle`] / [`SendStream`] / [`RecvStream`] / acceptor はチャネルで
-//! 操作を依頼する。この構成は ngtcp2 経路 (`ngtcp2.rs`) と揃えている。
+//! 操作を依頼する。この構成は wt-h3 経路 (`wt_h3.rs`) と揃えている。
 //!
 //! TLS は呼び出し側が `h2` を ALPN に設定した [`rustls::ClientConfig`] を渡す。MOQT の
 //! プロトコル識別子 (`moqt-22`) は TLS の ALPN ではなく、Extended CONNECT の
@@ -57,7 +57,7 @@ const WT_SEND_CHUNK_SIZE: usize = DEFAULT_INITIAL_WINDOW_SIZE as usize;
 
 /// 1 回の write コマンドで送るバイト数
 ///
-/// ngtcp2 経路と同じ値にする。WT の送信ウィンドウはセッション単位であり、1 本の
+/// QUIC 直接接続の 1 回の write と同じ値にする。WT の送信ウィンドウはセッション単位であり、1 本の
 /// ストリームへ巨大なデータを一度に積むと他のストリームの送信がウィンドウ解放まで
 /// 待たされるため、チャンクに区切って他のストリームと交互に送る。
 const WRITE_CHUNK_SIZE: usize = 16 * 1024;
@@ -76,7 +76,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// keep-alive の HTTP/2 PING 送信間隔
 ///
-/// ngtcp2 経路の `keep_alive_timeout=5s` と揃える。MOQT は Forward State 0 の間
+/// QUIC 直接接続の keep-alive (5 秒間隔) と揃える。MOQT は Forward State 0 の間
 /// object を送らないため、無通信でも接続を維持できる必要がある。
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(5);
 

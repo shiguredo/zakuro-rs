@@ -11,7 +11,7 @@
 | ツール | 対象システム | 実装 | 主な依存 |
 | --- | --- | --- | --- |
 | `zakuro` (`zakuro/`) | Sora WebRTC SFU | libwebrtc + Sora Rust SDK | DuckDB、Raden、OpenH264 |
-| `zakuro-moq` (`zakuro-moq/`) | Sora MoQ (Media over QUIC 実装) のリレー | s2n-quic + moqt-rs | なし (libwebrtc / DuckDB を使わない) |
+| `zakuro-moq` (`zakuro-moq/`) | Sora MoQ (Media over QUIC 実装) のリレー | tobi-quic + moqt-rs | なし (libwebrtc / DuckDB を使わない) |
 
 両者が共有する基盤 (統計集約・HTTP サーバー・JSON-RPC) は `zakuro-core/` にある。
 
@@ -217,7 +217,7 @@
 | トラック別内訳 | 無し。全 publisher / subscription の合計値のみ |
 | セッション進捗 | `publish=受理/全, sent-objects=, forwarding=, subscribe=受理/全, received-objects=` を 5 秒ごとにログ出力 |
 | レイテンシ | publish から subscribe までの遅延、RTT、jitter の計測は無い |
-| QUIC 統計 | s2n-quic の接続メトリクス (RTT / 損失 / cwnd) を読む API 呼び出しは無い |
+| QUIC 統計 | tobi-quic の接続メトリクス (RTT / 損失 / cwnd) を読む API 呼び出しは無い |
 | 集計 | 累積値と区間レートのみ。平均・パーセンタイル・最大は無い |
 
 #### 合否判定と出力
@@ -294,7 +294,7 @@ WebRTC Statistics 仕様と既存ツールの実装、MoQ の項目は draft-iet
 | payload の一致 | あり | `--verify-payload` (既定は無効) |
 | PUBLISH / SUBSCRIBE の受理状況 | あり | 5 秒ごとの進捗ログ |
 | REQUEST_UPDATE (FORWARD) への追従 | あり | 動作はする。計測は forwarding 数のみ |
-| QUIC の RTT / 損失 / cwnd / stream 数 | 無し | s2n-quic の接続メトリクスを読んでいない |
+| QUIC の RTT / 損失 / cwnd / stream 数 | 無し | tobi-quic の接続メトリクスを読んでいない |
 | ハンドシェイク / セッション確立時間 | 無し | 確立の成否のみログに出る |
 | リレー段数 / キャッシュ | 無し | リレー側の機能。負荷試験側からは観測していない |
 | 資源 (CPU / メモリ) | 無し | プロセス外の計測が必要 |
@@ -376,7 +376,7 @@ MoQ 負荷試験として見たときに、zakuro-moq に足りていないも�
 
 | 不足 | 内容 | 参考になる機能 |
 | --- | --- | --- |
-| QUIC 統計 | RTT / 損失 / 輻輳ウィンドウ / bytes in flight / stream 数を読んでいない (transport.rs / qmux.rs は接続のみ) | h2load の最小 RTT / 平滑化 RTT / 損失宣言数、s2n-quic の接続メトリクス |
+| QUIC 統計 | RTT / 損失 / 輻輳ウィンドウ / bytes in flight / stream 数を読んでいない (transport.rs / qmux.rs は接続のみ) | h2load の最小 RTT / 平滑化 RTT / 損失宣言数、tobi-quic の接続メトリクス |
 | 輻輳制御と 0-RTT | 輻輳制御アルゴリズムの指定、0-RTT の利用、idle timeout の指定ができない | quic-go/perf のハンドシェイク計測、QUIC 実装のパラメータ指定 |
 | リレーの経路 | 複数ホップのリレー、キャッシュヒット、同一 object を複数 subscriber が受ける場合の挙動を検証する仕組みが無い | moq-relay の hop リストとデバッグ用 HTTP API、moq-stats |
 | プロトコル機能の網羅 | 優先度 (`publisher_priority`) は固定、DATAGRAM はトラック単位で選択可 (混在比率は指定不可)、Subgroup は Group 内 1 本固定、SUBSCRIBE_UPDATE / TRACK_STATUS などは未使用。`--tracks` は固定値のみ | moxygen の転送プリファレンス 4 種、moq-bench の `[min, max]` のレンジ指定 |

@@ -20,7 +20,7 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 | バイナリ | ディレクトリ | 対象 | 主な依存 |
 |---|---|---|---|
 | `zakuro` | `zakuro/` | Sora WebRTC SFU | libwebrtc (Sora Rust SDK)・DuckDB |
-| `zakuro-moq` | `zakuro-moq/` | Sora MoQ (Media over QUIC 実装) のリレー | s2n-quic / ngtcp2-rs、moqt-rs (`shiguredo_moqt`) |
+| `zakuro-moq` | `zakuro-moq/` | Sora MoQ (Media over QUIC 実装) のリレー | tobi-quic / tobi-webtransport、moqt-rs (`shiguredo_moqt`) |
 
 両者で共有する基盤 (統計・HTTP サーバー・JSON-RPC) は `zakuro-core/` に置いています。
 
@@ -235,39 +235,36 @@ cargo run -p zakuro-moq -- \
 ```
 
 TLS は既定で証明書を検証します。relay の CA 証明書を指定する場合は `--ca-cert <PEM>`、
-検証をスキップする場合は `--insecure` を使います。s2n-quic / WebTransport over HTTP/2 / QMux は
-WebPKI のルート証明書を使い、`--ca-cert` を指定するとその PEM だけを信頼します。ngtcp2 は
-システムの信頼ストアを使い、`--ca-cert` の証明書を追加で信頼します。
+検証をスキップする場合は `--insecure` を使います。`quic` / `wt-h3` / `wt-h2` / `qmux` の
+いずれも WebPKI のルート証明書を使い、`--ca-cert` を指定するとその PEM だけを信頼します。
 
 ### トランスポート (`--transport`)
 
 `--transport` で下位トランスポートを選びます (既定は `quic`)。
 
-- `quic`: QUIC 直接接続。`--quic-backend s2n-quic|ngtcp2` で実装を選びます (既定は `s2n-quic`)。UDP が必要です。
-- `wt-h3`: ngtcp2 による WebTransport over HTTP/3 接続。UDP が必要です。
+- `quic`: tobi-quic による QUIC 直接接続。UDP が必要です。ALPN は `moqt-22` です。
+- `wt-h3`: tobi-webtransport による WebTransport over HTTP/3 接続。UDP が必要です。
   ALPN は `h3`、WebTransport のサブプロトコルは `moqt-22` です。
   URL は `moqt://` のまま指定し、パスとクエリーは HTTPS の Extended CONNECT に渡します。
-  WebTransport はデータストリームの reset に RESET_STREAM_AT を MUST とするため
-  (draft-ietf-webtrans-http3-16 §4.4)、RESET_STREAM_AT を送出できない s2n-quic は
-  バックエンドに指定できません。
+  tobi-webtransport が QUIC 接続を公開しないため QUIC の keep-alive は設定できません。
+  Forward State 0 などで無通信が続くと、relay の idle timeout で切られる可能性があります。
 - `wt-h2`: WebTransport over HTTP/2 接続。TCP + TLS 上で動くため UDP は不要です。
   ALPN は `h2`、WebTransport のサブプロトコルは `moqt-22` です。URL は `moqt://` のまま
   指定し、パスとクエリーは Extended CONNECT に渡します。reset は `WT_RESET_STREAM`
   capsule で行うため RESET_STREAM_AT は不要ですが、relay の WebTransport capsule 対応に
-  依存する experimental な経路です。QUIC を使わないため `--quic-backend` は指定できません。
+  依存する experimental な経路です。QUIC を使いません。
 - `qmux`: QMux (draft-ietf-quic-qmux-02) 経由。TLS over TCP の 1 本のバイトストリームに
   QUIC version 1 のストリームと DATAGRAM を多重化するため、UDP が使えない環境でも接続できます。
   QMux 上の MOQT は experimental であり、QMux を終端できる relay が必要です。TCP の再送で
   遅延が伸びるため、遅延を重視する試験では QUIC 直接接続を使ってください。ALPN は QUIC 直接接続と
   同じ `moqt-22` です。DATAGRAM は TCP 上で信頼的かつ順序どおりに届きます。
 
-ngtcp2-rs (`shiguredo_ngtcp2_tokio`) は `RESET_STREAM_AT` の受理を広告し、
-ピアが対応している場合は送信済みデータの配信を保証してストリームを reset します。
-対応していないピアには通常の `RESET_STREAM` を送ります。
-ngtcp2 は DNS 名と IP アドレスの両方に対応し、IP アドレスでは証明書の IP SAN を検証します。
-接続ごとに UDP ソケットと駆動タスクを作ります。s2n-quic はインスタンス内で
-アドレスファミリごとの UDP ソケットを共有するため、負荷試験時のリソース使用量が異なります。
-`wt-h3` のバックエンドは `ngtcp2` です。`--quic-backend` は省略できます。
+QUIC 直接接続は tobi-quic (`shiguredo/tobi-quic` の main ブランチ) を使います。UDP ソケットは
+インスタンス内でアドレスファミリごとに共有し、仮想クライアントごとに接続を 1 本確立します。
+tobi-quic は `RESET_STREAM_AT` の受理を広告し、ピアが対応している場合は送信済みデータの配信を
+保証してストリームを reset します。対応していないピアには通常の `RESET_STREAM` を送ります。
+
+`wt-h3` は tobi-webtransport (`shiguredo/tobi-quic` の main ブランチ) を使います。
 HTTP/3 SETTINGS と QUIC transport parameter を検証してから接続し、単方向・双方向ストリーム、
 WT フロー制御、reset / STOP_SENDING、drain / close を処理します。
 MOQT の object は既定では subgroup stream で送信し、トラック単位で OBJECT_DATAGRAM にも
@@ -283,7 +280,6 @@ DATAGRAM は `WT_DATAGRAM` capsule で運びます。接続ごとに TCP ソケ�
 ```bash
 cargo run -p zakuro-moq -- \
   --url moqt://relay.example.com:4433 \
-  --quic-backend ngtcp2 \
   --tracks video:30:1000 \
   --vcs 10
 ```
@@ -348,15 +344,17 @@ cargo run -p zakuro-moq -- \
 終端を stream の FIN で伝えますが、datagram には FIN が無いため Group の最終 object に
 END_OF_GROUP bit を立てます (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))。
 
-datagram は分割できず、経路の上限を超えた object は通知なく破棄されるため
-(draft-ietf-moq-transport-22 §11.2 (Datagrams))、`--datagram-max-size` (既定 1160 バイト) を
-上限として、起動時に object サイズとヘッダが収まるかを検証します。既定値は RFC 9000 §14
+datagram は分割できず、1 つの QUIC パケットに収まる必要があります (RFC 9221 §5)。経路の
+上限を超えた datagram は送信できないため、`--datagram-max-size` (既定 1160 バイト) を上限と
+して、起動時に object サイズとヘッダが収まるかを検証します。既定値は RFC 9000 §14
 (Datagram Size) が経路に要求する 1200 バイトから、QUIC と WebTransport のヘッダ分を
-引いた値です。音声相当の小さい object では既定値のままで構いません。
+引いた値です。実際に送信できる上限は経路 MTU に依存し、tobi-quic は DPLPMTUD で MTU を
+引き上げます。音声相当の小さい object では既定値のままで構いません。
 
 datagram は再送されません (RFC 9221 §3)。QUIC 直接接続と WebTransport over HTTP/3 では、
-輻輳制御の制約で送信キューが詰まると送信待ちになります。ngtcp2 は輻輳時に datagram を
-破棄し、そのことを API から通知しないため、送信数と購読側の受信数の差を確認してください。
+輻輳制御の制約で送信キューが詰まると送信待ちになります。ピアが datagram に対応していない、
+またはサイズが経路の上限を超える場合は送信自体がエラーになるため、送信数と購読側の
+受信数の差を確認してください。
 QMux と WebTransport over HTTP/2 は TCP 上で動くため経路損失では失われませんが、QMux は
 速やかに配送できない DATAGRAM を破棄することがあり、遅延特性も QUIC と異なります。
 
@@ -422,13 +420,12 @@ datagram 経由でも同じように検査します。実メディアを配信�
 | --- | --- |
 | `--url` | MOQ relay の URL (`moqt://host:port`)。必須 |
 | `--transport` | 下位トランスポート (`quic` / `wt-h3` / `wt-h2` / `qmux`、デフォルト: `quic`) |
-| `--quic-backend` | QUIC 実装 (`s2n-quic` / `ngtcp2`)。`quic` の既定は `s2n-quic`、`wt-h3` は `ngtcp2`。`wt-h2` と `qmux` では指定できない |
 | `--namespace` | Track Namespace (デフォルト: `zakuro`) |
 | `--tracks` | publish するトラック (`名前[:レート[:サイズ[:配送方式]]]` のカンマ区切り、配送方式は `subgroup` / `datagram`、デフォルト: `video`。`--subscribe-tracks` 指定時は publish しない) |
 | `--datagram-max-size` | datagram 配送で送る object 1 個のサイズ上限 (バイト、デフォルト: 1160) |
 | `--subscribe-tracks` | 購読するトラック名のカンマ区切り。`{instance}` / `{vc}` を書くと置換し、書かなければ `<名前>-<インスタンス>-<仮想クライアント>` になる |
 | `--verify-payload` | 受信 payload が zakuro-moq の publisher のパターンと一致するかを検査する |
-| `--ca-cert` | relay の CA 証明書 (PEM)。既定の信頼ストアと追加 / 置換の扱いはバックエンドに依存 |
+| `--ca-cert` | relay の CA 証明書 (PEM)。指定すると既定の信頼ストアの代わりにこの PEM だけを信頼する |
 | `--vcs` | 仮想クライアント数 (1-1000、デフォルト: 1) |
 | `--vcs-hatch-rate` | 仮想クライアントの起動レート (毎秒、デフォルト: 1.0) |
 | `--duration` | 接続維持秒数 (未指定なら無制限) |
@@ -448,7 +445,6 @@ datagram 経由でも同じように検査します。実メディアを配信�
   "instance-hatch-rate": 1.0,
   "url": "moqt://relay.example.com:4433",
   "transport": "quic",
-  "quic-backend": "ngtcp2",
   "namespace": "zakuro",
   "tracks": [
     { "name": "video", "object-rate": 30, "object-size": 1000 },

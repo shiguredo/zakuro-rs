@@ -15,24 +15,16 @@ name = "zakuro-moq"
 path = "src/main.rs"
 
 [dependencies]
-# CA 証明書を ngtcp2 に 1 枚ずつ渡すための PEM エンコード
-base64ct = { version = "1.8", features = ["alloc"] }
-# s2n-quic の datagram 送受信 API が要求するバイト列型
-bytes = "1.12"
 # ログのファサード (共有クレート zakuro-core も使う)
 log = "0.4"
 # CLI 引数パース
 noargs = "0.4"
 # JSON パース / 生成
 nojson = "0.3"
-# TLS (s2n-quic の rustls provider、WebTransport over HTTP/2 と QMux の TLS over TCP で利用)
+# TLS (QUIC の TLS 設定、WebTransport over HTTP/2 と QMux の TLS over TCP で利用)
 rustls = "0.23"
 # HTTP/2 と WebTransport over HTTP/2 の Sans I/O 実装
 shiguredo_http2 = "2026.1.0-canary.16"
-# HTTP/3 と WebTransport の Sans I/O 実装
-shiguredo_http3 = "2026.1.0-canary.12"
-# ngtcp2 による QUIC 接続 (RESET_STREAM_AT 対応の Tokio 統合)
-shiguredo_ngtcp2_tokio = "2026.1.0-canary.2"
 # TLS ハンドシェイクの Tokio 統合 (QMux 経路の TLS over TCP で利用)
 tokio-rustls = "0.26"
 # tokio Stream ラッパー (ReceiverStream)
@@ -53,17 +45,6 @@ zakuro-core = { path = "../zakuro-core" }
 # tombi は行長超過のインラインテーブルを複数行に展開するが、複数行インラインテーブルは
 # TOML 1.1 の機能であり cargo がマニフェストを解析できない場合がある。
 
-# QUIC クライアント。datagram endpoint を有効にして max_datagram_frame_size を広告する:
-# MOQT は object を datagram でも運ぶため (draft-ietf-moq-transport-22)
-[dependencies.s2n-quic]
-version = "1.88"
-default-features = false
-features = [
-  "provider-address-token-default",
-  "provider-tls-rustls",
-  "unstable-provider-datagram",
-]
-
 # Media over QUIC Transport (MOQT) の Sans I/O プロトコル実装。
 # crates.io には未公開のため git 依存とし、再現性のため rev を固定する
 [dependencies.shiguredo_moqt]
@@ -76,6 +57,19 @@ rev = "49c711e5832272a7dbde3f8953a6dd62815f7ad6"
 [dependencies.shiguredo_qmux]
 git = "https://github.com/shiguredo/qmux-rs"
 rev = "3e0dc0f6a7404b940a67a42e04f986a79811a046"
+
+# QUIC (RFC 9000) と DATAGRAM (RFC 9221) のクライアント。
+# 時雨堂の QUIC 実装を常に追うため、crates.io ではなく git の main ブランチを参照する。
+# DATAGRAM は MOQT の object 配送に使う (draft-ietf-moq-transport-22 §11.2)
+[dependencies.tobi_quic]
+git = "https://github.com/shiguredo/tobi-quic"
+branch = "main"
+
+# WebTransport over HTTP/3 (draft-ietf-webtrans-http3) のクライアント結線。
+# tobi_quic と同じリポジトリの main ブランチを参照する
+[dependencies.tobi_webtransport]
+git = "https://github.com/shiguredo/tobi-quic"
+branch = "main"
 
 # 非同期ランタイム
 [dependencies.tokio]
@@ -96,7 +90,5 @@ git = "https://github.com/shiguredo/qmux-rs"
 rev = "3e0dc0f6a7404b940a67a42e04f986a79811a046"
 
 [dev-dependencies]
-# QUIC 接続テスト用の自己署名証明書生成
+# QUIC と WebTransport の接続テスト用の自己署名証明書生成
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
-# QUIC 接続テスト用の証明書ファイルを保持する
-tempfile = "3.27"
