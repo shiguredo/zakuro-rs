@@ -1,7 +1,7 @@
 # MOQ の QUIC 実装を tobi-quic へ置き換える
 
 - Created: 2026-11-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-08
 - Branch: feature/change-moq-quic-backend-to-tobi
 - Polished: {YYYY-MM-DD}
 
@@ -79,4 +79,45 @@ QUIC 層の依存と結線コードを大幅に減らせる。
 
 ## 解決方法
 
-どのように対応するのかを明確にすること (例: どのようなコードを追加・修正するのか、どのようなテストを追加するのかなど)
+- `zakuro-moq/Cargo.toml` の QUIC 依存を `tobi_quic` / `tobi_webtransport`
+  (`https://github.com/shiguredo/tobi-quic` の `main` ブランチ) へ置き換え、`s2n-quic` /
+  `shiguredo_ngtcp2_tokio` / `shiguredo_http3` / `base64ct` / `bytes` / `tempfile` を削除した。
+- `zakuro-moq/src/moq_client/quic.rs` を追加した。tobi-quic のクライアントを接続先の
+  アドレスファミリごとに構築し、`ConnectionConfig` で受信ウィンドウ (64 MiB / 16 MiB) と
+  ストリーム上限 (uni 10,000 / bidi 1,000)、keep-alive 5 秒を設定する。
+  `with_background_driver(true)` で受信とタイマーを常時進め、ハンドシェイク後に `moqt-22`
+  ALPN を検証する。
+- `zakuro-moq/src/moq_client/wt_h3.rs` を追加した。tobi-webtransport で WebTransport
+  セッションを開設し、拡張 CONNECT で `moqt-22` を提示する。`Session` を専用タスクが所有し、
+  接続ハンドル・acceptor・datagram 受け口をチャネルで分配する。ストリームは `(受信, 送信)` の
+  順に揃え、reset のコードは `StreamReset` として `io::Error` に載せる。
+- `ngtcp2.rs` と `ngtcp2/webtransport.rs` (および各テスト) を削除した。
+- `stream.rs` の enum を `Quic` / `WtH3` へ、`transport.rs` の `EndpointState` を tobi の
+  クライアントへ置き換えた。アドレスファミリごとの UDP ソケット共有と、接続先ごとの
+  キャッシュは維持する。
+- `--quic-backend` を CLI / JSONC / `InstanceArgs` から削除した。`--transport` の値は
+  変えていない。`--ca-cert` は全経路で「WebPKI の代わりにその PEM だけを信頼する」に統一した。
+- テストは実トランスポートの loopback 接続で置き換えた。tobi-quic のサーバーとクライアントで
+  単方向ストリームと DATAGRAM の往復を、tobi-webtransport のサーバーで単方向ストリームと
+  datagram の往復を検証する。QMux の既存テストはそのまま通る。
+- `README.md` / `docs/` / `THIRD_PARTY_LICENSES.md` を追随させた。
+
+検証:
+
+- `cargo fmt --all -- --check`: 通過
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`: 通過
+  (fdk-aac は環境にヘッダが無いため feature なし)
+- `cargo test --locked -p zakuro-moq`: 127 件通過
+- `cargo test --locked --workspace`: `zakuro` のリンクで `-lX11` が見つからず失敗した
+  (環境に libx11-dev が無いため。`zakuro` は未変更)
+- `zakuro-moq --help` から `--quic-backend` が消えていることを確認した。
+
+残存リスク:
+
+- wt-h3 は tobi-webtransport が QUIC 接続を公開しないため keep-alive を設定できず、
+  無通信が続くと relay の idle timeout で切られる可能性がある。
+- `--datagram-max-size` の既定 1160 バイトは、初期 MTU 1200 での DATAGRAM 上限
+  (1156 バイト) を超える。DPLPMTUD が MTU を引き上げた後は送信できるが、経路 MTU が
+  1200 のままの環境では datagram 送信が失敗する。ngtcp2 を使っていたときも同じ制約があった。
+- 接続後の `max_datagram_size` を使った起動時の上限検証は行っていない
+  (実際の上限は接続して PMTU が確定するまで分からないため)。
