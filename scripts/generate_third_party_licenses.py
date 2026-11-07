@@ -18,9 +18,12 @@ END = "<!-- END CARGO DEPENDENCIES (auto-generated) -->"
 
 def cargo_table() -> str:
     """Cargo.lock に記録された依存クレートのライセンス一覧を Markdown 表で返す。"""
+    # 任意 feature の依存 (QUIC の s2n-quic / ngtcp2 など) も配布物に含み得るため、
+    # すべての feature を有効にして一覧を作る。cargo metadata はビルドしないため、
+    # バックエンドを 1 つだけ選ぶ制約 (compile_error) には影響されない。
     metadata = json.loads(
         subprocess.check_output(
-            ["cargo", "metadata", "--format-version", "1", "--locked"],
+            ["cargo", "metadata", "--format-version", "1", "--locked", "--all-features"],
             cwd=ROOT,
         )
     )

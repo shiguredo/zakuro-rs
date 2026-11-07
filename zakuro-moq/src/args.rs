@@ -48,7 +48,7 @@ const MAX_OBJECT_SIZE: usize = 1024 * 1024;
 
 /// Full Track Name の最大バイト長
 ///
-/// draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure) が Track Namespace と
+/// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure) が Track Namespace と
 /// Full Track Name の合計を 4096 バイト以下と定めている。
 const MAX_TRACK_NAME_LENGTH: usize = 4096;
 
@@ -68,7 +68,7 @@ const HATCH_RATE_RANGE: std::ops::RangeInclusive<f64> = 1e-6..=1e6;
 /// を上限にする。
 const MAX_DURATION_SECONDS: f64 = 1e9;
 
-/// object の配送方式 (draft-ietf-moq-transport-22 §2.1.1 (Object Fields))
+/// object の配送方式 (draft-ietf-moq-transport-23 §2.1.1 (Object Fields))
 ///
 /// Delivery Mode は Original Publisher が object ごとに決める値であり、購読側とは
 /// 交渉しない。zakuro-moq はトラック単位で方式を固定する (仕様上は同じトラックで
@@ -559,7 +559,7 @@ fn validate_instance_args(
         return Err(ErrorMessage::new("--namespace に空文字列は指定できません").into());
     }
     // `.` と `.session` は publish できない予約名前空間
-    // (draft-ietf-moq-transport-22 §6.5 (Session-Level Tracks and Namespaces))
+    // (draft-ietf-moq-transport-23 §6.5 (Session-Level Tracks and Namespaces))
     if namespace == "." || namespace == ".session" {
         return Err(ErrorMessage::new(format!(
             "--namespace に予約名前空間 '{namespace}' は指定できません"
@@ -583,7 +583,7 @@ fn validate_instance_args(
     let subscribe_tracks = parse_subscribe_tracks(subscribe_tracks_arg)?;
 
     // datagram は分割できず 1 つの QUIC パケットに収まる必要がある (RFC 9221 §5)。
-    // 経路の上限を超えた datagram は通知なく破棄されるため (draft-ietf-moq-transport-22
+    // 経路の上限を超えた datagram は通知なく破棄されるため (draft-ietf-moq-transport-23
     // §11.2 (Datagrams))、起動時に object サイズが収まるかを判定する
     if !DATAGRAM_MAX_SIZE_RANGE.contains(&datagram_max_size) {
         return Err(ErrorMessage::new(format!(
@@ -1358,7 +1358,7 @@ mod tests {
     /// datagram 配送の object が上限に収まるかを起動時に検証すること
     ///
     /// datagram は分割できず、上限を超えた object は通知なく破棄される
-    /// (draft-ietf-moq-transport-22 §11.2 (Datagrams))。起動時にエラーにする。
+    /// (draft-ietf-moq-transport-23 §11.2 (Datagrams))。起動時にエラーにする。
     #[test]
     fn validate_rejects_datagram_object_that_does_not_fit() {
         let validate = |tracks: Option<&str>, datagram_max_size: usize| {

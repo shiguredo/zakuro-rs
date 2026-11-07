@@ -75,7 +75,7 @@ pub(crate) async fn connect(
     path: &str,
 ) -> Result<Connection> {
     // 拡張 CONNECT で MOQT を WebTransport のサブプロトコルとして提示する。
-    // draft-ietf-moq-transport-22 §6.2 は WebTransport でも MOQT のプロトコル
+    // draft-ietf-moq-transport-23 §6.2 は WebTransport でも MOQT のプロトコル
     // 識別子を使うと定めている
     let config = ClientConfig::new(authority, path)
         .with_available_protocols(vec![String::from_utf8_lossy(ALPN).into_owned()])
@@ -605,8 +605,8 @@ mod tests {
         WtSessionRequest::from_connection(connection, ServerLimits::default(), false)
             .await
             .expect("WebTransport セッション要求を作れること")
-            // クライアントは `moqt-22` を提示するため、選択結果を返す
-            .with_protocol("moqt-22")
+            // クライアントは `moqt-23` を提示するため、選択結果を返す
+            .with_protocol("moqt-23")
             .accept()
             .await
             .expect("WebTransport セッションを開設できること")

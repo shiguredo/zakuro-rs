@@ -10,9 +10,9 @@
 //! 操作を依頼する。この構成は wt-h3 経路 (`wt_h3.rs`) と揃えている。
 //!
 //! TLS は呼び出し側が `h2` を ALPN に設定した [`rustls::ClientConfig`] を渡す。MOQT の
-//! プロトコル識別子 (`moqt-22`) は TLS の ALPN ではなく、Extended CONNECT の
+//! プロトコル識別子 (`moqt-23`) は TLS の ALPN ではなく、Extended CONNECT の
 //! WT-Available-Protocols / WT-Protocol ヘッダーで交渉する
-//! (draft-ietf-moq-transport-22 §6.2 (Session establishment))。
+//! (draft-ietf-moq-transport-23 §6.2 (Session establishment))。
 //!
 //! zakuro-moq は object を subgroup stream で送り、datagram 配送を指定したトラックは
 //! `WT_DATAGRAM` capsule で送る。受信した datagram はアプリへ渡す
@@ -120,7 +120,7 @@ const H2_INITIAL_WINDOW_SIZE: u32 = 16 * 1024 * 1024;
 /// 3. ピア SETTINGS の待機 (`SETTINGS_ENABLE_CONNECT_PROTOCOL` と `SETTINGS_WT_ENABLED`
 ///    の確認。draft-ietf-webtrans-http2-15 §3.1)
 /// 4. Extended CONNECT (`:protocol=webtransport`) の送信と 2xx 応答の待機 (§3.2)
-/// 5. 応答の `WT-Protocol` が `moqt-22` であることの確認と駆動タスクの起動 (§3.3)
+/// 5. 応答の `WT-Protocol` が `moqt-23` であることの確認と駆動タスクの起動 (§3.3)
 ///
 /// タイムアウトは呼び出し側 (`transport.rs`) が設定する。ピアが SETTINGS を送らない間に
 /// 永久に待つことはない。
@@ -130,7 +130,7 @@ const H2_INITIAL_WINDOW_SIZE: u32 = 16 * 1024 * 1024;
 /// - TCP / TLS / HTTP/2 の初期化に失敗した場合
 /// - ピアが WebTransport over HTTP/2 に対応しない SETTINGS を送った場合 (§3.1)
 /// - CONNECT が 2xx 以外で拒否された場合 (§3.2)
-/// - 2xx 応答に `WT-Protocol` が無い、または `moqt-22` でない場合 (§3.3)
+/// - 2xx 応答に `WT-Protocol` が無い、または `moqt-23` でない場合 (§3.3)
 pub(crate) async fn connect(
     remote: SocketAddr,
     server_name: &str,
@@ -330,7 +330,7 @@ fn build_limits(wt_config: &WtConfig) -> io::Result<Limits> {
 ///
 /// draft-ietf-webtrans-http2-15 §3.1 / §3.2: `:method=CONNECT`、`:protocol=webtransport`、
 /// `:scheme=https`、`:authority`、`:path` を設定する。
-/// draft-ietf-moq-transport-22 §6.2: MOQT は `WT-Available-Protocols` でプロトコル
+/// draft-ietf-moq-transport-23 §6.2: MOQT は `WT-Available-Protocols` でプロトコル
 /// 識別子を通知する。
 fn build_connect_headers(authority: &str, path: &str) -> io::Result<Vec<HeaderField>> {
     let header = |name: &'static [u8], value: &[u8]| -> io::Result<HeaderField> {
@@ -473,9 +473,10 @@ where
 /// Item of String として扱う。
 fn verify_wt_protocol(headers: &[HeaderField]) -> io::Result<()> {
     let negotiation_failed = || {
-        io::Error::other(
-            "WebTransport protocol negotiation failed: the response does not select moqt-22",
-        )
+        io::Error::other(format!(
+            "WebTransport protocol negotiation failed: the response does not select {}",
+            String::from_utf8_lossy(ALPN)
+        ))
     };
     let Some(value) = headers
         .iter()
@@ -860,7 +861,7 @@ impl Handle {
 
     /// MOQT のエラーコードで接続を閉じる
     ///
-    /// `draft-ietf-moq-transport-22` §12.2 のセッション終了コードを渡す。
+    /// `draft-ietf-moq-transport-23` §12.2 のセッション終了コードを渡す。
     /// WT_CLOSE_SESSION の Application Error Code が 32 ビットのため、収まらない
     /// ローカル専用コードは NO_ERROR として送る。
     pub(crate) async fn close(&self, error_code: u64) {
@@ -947,7 +948,7 @@ impl SendStream {
     /// ストリームの送信方向を reset する
     ///
     /// `error_code` は MOQT のストリームリセットエラーコード
-    /// (draft-ietf-moq-transport-22 §12.5) であり、WT_RESET_STREAM の
+    /// (draft-ietf-moq-transport-23 §12.5) であり、WT_RESET_STREAM の
     /// Application Error Code としてそのまま送る (draft-ietf-webtrans-http2-15 §6.2)。
     ///
     /// # Errors
@@ -1713,7 +1714,7 @@ impl Driver {
                 fin,
             } => {
                 if self.stop_sent.contains(&stream_id) {
-                    // draft-ietf-moq-transport-22 §6.4.2.3: STOP_SENDING 後のデータは
+                    // draft-ietf-moq-transport-23 §6.4.2.3: STOP_SENDING 後のデータは
                     // 破棄する。ストリームウィンドウは拡張しない (§6.6 の MUST NOT) が、
                     // 破棄した分の接続全体の受信クレジットは返す (§6.5)。返さないと、
                     // 飛行中のデータを破棄し続けたときにセッションの受信ウィンドウが
@@ -1982,7 +1983,7 @@ impl Driver {
     ///
     /// WT_CLOSE_SESSION を送り、直後に CONNECT ストリームを END_STREAM で half-close する
     /// (MUST)。`code` は MOQT のセッション終了コードである
-    /// (draft-ietf-moq-transport-22 §12.2)。
+    /// (draft-ietf-moq-transport-23 §12.2)。
     async fn close_session(&mut self, code: u64) -> io::Result<()> {
         let wire_code = session_close_code(code);
         if !self.wt.is_closed() {

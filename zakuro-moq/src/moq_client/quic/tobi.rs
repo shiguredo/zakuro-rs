@@ -11,7 +11,7 @@ use tobi_quic::core::connection::ConnectionConfig;
 use tobi_quic::core::transport_params::TransportParams;
 use tobi_quic::{Client, ClientTlsConfig, Connection, DatagramConfig, IoConfig};
 
-use super::transport::ALPN;
+use super::super::transport::ALPN;
 use crate::error::{ErrorMessage, Result};
 
 /// 受信ウィンドウ (接続全体、バイト)
@@ -39,21 +39,9 @@ const INITIAL_MAX_STREAMS_BIDI: u64 = 1_000;
 const KEEP_ALIVE_INTERVAL: tobi_quic::core::time::Duration =
     tobi_quic::core::time::Duration::from_secs(5);
 
-/// アドレスファミリに合わせたローカルバインドアドレスを返す
-///
-/// 1 つの UDP ソケットは別のアドレスファミリ宛に送信できないため、接続先の
-/// 名前解決結果に含まれるファミリごとにクライアントを作る。
-pub(crate) fn local_bind_addr(is_ipv6: bool) -> SocketAddr {
-    if is_ipv6 {
-        SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0))
-    } else {
-        SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0))
-    }
-}
-
 /// 指定したアドレスファミリ用のクライアントを構築する
 ///
-/// 渡す TLS 設定は経路で共有する土台であり、ALPN はここで MOQT の `moqt-22` に
+/// 渡す TLS 設定は経路で共有する土台であり、ALPN はここで MOQT の `moqt-23` に
 /// 設定する (WebTransport over HTTP/3 は同じ土台に `h3` を設定する)。
 ///
 /// # Errors
@@ -64,12 +52,12 @@ pub(crate) fn build_client(tls: &Arc<rustls::ClientConfig>, is_ipv6: bool) -> Re
     let mut config = tls.as_ref().clone();
     config.alpn_protocols = vec![ALPN.to_vec()];
     let tls = ClientTlsConfig::new(Arc::new(config));
-    let io = IoConfig::new(local_bind_addr(is_ipv6));
+    let io = IoConfig::new(super::local_bind_addr(is_ipv6));
     Client::builder()
         .with_tls(tls)
         .with_io(io)
         // MOQT は object を datagram でも運ぶため、max_datagram_frame_size を広告する
-        // (draft-ietf-moq-transport-22 §11.2)
+        // (draft-ietf-moq-transport-23 §11.2)
         .with_datagram(DatagramConfig::default())
         .with_transport(build_transport_config())
         // 接続を操作していないタスクがある間も ACK とタイマーを処理する。
@@ -119,7 +107,11 @@ pub(crate) async fn connect(
     // ALPN が一致しないと MOQT ではなく別のプロトコルで接続してしまうため、
     // ハンドシェイク直後に確認する
     if connection.application_protocol().await.as_deref() != Some(ALPN) {
-        return Err(ErrorMessage::new("MOQ relay が moqt-22 ALPN を選択しませんでした").into());
+        return Err(ErrorMessage::new(format!(
+            "MOQ relay が {} ALPN を選択しませんでした",
+            String::from_utf8_lossy(ALPN)
+        ))
+        .into());
     }
     Ok(connection)
 }
@@ -127,13 +119,7 @@ pub(crate) async fn connect(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// アドレスファミリに合わせてローカルアドレスを選ぶこと
-    #[test]
-    fn local_bind_addr_matches_address_family() {
-        assert_eq!(local_bind_addr(false).to_string(), "0.0.0.0:0");
-        assert_eq!(local_bind_addr(true).to_string(), "[::]:0");
-    }
+    use crate::moq_client::stream::{MoqConnectionHandle, MoqDatagramReceiver, MoqRecvAcceptor};
 
     /// 負荷試験向けの受信ウィンドウとストリーム上限を広告すること
     ///
@@ -159,5 +145,157 @@ mod tests {
         assert_eq!(config.transport_params.max_datagram_frame_size, None);
         // 無通信時に relay の idle timeout で切られないよう keep-alive を設定する
         assert_eq!(config.keep_alive_interval, Some(KEEP_ALIVE_INTERVAL));
+    }
+
+    /// loopback で tobi-quic のサーバーを起動する
+    ///
+    /// 自己署名証明書を生成し、ALPN `moqt-23` と QUIC DATAGRAM を有効にする。
+    /// モックやスタブではなく、実際の QUIC ハンドシェイクを行うサーバーである。
+    fn start_quic_server() -> (
+        std::net::SocketAddr,
+        tobi_quic::Server,
+        rustls::pki_types::CertificateDer<'static>,
+    ) {
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("自己署名証明書を生成できること");
+        let certificate = certified.cert.der().clone();
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certified.signing_key.serialize_der(),
+        ));
+        let mut tls = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3 を設定できること")
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate.clone()], private_key)
+        .expect("証明書と秘密鍵を設定できること");
+        tls.alpn_protocols = vec![b"moqt-23".to_vec()];
+        let server = tobi_quic::Server::builder()
+            .with_tls(tobi_quic::ServerTlsConfig::new(std::sync::Arc::new(tls)))
+            .with_io(tobi_quic::IoConfig::new(
+                "127.0.0.1:0".parse().expect("アドレスを解釈できること"),
+            ))
+            .with_datagram(tobi_quic::DatagramConfig::default())
+            .start()
+            .expect("QUIC サーバーを起動できること");
+        (server.local_addr(), server, certificate)
+    }
+
+    /// 起動済みのサーバーへ tobi-quic のクライアントで接続する
+    async fn connect_quic(
+        address: std::net::SocketAddr,
+        certificate: rustls::pki_types::CertificateDer<'static>,
+    ) -> tobi_quic::Connection {
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(certificate)
+            .expect("自己署名証明書を信頼ストアへ追加できること");
+        let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3 を設定できること")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        let client = build_client(&std::sync::Arc::new(tls), false)
+            .expect("QUIC クライアントを構築できること");
+        connect(&client, address, "localhost")
+            .await
+            .expect("MOQ relay 相当のサーバーへ接続できること")
+    }
+
+    /// tobi-quic の接続で単方向ストリームが往復すること
+    ///
+    /// MOQT の data stream は単方向ストリームで送る。実際の QUIC 接続で
+    /// open / write / finish / accept / read が成立することを確かめる。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn quic_unidirectional_stream_round_trip() {
+        let (address, mut server, certificate) = start_quic_server();
+        // サーバーの accept が QUIC のハンドシェイクを進めるため、クライアントの
+        // 接続より先に待たせておく
+        let server_task = tokio::spawn(async move {
+            let connection = server.accept().await.expect("接続を受け入れられること");
+            let (_, acceptor) = connection.split();
+            let mut acceptor = MoqRecvAcceptor::Quic(acceptor);
+            let mut stream = acceptor
+                .accept_receive_stream()
+                .await
+                .expect("単方向 stream を受け入れられること")
+                .expect("stream が届いていること");
+            let mut buf = vec![0u8; 64];
+            let mut total = 0;
+            loop {
+                let size = stream
+                    .read(&mut buf[total..])
+                    .await
+                    .expect("読み込めること");
+                if size == 0 {
+                    break;
+                }
+                total += size;
+            }
+            buf.truncate(total);
+            buf
+        });
+
+        let connection = connect_quic(address, certificate).await;
+        let (client_handle, _) = connection.split();
+        let mut client = MoqConnectionHandle::Quic(client_handle);
+
+        let payload = b"hello tobi-quic";
+        let mut send = client
+            .open_send_stream()
+            .await
+            .expect("単方向 stream を開けること");
+        send.write_all(payload).await.expect("payload を書けること");
+        send.finish().await.expect("FIN を送れること");
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(10), server_task)
+            .await
+            .expect("stream の受信がタイムアウトしないこと")
+            .expect("サーバータスクが完了すること");
+        assert_eq!(received, payload);
+    }
+
+    /// tobi-quic の接続で DATAGRAM が送受信できること
+    ///
+    /// MOQT の OBJECT_DATAGRAM は QUIC DATAGRAM で運ぶ。loopback の実 QUIC 接続で、
+    /// 送信した datagram が反対側の受信口で取り出せることを確かめる。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn quic_datagram_round_trip() {
+        let (address, mut server, certificate) = start_quic_server();
+        // サーバーの accept が QUIC のハンドシェイクを進めるため、クライアントの
+        // 接続より先に待たせておく
+        let server_task = tokio::spawn(async move {
+            let connection = server.accept().await.expect("接続を受け入れられること");
+            let mut receiver = MoqDatagramReceiver::Quic(connection);
+            receiver
+                .recv_datagrams()
+                .await
+                .expect("datagram を受信できること")
+                .expect("接続が閉じていないこと")
+        });
+
+        let connection = connect_quic(address, certificate).await;
+        let (client_handle, _) = connection.split();
+        let client = MoqConnectionHandle::Quic(client_handle);
+
+        let payload = b"audio object";
+        client
+            .send_datagram(payload)
+            .await
+            .expect("datagram を送信できること");
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(10), server_task)
+            .await
+            .expect("datagram の受信がタイムアウトしないこと")
+            .expect("サーバータスクが完了すること");
+        assert!(
+            received.iter().any(|datagram| datagram == payload),
+            "送信した datagram が受信できること: {received:?}"
+        );
     }
 }

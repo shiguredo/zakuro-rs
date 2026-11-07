@@ -1,12 +1,12 @@
 //! QMux (draft-ietf-quic-qmux-02) 経由の MOQT 接続
 //!
 //! QMux は順序保証された 1 本の双方向バイトストリーム (TLS over TCP) の上で、QUIC version 1 の
-//! ストリーム操作と DATAGRAM 操作を多重化する。MOQT (draft-ietf-moq-transport-22) は TCP など
+//! ストリーム操作と DATAGRAM 操作を多重化する。MOQT (draft-ietf-moq-transport-23) は TCP など
 //! 他のトランスポート上で直接動かす方法を定義しておらず、QMux 上の MOQT は individual draft
 //! (`draft-nandakumar-moq-qmux-moqt-00`) が扱う。本モジュールは QMux の接続確立と接続維持だけを
 //! 担い、MOQT の状態機械は `session.rs` が駆動する。
 //!
-//! ALPN は native QUIC と同じ `moqt-22` を使う。QMux 上の MOQT は individual draft Section 3.2 が
+//! ALPN は native QUIC と同じ `moqt-23` を使う。QMux 上の MOQT は individual draft Section 3.2 が
 //! native QUIC と同じプロトコル識別子を使うと定めている。一方 draft-ietf-quic-qmux-02 Section 8.1
 //! は「QUIC マッピングと異なる識別子を MUST」とするが、MOQT 側に QMux 用の ALPN 登録が無いため
 //! interop を優先する。両 draft が決着したら見直すこと。節番号・規則は draft 由来であり将来の

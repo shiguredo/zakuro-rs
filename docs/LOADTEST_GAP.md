@@ -258,7 +258,7 @@
 ## 計測項目のチェックリスト
 
 「何が測れて、何が測れていないか」を項目単位で整理する。WebRTC の項目は W3C の
-WebRTC Statistics 仕様と既存ツールの実装、MoQ の項目は draft-ietf-moq-transport-22 と
+WebRTC Statistics 仕様と既存ツールの実装、MoQ の項目は draft-ietf-moq-transport-23 と
 既存の負荷生成器を基準にした。
 
 ### WebRTC (zakuro)

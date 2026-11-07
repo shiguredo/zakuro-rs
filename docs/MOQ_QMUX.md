@@ -1,7 +1,7 @@
 # QMux トランスポート対応の検討メモ
 
 zakuro-moq が QMux (draft-ietf-quic-qmux-02) 経由で MOQT relay へ接続するための検討結果と
-実装方針。仕様は draft-ietf-moq-transport-22 (2026-10-01 発行、最新の公開 I-D) と
+実装方針。仕様は draft-ietf-moq-transport-23 (2026-10-01 発行、最新の公開 I-D) と
 draft-ietf-quic-qmux-02、依存は `shiguredo_moqt` rev `49c711e` と qmux-rs rev `3e0dc0f` を
 前提とする。本文中の `ファイル:行` は実装前の検討時点のものを含むため、現在のソース上の位置は
 シンボル名で検索すること。
@@ -12,7 +12,7 @@ draft-ietf-quic-qmux-02、依存は `shiguredo_moqt` rev `49c711e` と qmux-rs r
   1 本のバイトストリームに QUIC version 1 のストリームと DATAGRAM を多重化する経路であり、
   UDP が使えない環境でも負荷試験できる。
 - MOQT 本体は TCP など他のトランスポート上で直接動かす方法を定義していない
-  (draft-ietf-moq-transport-22 §6.2)。QMux 上の MOQT は individual draft
+  (draft-ietf-moq-transport-23 §6.2)。QMux 上の MOQT は individual draft
   (`draft-nandakumar-moq-qmux-moqt-00`) が扱う experimental な組み合わせである。
 - 実装は qmux-rs の `tokio_qmux::Connection` を使い、QUIC の型に直接依存している
   `session.rs` はストリームの enum アダプタ経由にする。trait は作らない。
@@ -24,18 +24,18 @@ draft-ietf-quic-qmux-02、依存は `shiguredo_moqt` rev `49c711e` と qmux-rs r
 ### 1.1 ALPN
 
 QMux 上の MOQT は native QUIC と同じプロトコル識別子を使う
-(individual draft Section 3.2)。zakuro-moq も `moqt-22` を QUIC 直接接続と共有する。
+(individual draft Section 3.2)。zakuro-moq も `moqt-23` を QUIC 直接接続と共有する。
 
 一方 draft-ietf-quic-qmux-02 Section 8.1 は「同じプロトコルの QUIC マッピングと異なる識別子を
 MUST」としている。MOQT 側に QMux 用の ALPN 登録が無く、SVCB 互換レコードを定める draft も
 未整備であるため、interop を優先して同節から外れる。両 draft が決着したら見直す。
 
 rustls は TCP + TLS では ALPN 未交渉でもハンドシェイクを成功させるため、接続後に
-`alpn_protocol()` が `moqt-22` であることを明示的に確認する (§8.1 の client MUST)。
+`alpn_protocol()` が `moqt-23` であることを明示的に確認する (§8.1 の client MUST)。
 
 ### 1.2 SETUP の AUTHORITY / PATH
 
-draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) は WebTransport での送信を
+draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) は WebTransport での送信を
 MUST NOT とするが、QMux は WebTransport ではない。QMux でも native QUIC と同じく
 AUTHORITY / PATH を送る (individual draft の参照実装と同じ扱い)。`Session::new_client` には
 `Transport::Qmux` を渡す。
@@ -43,7 +43,7 @@ AUTHORITY / PATH を送る (individual draft の参照実装と同じ扱い)。`
 ### 1.3 制御ストリームとストリームの対応
 
 individual draft Section 4.2 は control stream を QMux の双方向 stream 0 とするが、
-これは draft-ietf-moq-transport-22 §6.4.1 (control stream は単方向) と矛盾する。
+これは draft-ietf-moq-transport-23 §6.4.1 (control stream は単方向) と矛盾する。
 zakuro-moq は QMux が QUIC version 1 のストリームを多重化する性質に従い、QUIC と 1 対 1 に
 対応させる。自側 control stream は単方向 stream を開いて stream type `0x2F00` + SETUP を書き、
 peer の control stream は最初の単方向 stream として受理する。
@@ -100,7 +100,7 @@ QMux の実効 idle timeout は両端の広告値のうち 0 でない値の最�
   無いが、速やかに配送できない DATAGRAM の破棄は許される (draft-ietf-quic-qmux-02 Section 6)。
 - TCP の再送で遅延が伸びるため、遅延を重視する試験では QUIC 直接接続を使うこと。
 - QMux の RESET_STREAM_AT は未実装のため、reset の `reliable_size` は常に `None` である。
-- 実 relay の ALPN が `moqt-22` 以外を要求する場合や、control stream を individual draft の
+- 実 relay の ALPN が `moqt-23` 以外を要求する場合や、control stream を individual draft の
   双方向 stream 0 で要求する場合は、relay 側の実装に合わせて見直す必要がある。
 
 ## 4. 検証

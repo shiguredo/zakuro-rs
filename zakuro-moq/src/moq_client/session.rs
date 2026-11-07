@@ -8,7 +8,7 @@
 //! タスクで読み、デコードしたメッセージをチャネルでメインタスクへ渡す (`Session` は
 //! `&mut self` を要求するため、複数ストリームを select! で直接読むことができない)。
 //!
-//! 対応する仕様は draft-ietf-moq-transport-22 (MOQT) と draft-ietf-moq-loc-04 (LOC) である。
+//! 対応する仕様は draft-ietf-moq-transport-23 (MOQT) と draft-ietf-moq-loc-04 (LOC) である。
 //! 節番号は将来の draft 改訂で変わる可能性がある。
 
 use std::collections::HashMap;
@@ -24,8 +24,8 @@ use shiguredo_moqt::message::ControlMessage;
 use shiguredo_moqt::message::common::TrackNamespace;
 use shiguredo_moqt::message_parameter::MessageParameters;
 use shiguredo_moqt::parameter::{
-    SETUP_OPTION_AUTHORITY, SETUP_OPTION_MOQT_IMPLEMENTATION, SETUP_OPTION_PATH, SetupOption,
-    SetupOptionValue, SetupOptions,
+    DEFAULT_MAX_CONTROL_MESSAGE_SIZE, SETUP_OPTION_AUTHORITY, SETUP_OPTION_MOQT_IMPLEMENTATION,
+    SETUP_OPTION_PATH, SetupOption, SetupOptionValue, SetupOptions,
 };
 use shiguredo_moqt::session::core::Session;
 use shiguredo_moqt::session::types::{
@@ -49,7 +49,7 @@ use crate::error::{ErrorMessage, Result};
 
 /// SETUP Option の MOQT_IMPLEMENTATION に載せる実装名
 ///
-/// draft-ietf-moq-transport-22 §9.1.5 (MOQT IMPLEMENTATION) は実装名とバージョンに
+/// draft-ietf-moq-transport-23 §9.1.5 (MOQT IMPLEMENTATION) は実装名とバージョンに
 /// 限ることを SHOULD としているため、クレートのバージョンを付ける。
 const MOQT_IMPLEMENTATION_NAME: &[u8] =
     concat!("zakuro-moq/", env!("CARGO_PKG_VERSION")).as_bytes();
@@ -243,7 +243,7 @@ enum RequestMessage {
 
 /// peer の制御ストリームから受信した GOAWAY の内容
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): New Session URI が空の場合は現在の URI を
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY): New Session URI が空の場合は現在の URI を
 /// 再利用する。移行の実行可否は `SessionConfig::migrate_on_goaway` と token の状態で
 /// `should_migrate` が判断する。
 struct GoawayInfo {
@@ -292,7 +292,7 @@ struct Publisher {
     accepted: bool,
     /// Forward State (1 のときだけ object を送る)
     ///
-    /// draft-ietf-moq-transport-22 §3.1.1 (Pausing Subscriptions): "The publisher does
+    /// draft-ietf-moq-transport-23 §3.1.1 (Pausing Subscriptions): "The publisher does
     /// not send Objects on a paused subscription, and does send them when it is not paused."
     /// FORWARD は request (トラック) 単位の値であるため、トラックごとに保持する。
     forward: bool,
@@ -464,7 +464,7 @@ impl Publisher {
         })?;
 
         // Session への登録はワイヤへ書く前に行う。フィルタ不通過の場合はワイヤへ出さない
-        // (draft-ietf-moq-transport-22 §3.3.3 (Combining Filters))
+        // (draft-ietf-moq-transport-23 §3.3.3 (Combining Filters))
         if let Err(e) = session.send_subgroup_object(stream_id, object_id, Some(&properties_bytes))
         {
             if matches!(e, SendRequestError::LocalFilterMismatch) {
@@ -519,7 +519,7 @@ impl Publisher {
     ///
     /// datagram には subgroup stream の FIN に相当する Group 終端の通知が無いため、
     /// Group の最終 object に END_OF_GROUP bit を立てる
-    /// (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))。
+    /// (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))。
     ///
     /// # Errors
     ///
@@ -567,7 +567,7 @@ impl Publisher {
 
         let payload_bytes = &payload[..self.config.object_size];
         // datagram は分割できず、経路の上限を超えた object は通知なく破棄される
-        // (draft-ietf-moq-transport-22 §11.2 (Datagrams))。送信前に判定してエラーにする
+        // (draft-ietf-moq-transport-23 §11.2 (Datagrams))。送信前に判定してエラーにする
         let datagram_size = header.len() + payload_bytes.len();
         if datagram_size > self.datagram_max_size {
             return Err(ErrorMessage::new(format!(
@@ -581,7 +581,7 @@ impl Publisher {
         }
 
         // Session への登録はワイヤへ送る前に行う。フィルタ不通過の場合はワイヤへ出さない
-        // (draft-ietf-moq-transport-22 §3.3.3 (Combining Filters))
+        // (draft-ietf-moq-transport-23 §3.3.3 (Combining Filters))
         if let Err(e) = session.send_object_datagram(
             request_id,
             self.group_id,
@@ -671,7 +671,7 @@ impl Publisher {
             },
         );
         // reset された Subgroup を再オープンすると Session が拒否することがある
-        // (draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams))。次の Group へ
+        // (draft-ietf-moq-transport-23 §11.3.2 (Closing Subgroup Streams))。次の Group へ
         // 進めて、新しい Subgroup として送り直す
         self.group_id += 1;
         self.object_id = 0;
@@ -685,7 +685,7 @@ impl Publisher {
     /// アプリケーションエラーコードを [`StreamReset`](super::StreamReset) として書き込み
     /// エラーに載せるため、それを Session へ渡す (QMux は公開 API から観測できないため
     /// `None` になる)。書き込み失敗を stream の終端とみなして Session へ
-    /// 通知し (draft-ietf-moq-transport-22 §11.3.2)、次の Group を新しい stream で送り直す。
+    /// 通知し (draft-ietf-moq-transport-23 §11.3.2)、次の Group を新しい stream で送り直す。
     fn on_stream_write_failure(
         &mut self,
         session: &mut Session,
@@ -728,7 +728,7 @@ fn publishers_ready_for_subscribe(publishers: &[Publisher]) -> bool {
 
 /// SUBGROUP_OBJECT に載せる Object ID Delta を求める
 ///
-/// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header): 最初の Object は絶対 ID を送り、
+/// draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header): 最初の Object は絶対 ID を送り、
 /// 以降は直前の Object ID との差から 1 を引いた Delta を送る。受信側は「直前の Object ID +
 /// Delta + 1」で絶対 ID を復元するため、フィルタで送らなかった Object があっても Delta が
 /// その分を吸収する (直前 ID は実際に送った Object のものだけを渡すこと)。
@@ -744,7 +744,7 @@ fn object_id_delta(prev_object_id: Option<u64>, object_id: u64) -> u64 {
 /// OBJECT_DATAGRAM に END_OF_GROUP bit を立てる object かどうかを返す
 ///
 /// datagram には subgroup stream の FIN に相当する Group 終端の通知が無いため、Group の
-/// 最終 object に END_OF_GROUP bit を立てる (draft-ietf-moq-transport-22 §11.2.1
+/// 最終 object に END_OF_GROUP bit を立てる (draft-ietf-moq-transport-23 §11.2.1
 /// (Object Datagram))。bit は「同じ Group ID で、この Object ID より大きい Object は
 /// 存在しない」ことを宣言する。
 fn is_end_of_group(object_id: u64, objects_per_group: u64) -> bool {
@@ -804,9 +804,10 @@ pub(crate) async fn run(
     let setup_message = take_setup_message(&mut session)?;
     control_send
         .write_all(
-            &encode_control_stream_setup(&setup_message).map_err(|e| {
-                ErrorMessage::new(format!("SETUP のエンコードに失敗しました: {e:?}"))
-            })?,
+            &encode_control_stream_setup(&setup_message, DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+                .map_err(|e| {
+                    ErrorMessage::new(format!("SETUP のエンコードに失敗しました: {e:?}"))
+                })?,
         )
         .await
         .map_err(|e| ErrorMessage::new(format!("SETUP の送信に失敗しました: {e}")))?;
@@ -861,7 +862,7 @@ pub(crate) async fn run(
         .collect();
 
     // 購読しているトラックの object は datagram でも届く
-    // (draft-ietf-moq-transport-22 §11.2 (Datagrams))。publish 専用のセッションでは
+    // (draft-ietf-moq-transport-23 §11.2 (Datagrams))。publish 専用のセッションでは
     // datagram を受信する必要が無いため、購読がある場合だけ受信する
     let mut datagram_receive = DatagramReceiveState {
         receiver: if subscriptions.is_empty() {
@@ -928,7 +929,7 @@ pub(crate) async fn run(
             read = peer_control.read(&mut control_buf), if !state.control_closed => {
                 let size = read.map_err(|e| ErrorMessage::new(format!("制御ストリームの読み込みに失敗しました: {e}")))?;
                 if size == 0 {
-                    // draft-ietf-moq-transport-22 §6.3 (Session initialization): control stream は
+                    // draft-ietf-moq-transport-23 §6.3 (Session initialization): control stream は
                     // セッション中に閉じてはならない
                     state.control_closed = true;
                     session
@@ -1113,7 +1114,7 @@ pub(crate) async fn run(
         }
 
         // GOAWAY を観測していた場合は、PUBLISH / SUBSCRIBE の初期 request を送る前に移行する。
-        // draft-ietf-moq-transport-22 §9.2 (GOAWAY): GOAWAY 受信後に新規 request を開始するのは
+        // draft-ietf-moq-transport-23 §9.2 (GOAWAY): GOAWAY 受信後に新規 request を開始するのは
         // SHOULD NOT であり、moqt-rs も send_publish / send_subscribe を PeerGoawayReceived で
         // 拒否する。ここで抜けないとセッションエラーとして終了してしまう
         if should_migrate(
@@ -1239,7 +1240,7 @@ pub(crate) async fn run(
 
         // peer の GOAWAY を受信したら、旧セッションを閉じて新セッションへ移行する。
         // 移行しない設定の場合は従来どおり peer がセッションを閉じるまで publish を続ける
-        // (draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration): GOAWAY は
+        // (draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration): GOAWAY は
         // クライアントに新セッションの確立を促す合図である)。
         // token キャンセル時は移行しない (呼び出し側が終了する) ため条件に含める
         if should_migrate(
@@ -1321,7 +1322,7 @@ async fn run_request_reader(
     tx: mpsc::Sender<RequestMessage>,
     token: CancellationToken,
 ) {
-    let mut decoder = MessageDecoder::new();
+    let mut decoder = MessageDecoder::new(DEFAULT_MAX_CONTROL_MESSAGE_SIZE);
     let mut buf = vec![0u8; READ_BUFFER_SIZE];
     loop {
         let read = tokio::select! {
@@ -1581,7 +1582,7 @@ async fn run_data_reader(
     // 先頭の stream type varint を読む。読み込んだバイトは SubgroupStreamDecoder にも
     // そのまま渡す必要があるため、生バイトを蓄積しておく
     let mut raw: Vec<u8> = Vec::new();
-    let mut type_decoder = MessageDecoder::new();
+    let mut type_decoder = MessageDecoder::new(DEFAULT_MAX_CONTROL_MESSAGE_SIZE);
     let stream_type = loop {
         match type_decoder.try_decode_varint() {
             Ok(Some(stream_type)) => break stream_type,
@@ -1783,7 +1784,7 @@ fn take_setup_message(session: &mut Session) -> Result<ControlMessage> {
 
 /// SETUP Options を構築する
 ///
-/// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) は WebTransport での送信を
+/// draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) は WebTransport での送信を
 /// MUST NOT としている。WebTransport では CONNECT で渡し、QUIC と QMux では SETUP に載せる。
 fn build_setup_options(config: &SessionConfig<'_>, transport: Transport) -> SetupOptions {
     let mut options = SetupOptions::new();
@@ -1851,7 +1852,7 @@ async fn accept_control_stream(
             }
         };
 
-        let mut decoder = MessageDecoder::new();
+        let mut decoder = MessageDecoder::new(DEFAULT_MAX_CONTROL_MESSAGE_SIZE);
         let stream_type = read_stream_type(&mut stream, &mut decoder).await?;
         tracing::info!("MOQT peer uni stream opened: stream_type={stream_type:#x}");
         if stream_type == shiguredo_moqt::stream::SETUP_STREAM_TYPE {
@@ -1917,12 +1918,16 @@ async fn drain_events(
             SessionEvent::SendControl(message) => {
                 // SETUP は初期化時に送り終えているため、ここへ来るのは GOAWAY であり、
                 // stream type は stream の先頭に 1 回だけ前置する
-                // (draft-ietf-moq-transport-22 §6.4.1 (Unidirectional Streams))。
+                // (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams))。
                 // SETUP 送信時に前置済みのため、続く GOAWAY には前置しない
-                // (draft-ietf-moq-transport-22 §9.2 (GOAWAY): GOAWAY は control stream 上で送る)
-                let bytes = message.encode().map_err(|e| {
-                    ErrorMessage::new(format!("制御メッセージのエンコードに失敗しました: {e:?}"))
-                })?;
+                // (draft-ietf-moq-transport-23 §9.2 (GOAWAY): GOAWAY は control stream 上で送る)
+                let bytes = message
+                    .encode(session.peer_control_message_size_limit().bytes())
+                    .map_err(|e| {
+                        ErrorMessage::new(format!(
+                            "制御メッセージのエンコードに失敗しました: {e:?}"
+                        ))
+                    })?;
                 state.control_send.write_all(&bytes).await.map_err(|e| {
                     ErrorMessage::new(format!("制御メッセージの送信に失敗しました: {e}"))
                 })?;
@@ -1938,11 +1943,13 @@ async fn drain_events(
                     .map_err(|e| {
                         ErrorMessage::new(format!("request stream の open に失敗しました: {e}"))
                     })?;
-                let bytes = message.encode().map_err(|e| {
-                    ErrorMessage::new(format!(
-                        "request メッセージのエンコードに失敗しました: {e:?}"
-                    ))
-                })?;
+                let bytes = message
+                    .encode(session.peer_control_message_size_limit().bytes())
+                    .map_err(|e| {
+                        ErrorMessage::new(format!(
+                            "request メッセージのエンコードに失敗しました: {e:?}"
+                        ))
+                    })?;
                 let tx = request_tx.clone();
                 let reader_token = token.child_token();
                 match send.write_all(&bytes).await {
@@ -1986,11 +1993,13 @@ async fn drain_events(
                         );
                         continue;
                     };
-                    let bytes = message.encode().map_err(|e| {
-                        ErrorMessage::new(format!(
-                            "request メッセージのエンコードに失敗しました: {e:?}"
-                        ))
-                    })?;
+                    let bytes = message
+                        .encode(session.peer_control_message_size_limit().bytes())
+                        .map_err(|e| {
+                            ErrorMessage::new(format!(
+                                "request メッセージのエンコードに失敗しました: {e:?}"
+                            ))
+                        })?;
                     let result = send.write_all(&bytes).await;
                     if result.is_ok() && fin {
                         let _ = send.finish().await;
@@ -2070,21 +2079,22 @@ async fn drain_events(
                 request_id,
                 parameters,
             } => {
-                // draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE): 受信側は REQUEST_OK または
-                // REQUEST_ERROR を 1 通返す MUST。FORWARD の反映は session 層が済ませている
-                // FORWARD は request (トラック) 単位の値であるため、該当トラックだけに適用する。
-                // セッション全体で 1 つ持つと、購読者のいないトラックへの FORWARD=0 で
-                // 他のトラックまで止まってしまう
-                if let Some(forward) = parameters.forward() {
+                // draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 受信側は REQUEST_OK または
+                // REQUEST_ERROR を 1 通返す MUST。PAUSED は request (トラック) 単位の値であるため、
+                // 該当トラックだけに適用する。セッション全体で 1 つ持つと、購読者のいない
+                // トラックへの PAUSED=1 で他のトラックまで止まってしまう
+                // (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 0 は unpaused、
+                // 1 は paused)
+                if let Some(paused) = parameters.paused() {
                     tracing::info!(
-                        "MOQT: REQUEST_UPDATE request_id={} forward={}",
+                        "MOQT: REQUEST_UPDATE request_id={} paused={}",
                         request_id,
-                        forward,
+                        paused,
                     );
                     if let Some(publishers) = publishers.as_deref_mut() {
                         for publisher in publishers.iter_mut() {
                             if publisher.request_id == Some(request_id) {
-                                publisher.on_forward_changed(forward != 0);
+                                publisher.on_forward_changed(paused == 0);
                             }
                         }
                     }
@@ -2124,7 +2134,7 @@ async fn drain_events(
                 stream_id,
                 error_code,
             } => {
-                // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes): open な
+                // draft-ietf-moq-transport-23 §12.2 (Session Termination Codes): open な
                 // subgroup stream で object header を待って DATA_STREAM_TIMEOUT が満了すると、
                 // Session はセッションを閉じずに受信方向への STOP_SENDING を指示する。
                 // このイベントは `Session::set_data_stream_timeout_ms` でタイムアウトを
@@ -2142,7 +2152,7 @@ async fn drain_events(
                 timeout,
                 on_request_stream,
             } => {
-                // draft-ietf-moq-transport-22 §9.2 (GOAWAY): control stream の GOAWAY は
+                // draft-ietf-moq-transport-23 §9.2 (GOAWAY): control stream の GOAWAY は
                 // セッション全体の移行、request stream の GOAWAY は当該 request の移行である。
                 // zakuro は 1 セッションに全トラックを載せているため per-request migration は
                 // 実装しておらず、セッション移行の対象は control stream の GOAWAY のみとする。
@@ -2166,6 +2176,21 @@ async fn drain_events(
                         );
                     }
                 }
+            }
+            // 自側が GOAWAY を送ったときだけ発行される。zakuro-moq はクライアントとして
+            // GOAWAY を送らないため通常は到達しない
+            SessionEvent::GoawayDrainReady => {
+                tracing::debug!("MOQT: GOAWAY drain completed");
+            }
+            // TRACK_STATUS は送らないため通常は到達しない。未知の Mandatory Track Property を
+            // 無視してセッションを継続する (draft-ietf-moq-transport-23 §3.7)
+            SessionEvent::TrackStatusUnsupported {
+                request_id,
+                unsupported_property_types,
+            } => {
+                tracing::warn!(
+                    "MOQT: TRACK_STATUS contains unsupported mandatory track properties: request_id={request_id} types={unsupported_property_types:?}"
+                );
             }
             SessionEvent::RequestErrorReceived {
                 request_id,
@@ -2265,7 +2290,7 @@ mod tests {
     /// Group の最終 object だけが END_OF_GROUP の対象になること
     ///
     /// datagram には FIN が無いため、Group の最終 object に END_OF_GROUP bit を立てて
-    /// Group の終端を伝える (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))。
+    /// Group の終端を伝える (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))。
     #[test]
     fn end_of_group_is_only_the_last_object_of_a_group() {
         // 1 Group 1 object の場合は毎回 End of Group になる

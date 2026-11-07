@@ -1,24 +1,45 @@
 //! MOQT の I/O 層で使うストリーム、datagram、接続ハンドルの抽象化
 //!
 //! `shiguredo_moqt::Session` は Sans I/O の状態機械であり、ワイヤの読み書きは呼び出し側の
-//! 責務である。zakuro-moq は QUIC 直接接続 (tobi-quic)、WebTransport over HTTP/3
-//! (tobi-webtransport)、WebTransport over HTTP/2、QMux の経路を持ち、`session.rs` は経路を
-//! 意識せずにセッションを駆動したい。そこでストリーム・接続ハンドル・accept・datagram の
-//! 送受信を enum で包み、必要な操作だけを提供する。
+//! 責務である。zakuro-moq は QUIC 直接接続 (Cargo feature で選ぶ tobi-quic / s2n-quic /
+//! ngtcp2)、WebTransport over HTTP/3、WebTransport over HTTP/2、QMux の経路を持ち、
+//! `session.rs` は経路を意識せずにセッションを駆動したい。そこでストリーム・接続ハンドル・
+//! accept・datagram の送受信を enum で包み、必要な操作だけを提供する。
 //!
 //! トレイトは作らない (時雨堂 Rust 規約)。各経路が同じ操作を提供する
 //! ため、enum の match で十分である。
 
+#[cfg(feature = "quic-s2n")]
+use std::task::Poll;
+
+#[cfg(feature = "quic-s2n")]
+use bytes::Bytes;
+#[cfg(feature = "quic-s2n")]
+use s2n_quic::connection::ReceiveStreamAcceptor as S2nRecvAcceptor;
+#[cfg(feature = "quic-s2n")]
+use s2n_quic::connection::{BidirectionalStreamAcceptor as S2nBidiAcceptor, Handle as S2nHandle};
+#[cfg(feature = "quic-s2n")]
+use tokio::io::AsyncReadExt;
+#[cfg(any(feature = "quic-tobi", feature = "quic-s2n"))]
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "quic-ngtcp2")]
+use super::quic;
 use super::{qmux, wt_h2, wt_h3};
 
 /// 送信ストリーム
 pub(crate) enum MoqSendStream {
-    /// QUIC 直接接続の送信ストリーム
+    /// tobi-quic の送信ストリーム
+    #[cfg(feature = "quic-tobi")]
     Quic(tobi_quic::stream::SendStream),
+    /// s2n-quic の送信ストリーム
+    #[cfg(feature = "quic-s2n")]
+    S2n(s2n_quic::stream::SendStream),
+    /// ngtcp2 の送信ストリーム
+    #[cfg(feature = "quic-ngtcp2")]
+    Ngtcp2(quic::ngtcp2::SendStream),
     /// WebTransport over HTTP/3 の送信ストリーム
     WtH3(wt_h3::SendStream),
     /// WebTransport over HTTP/2 の送信ストリーム
@@ -34,7 +55,12 @@ impl MoqSendStream {
     /// 解釈せず、同一ストリームを同一値で通知されることだけを前提にする。
     pub(crate) fn id(&self) -> u64 {
         match self {
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(stream) => stream.id(),
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(stream) => stream.id(),
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(stream) => stream.id(),
             Self::WtH3(stream) => stream.id(),
             Self::WtH2(stream) => stream.id(),
             Self::Qmux(stream) => stream.id().as_u64(),
@@ -48,8 +74,13 @@ impl MoqSendStream {
     /// ストリームの書き込みに失敗した場合はエラーになる。
     pub(crate) async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         match self {
-            // tobi-quic の SendStream は AsyncWrite を実装している
+            // tobi-quic と s2n-quic の SendStream は AsyncWrite を実装している
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(stream) => stream.write_all(buf).await,
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(stream) => stream.write_all(buf).await,
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(stream) => stream.write_all(buf).await,
             Self::WtH3(stream) => stream.write_all(buf).await,
             Self::WtH2(stream) => stream.write_all(buf).await,
             // tokio-qmux の write は渡したデータをすべて受け付けるまで待つ
@@ -64,7 +95,13 @@ impl MoqSendStream {
     /// FIN の送信に失敗した場合はエラーになる。
     pub(crate) async fn finish(&mut self) -> std::io::Result<()> {
         match self {
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(stream) => stream.finish().await.map_err(io_error),
+            // s2n-quic の finish は同期 API である
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(stream) => stream.finish().map_err(io_error),
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(stream) => stream.finish().await,
             Self::WtH3(stream) => stream.finish().await,
             Self::WtH2(stream) => stream.finish().await,
             Self::Qmux(stream) => stream.finish().await.map_err(io_error),
@@ -74,18 +111,25 @@ impl MoqSendStream {
     /// ストリームの送信方向を reset する
     ///
     /// `error_code` は MOQT のストリームリセットエラーコード
-    /// (draft-ietf-moq-transport-22 §12.5) である。QMux は QUIC version 1 のフレームを
+    /// (draft-ietf-moq-transport-23 §12.5) である。QMux は QUIC version 1 のフレームを
     /// 多重化するため、コード空間は native QUIC と共通である
     /// (draft-ietf-quic-qmux-02 Section 4)。
-    /// WebTransport over HTTP/3 は WT ヘッダーの配信を保証するため、対応ピアには
-    /// RESET_STREAM_AT を使う (tobi-webtransport が内部で処理する)。
+    /// ngtcp2 と WebTransport over HTTP/3 は対応ピアに RESET_STREAM_AT を送り、
+    /// 送信済みのバイト列を保証する。
     ///
     /// # Errors
     ///
     /// reset の送信に失敗した場合はエラーになる。
     pub(crate) async fn reset(&mut self, error_code: u64) -> std::io::Result<()> {
         match self {
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(stream) => stream.reset_stream(error_code).await.map_err(io_error),
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(stream) => stream
+                .reset(application_error(error_code))
+                .map_err(io_error),
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(stream) => stream.reset(error_code).await,
             Self::WtH3(stream) => stream.reset(error_code).await,
             Self::WtH2(stream) => stream.reset(error_code).await,
             Self::Qmux(stream) => stream.reset(error_code).await.map_err(io_error),
@@ -95,8 +139,15 @@ impl MoqSendStream {
 
 /// 受信ストリーム
 pub(crate) enum MoqRecvStream {
-    /// QUIC 直接接続の受信ストリーム
+    /// tobi-quic の受信ストリーム
+    #[cfg(feature = "quic-tobi")]
     Quic(tobi_quic::stream::ReceiveStream),
+    /// s2n-quic の受信ストリーム
+    #[cfg(feature = "quic-s2n")]
+    S2n(s2n_quic::stream::ReceiveStream),
+    /// ngtcp2 の受信ストリーム
+    #[cfg(feature = "quic-ngtcp2")]
+    Ngtcp2(quic::ngtcp2::RecvStream),
     /// WebTransport over HTTP/3 の受信ストリーム
     WtH3(wt_h3::RecvStream),
     /// WebTransport over HTTP/2 の受信ストリーム
@@ -109,7 +160,12 @@ impl MoqRecvStream {
     /// ストリーム ID を返す
     pub(crate) fn id(&self) -> u64 {
         match self {
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(stream) => stream.id(),
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(stream) => stream.id(),
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(stream) => stream.id(),
             Self::WtH3(stream) => stream.id(),
             Self::WtH2(stream) => stream.id(),
             Self::Qmux(stream) => stream.id().as_u64(),
@@ -124,7 +180,13 @@ impl MoqRecvStream {
     /// [`super::StreamReset`] としてエラーコードを保持する。
     pub(crate) async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(stream) => quic_read(stream, buf).await,
+            // s2n-quic の公開 API から reset のエラーコードは観測できない
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(stream) => stream.read(buf).await,
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(stream) => stream.read(buf).await,
             Self::WtH3(stream) => stream.read(buf).await,
             Self::WtH2(stream) => stream.read(buf).await,
             Self::Qmux(stream) => match stream.read(buf).await {
@@ -142,6 +204,7 @@ impl MoqRecvStream {
 /// `AsyncRead` を使わずに `receive` を使うのは、`AsyncRead` が reset を
 /// 汎用の `io::Error` に潰してエラーコードを失うためである。MOQT は reset の
 /// エラーコードをセッションへ通知する必要がある。
+#[cfg(feature = "quic-tobi")]
 async fn quic_read(
     stream: &mut tobi_quic::stream::ReceiveStream,
     buf: &mut [u8],
@@ -155,16 +218,10 @@ async fn quic_read(
 /// tobi-quic のストリームエラーを `std::io::Error` へ変換する
 ///
 /// ピアの reset は [`super::StreamReset`] としてエラーコードを保持する。
+#[cfg(feature = "quic-tobi")]
 fn quic_stream_error(error: tobi_quic::Error) -> std::io::Error {
     match &error {
-        tobi_quic::Error::Stream(tobi_quic::StreamError::Reset {
-            error_code,
-            reliable_size,
-            ..
-        }) => {
-            // RESET_STREAM_AT の reliable size は MOQT の Session へ渡さない
-            // (受信済みバイト数で代用しない)
-            let _ = reliable_size;
+        tobi_quic::Error::Stream(tobi_quic::StreamError::Reset { error_code, .. }) => {
             std::io::Error::other(super::StreamReset(*error_code))
         }
         _ => io_error(error),
@@ -174,7 +231,12 @@ fn quic_stream_error(error: tobi_quic::Error) -> std::io::Error {
 impl std::fmt::Debug for MoqRecvStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(stream) => f.debug_tuple("Quic").field(stream).finish(),
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(stream) => f.debug_tuple("S2n").field(stream).finish(),
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(stream) => f.debug_tuple("Ngtcp2").field(&stream.id()).finish(),
             Self::WtH3(stream) => f.debug_tuple("WtH3").field(stream).finish(),
             Self::WtH2(stream) => f.debug_tuple("WtH2").field(&stream.id()).finish(),
             Self::Qmux(stream) => f.debug_tuple("Qmux").field(stream).finish(),
@@ -184,13 +246,20 @@ impl std::fmt::Debug for MoqRecvStream {
 
 /// 接続のハンドル
 ///
-/// 複数タスクから clone して使う (ストリームの open と接続の close)。
-/// tobi-quic と QMux は接続のハンドル、WebTransport の各経路は駆動タスクへの
+/// 複数タスクから clone して使う (ストリームの open と接続の close)。tobi-quic /
+/// s2n-quic / QMux は接続のハンドル、ngtcp2 と WebTransport の各経路は駆動タスクへの
 /// チャネルを持つ。
 #[derive(Clone)]
 pub(crate) enum MoqConnectionHandle {
-    /// QUIC 直接接続のハンドル
+    /// tobi-quic の接続ハンドル
+    #[cfg(feature = "quic-tobi")]
     Quic(tobi_quic::Connection),
+    /// s2n-quic の接続ハンドル
+    #[cfg(feature = "quic-s2n")]
+    S2n(S2nHandle),
+    /// ngtcp2 の接続ハンドル
+    #[cfg(feature = "quic-ngtcp2")]
+    Ngtcp2(quic::ngtcp2::Handle),
     /// WebTransport over HTTP/3 の接続ハンドル
     WtH3(wt_h3::Handle),
     /// WebTransport over HTTP/2 の接続ハンドル
@@ -209,11 +278,20 @@ impl MoqConnectionHandle {
         match self {
             // ピアのストリーム上限に達している間は待つ。上限に達するたびに
             // 呼び出し側へエラーを返すと、購読者の増加で publish が止まる
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(handle) => handle
                 .open_send_stream_wait()
                 .await
                 .map(MoqSendStream::Quic)
                 .map_err(io_error),
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(handle) => handle
+                .open_send_stream()
+                .await
+                .map(MoqSendStream::S2n)
+                .map_err(io_error),
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(handle) => handle.open_send_stream().await.map(MoqSendStream::Ngtcp2),
             Self::WtH3(handle) => handle.open_send_stream().await.map(MoqSendStream::WtH3),
             Self::WtH2(handle) => handle.open_send_stream().await.map(MoqSendStream::WtH2),
             Self::Qmux(connection) => connection
@@ -235,6 +313,7 @@ impl MoqConnectionHandle {
         &mut self,
     ) -> std::io::Result<(MoqRecvStream, MoqSendStream)> {
         match self {
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(handle) => {
                 let stream = handle
                     .open_bidirectional_stream_wait()
@@ -242,6 +321,17 @@ impl MoqConnectionHandle {
                     .map_err(io_error)?;
                 let (send, recv) = stream.split();
                 Ok((MoqRecvStream::Quic(recv), MoqSendStream::Quic(send)))
+            }
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(handle) => {
+                let stream = handle.open_bidirectional_stream().await.map_err(io_error)?;
+                let (recv, send) = stream.split();
+                Ok((MoqRecvStream::S2n(recv), MoqSendStream::S2n(send)))
+            }
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(handle) => {
+                let (recv, send) = handle.open_bidirectional_stream().await?;
+                Ok((MoqRecvStream::Ngtcp2(recv), MoqSendStream::Ngtcp2(send)))
             }
             Self::WtH3(handle) => {
                 let (recv, send) = handle.open_bidirectional_stream().await?;
@@ -266,6 +356,7 @@ impl MoqConnectionHandle {
     /// (draft-ietf-quic-qmux-02 Section 4)。
     pub(crate) async fn close(&self, error_code: u64) {
         match self {
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(handle) => {
                 // application close (type 0x1d) で MOQT のコードを送る
                 if let Err(e) = handle
@@ -275,6 +366,10 @@ impl MoqConnectionHandle {
                     tracing::warn!("QUIC connection close failed: {e}");
                 }
             }
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(handle) => handle.close(application_error(error_code)),
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(handle) => handle.close(error_code).await,
             Self::WtH3(handle) => handle.close(error_code).await,
             Self::WtH2(handle) => handle.close(error_code).await,
             Self::Qmux(connection) => {
@@ -289,12 +384,12 @@ impl MoqConnectionHandle {
 
     /// 接続をアイドルタイムアウトで切られないように維持する
     ///
-    /// QUIC 直接接続は tobi-quic の keep-alive を有効にする。WebTransport over HTTP/3 は
-    /// tobi-webtransport が QUIC 接続を公開しないため有効化できない (セッションが
-    /// 無通信になると relay の idle timeout で切られる可能性がある)。
-    /// QMux には keep-alive の API が無いため、QX_PING を定期的に送るタスクを起動する
-    /// ([`qmux::spawn_keep_alive`])。WebTransport over HTTP/2 は駆動タスクに
-    /// HTTP/2 PING を定期送信させる ([`wt_h2::Handle::enable_keep_alive`])。
+    /// tobi-quic と s2n-quic は QUIC の keep-alive を有効にする。ngtcp2 は接続構築時に
+    /// 有効にしている。WebTransport over HTTP/3 は tobi-webtransport が QUIC 接続を
+    /// 公開しないため有効化できない (セッションが無通信になると relay の idle timeout で
+    /// 切られる可能性がある)。QMux には keep-alive の API が無いため、QX_PING を定期的に
+    /// 送るタスクを起動する ([`qmux::spawn_keep_alive`])。WebTransport over HTTP/2 は
+    /// 駆動タスクに HTTP/2 PING を定期送信させる ([`wt_h2::Handle::enable_keep_alive`])。
     ///
     /// # Errors
     ///
@@ -302,7 +397,13 @@ impl MoqConnectionHandle {
     /// keep-alive は駆動タスクへの通知のみで失敗しない (接続終了で自ら止まる)。
     pub(crate) async fn keep_alive(&mut self, token: &CancellationToken) -> std::io::Result<()> {
         match self {
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(handle) => handle.keep_alive(true).await.map_err(io_error),
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(handle) => handle.keep_alive(true).map_err(io_error),
+            // ngtcp2 の keep-alive は接続作成時に設定済みである
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(_) => Ok(()),
             // tobi-webtransport は QUIC 接続を公開しないため keep-alive を設定できない
             Self::WtH3(_) => Ok(()),
             // HTTP/2 の PING を駆動タスクが送る。MOQT には PING が無いため、
@@ -331,10 +432,31 @@ impl MoqConnectionHandle {
     /// エラーになる。
     pub(crate) async fn send_datagram(&self, data: &[u8]) -> std::io::Result<()> {
         match self {
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(handle) => handle
                 .send_datagram_wait(data.to_vec())
                 .await
                 .map_err(io_error),
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(handle) => {
+                let mut bytes = Bytes::copy_from_slice(data);
+                // `poll_send_datagram` は空きが無いとき `Waker` を登録するため、
+                // ポーリングで待たずに空きができ次第おきる
+                std::future::poll_fn(|cx| {
+                    let result = handle.datagram_mut(
+                        |sender: &mut s2n_quic::provider::datagram::default::Sender| {
+                            sender.poll_send_datagram(&mut bytes, cx)
+                        },
+                    );
+                    match result {
+                        Ok(poll) => poll.map_err(|e| io_error(format!("datagram send error: {e}"))),
+                        Err(e) => Poll::Ready(Err(io_error(format!("datagram query error: {e}")))),
+                    }
+                })
+                .await
+            }
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(handle) => handle.send_datagram(data).await,
             Self::WtH3(handle) => handle.send_datagram(data).await,
             Self::WtH2(handle) => handle.send_datagram(data).await,
             Self::Qmux(connection) => connection
@@ -347,8 +469,15 @@ impl MoqConnectionHandle {
 
 /// ピア起動の単方向ストリーム (data stream) を受け入れる口
 pub(crate) enum MoqRecvAcceptor {
-    /// QUIC 直接接続の単方向ストリーム acceptor
+    /// tobi-quic の単方向ストリーム acceptor
+    #[cfg(feature = "quic-tobi")]
     Quic(tobi_quic::StreamAcceptor),
+    /// s2n-quic の単方向ストリーム acceptor
+    #[cfg(feature = "quic-s2n")]
+    S2n(S2nRecvAcceptor),
+    /// ngtcp2 の単方向ストリーム acceptor
+    #[cfg(feature = "quic-ngtcp2")]
+    Ngtcp2(quic::ngtcp2::RecvAcceptor),
     /// WebTransport over HTTP/3 の単方向ストリーム acceptor
     WtH3(wt_h3::RecvAcceptor),
     /// WebTransport over HTTP/2 の単方向ストリーム acceptor
@@ -367,6 +496,7 @@ impl MoqRecvAcceptor {
     /// accept に失敗した場合はエラーになる。
     pub(crate) async fn accept_receive_stream(&mut self) -> std::io::Result<Option<MoqRecvStream>> {
         match self {
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(acceptor) => match acceptor.accept_receive_stream().await {
                 Ok(stream) => Ok(Some(MoqRecvStream::Quic(stream))),
                 // 接続が終了すると accept は接続終了エラーで戻る。セッションの
@@ -374,6 +504,17 @@ impl MoqRecvAcceptor {
                 Err(tobi_quic::Error::Connection(_)) => Ok(None),
                 Err(e) => Err(io_error(e)),
             },
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(acceptor) => acceptor
+                .accept_receive_stream()
+                .await
+                .map(|stream| stream.map(MoqRecvStream::S2n))
+                .map_err(io_error),
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(acceptor) => acceptor
+                .accept()
+                .await
+                .map(|stream| stream.map(MoqRecvStream::Ngtcp2)),
             Self::WtH3(acceptor) => acceptor
                 .accept()
                 .await
@@ -393,8 +534,15 @@ impl MoqRecvAcceptor {
 
 /// ピア起動の双方向ストリーム (request stream) を受け入れる口
 pub(crate) enum MoqBidiAcceptor {
-    /// QUIC 直接接続の双方向ストリーム acceptor
+    /// tobi-quic の双方向ストリーム acceptor
+    #[cfg(feature = "quic-tobi")]
     Quic(tobi_quic::StreamAcceptor),
+    /// s2n-quic の双方向ストリーム acceptor
+    #[cfg(feature = "quic-s2n")]
+    S2n(S2nBidiAcceptor),
+    /// ngtcp2 の双方向ストリーム acceptor
+    #[cfg(feature = "quic-ngtcp2")]
+    Ngtcp2(quic::ngtcp2::BidiAcceptor),
     /// WebTransport over HTTP/3 の双方向ストリーム acceptor
     WtH3(wt_h3::BidiAcceptor),
     /// WebTransport over HTTP/2 の双方向ストリーム acceptor
@@ -415,6 +563,7 @@ impl MoqBidiAcceptor {
         &mut self,
     ) -> std::io::Result<Option<(MoqRecvStream, MoqSendStream)>> {
         match self {
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(acceptor) => match acceptor.accept_bidirectional_stream().await {
                 Ok(stream) => {
                     let (send, recv) = stream.split();
@@ -425,6 +574,22 @@ impl MoqBidiAcceptor {
                 Err(tobi_quic::Error::Connection(_)) => Ok(None),
                 Err(e) => Err(io_error(e)),
             },
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(acceptor) => acceptor
+                .accept_bidirectional_stream()
+                .await
+                .map(|stream| {
+                    stream.map(|stream| {
+                        let (recv, send) = stream.split();
+                        (MoqRecvStream::S2n(recv), MoqSendStream::S2n(send))
+                    })
+                })
+                .map_err(io_error),
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(acceptor) => acceptor.accept().await.map(|stream| {
+                stream
+                    .map(|(recv, send)| (MoqRecvStream::Ngtcp2(recv), MoqSendStream::Ngtcp2(send)))
+            }),
             Self::WtH3(acceptor) => acceptor.accept().await.map(|stream| {
                 stream.map(|(recv, send)| (MoqRecvStream::WtH3(recv), MoqSendStream::WtH3(send)))
             }),
@@ -447,11 +612,19 @@ impl MoqBidiAcceptor {
 /// ピアから届く datagram の受け口
 ///
 /// MOQT の OBJECT_DATAGRAM は QUIC DATAGRAM で運ばれる
-/// (draft-ietf-moq-transport-22 §11.2 (Datagrams))。経路ごとに受信の仕組みが異なるため、
-/// 駆動タスクのチャネル (WebTransport) と tobi-quic の受信 API、QMux 接続を enum で包む。
+/// (draft-ietf-moq-transport-23 §11.2 (Datagrams))。経路ごとに受信の仕組みが異なるため、
+/// 駆動タスクのチャネル (ngtcp2 / WebTransport) と QUIC の datagram provider を enum で
+/// 包む。QMux は接続が受信キューを持つため接続そのものを保持する。
 pub(crate) enum MoqDatagramReceiver {
-    /// QUIC 直接接続の datagram 受信
+    /// tobi-quic の datagram 受信
+    #[cfg(feature = "quic-tobi")]
     Quic(tobi_quic::Connection),
+    /// s2n-quic の datagram 受信
+    #[cfg(feature = "quic-s2n")]
+    S2n(S2nHandle),
+    /// ngtcp2 の駆動タスクが転送する datagram
+    #[cfg(feature = "quic-ngtcp2")]
+    Ngtcp2(mpsc::UnboundedReceiver<Vec<u8>>),
     /// WebTransport over HTTP/3 の駆動タスクが転送する datagram
     WtH3(wt_h3::DatagramReceiver),
     /// WebTransport over HTTP/2 の駆動タスクが転送する datagram
@@ -471,12 +644,72 @@ impl MoqDatagramReceiver {
     /// 接続の datagram 受信に失敗した場合はエラーになる。
     pub(crate) async fn recv_datagrams(&mut self) -> std::io::Result<Option<Vec<Vec<u8>>>> {
         match self {
+            #[cfg(feature = "quic-tobi")]
             Self::Quic(connection) => match connection.receive_datagram().await {
                 Ok(datagram) => Ok(Some(vec![datagram])),
                 // 接続が終了すると datagram はもう届かない。セッションの終了として扱う
                 Err(tobi_quic::Error::Connection(_)) => Ok(None),
                 Err(e) => Err(io_error(e)),
             },
+            #[cfg(feature = "quic-s2n")]
+            Self::S2n(handle) => {
+                let mut first: Option<Bytes> = None;
+                let mut closed = false;
+                // 1 つも無いときに即座に返すと呼び出し側の受信ループが空回りして CPU を
+                // 使い切り、同じ runtime で動く QUIC エンドポイントの I/O を飢えさせる。
+                // 最初の 1 つは届くまで待ち、続けて届いている分はまとめて取る
+                std::future::poll_fn(|cx| {
+                    let result = handle.datagram_mut(
+                        |receiver: &mut s2n_quic::provider::datagram::default::Receiver| {
+                            receiver.poll_recv_datagram(cx)
+                        },
+                    );
+                    match result {
+                        Ok(Poll::Ready(Ok(datagram))) => {
+                            first = Some(datagram);
+                            Poll::Ready(())
+                        }
+                        Ok(Poll::Pending) => Poll::Pending,
+                        // 接続エラー。datagram はもう届かないため、接続の終了として扱う
+                        Ok(Poll::Ready(Err(e))) => {
+                            tracing::debug!("datagram receive ended: {e}");
+                            closed = true;
+                            Poll::Ready(())
+                        }
+                        Err(e) => {
+                            tracing::debug!("datagram query ended: {e}");
+                            closed = true;
+                            Poll::Ready(())
+                        }
+                    }
+                })
+                .await;
+                if closed {
+                    return Ok(None);
+                }
+                let first = first.expect("logical invariant: a datagram is received");
+                let mut datagrams = vec![first.to_vec()];
+                // 続けて届いている分を取る (空になったら返す)
+                let _ = handle.datagram_mut(
+                    |receiver: &mut s2n_quic::provider::datagram::default::Receiver| {
+                        while let Some(next) = receiver.recv_datagram() {
+                            datagrams.push(next.to_vec());
+                        }
+                    },
+                );
+                Ok(Some(datagrams))
+            }
+            #[cfg(feature = "quic-ngtcp2")]
+            Self::Ngtcp2(receiver) => {
+                let Some(first) = receiver.recv().await else {
+                    return Ok(None);
+                };
+                let mut datagrams = vec![first];
+                while let Ok(next) = receiver.try_recv() {
+                    datagrams.push(next);
+                }
+                Ok(Some(datagrams))
+            }
             Self::WtH3(receiver) => receiver.recv_datagrams().await,
             Self::WtH2(receiver) => {
                 let Some(first) = receiver.recv().await else {
@@ -502,6 +735,14 @@ impl MoqDatagramReceiver {
             }
         }
     }
+}
+
+/// MOQT のエラーコードを s2n-quic の application error へ変換する
+///
+/// 可変長整数で表現できない値は既存の挙動に合わせて `UNKNOWN` にする。
+#[cfg(feature = "quic-s2n")]
+fn application_error(error_code: u64) -> s2n_quic::application::Error {
+    s2n_quic::application::Error::new(error_code).unwrap_or(s2n_quic::application::Error::UNKNOWN)
 }
 
 /// 経路ごとのエラーを `std::io::Error` へ包む
@@ -657,158 +898,6 @@ mod tests {
         assert!(
             received.iter().any(|datagram| datagram == payload),
             "送信した DATAGRAM が受信できること: {received:?}"
-        );
-    }
-
-    /// loopback で tobi-quic のサーバーを起動する
-    ///
-    /// 自己署名証明書を生成し、ALPN `moqt-22` と QUIC DATAGRAM を有効にする。
-    /// モックやスタブではなく、実際の QUIC ハンドシェイクを行うサーバーである。
-    fn start_quic_server() -> (
-        std::net::SocketAddr,
-        tobi_quic::Server,
-        rustls::pki_types::CertificateDer<'static>,
-    ) {
-        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
-
-        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-            .expect("自己署名証明書を生成できること");
-        let certificate = certified.cert.der().clone();
-        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-            certified.signing_key.serialize_der(),
-        ));
-        let mut tls = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .expect("TLS 1.3 を設定できること")
-        .with_no_client_auth()
-        .with_single_cert(vec![certificate.clone()], private_key)
-        .expect("証明書と秘密鍵を設定できること");
-        tls.alpn_protocols = vec![b"moqt-22".to_vec()];
-        let server = tobi_quic::Server::builder()
-            .with_tls(tobi_quic::ServerTlsConfig::new(std::sync::Arc::new(tls)))
-            .with_io(tobi_quic::IoConfig::new(
-                "127.0.0.1:0".parse().expect("アドレスを解釈できること"),
-            ))
-            .with_datagram(tobi_quic::DatagramConfig::default())
-            .start()
-            .expect("QUIC サーバーを起動できること");
-        (server.local_addr(), server, certificate)
-    }
-
-    /// 起動済みのサーバーへ tobi-quic のクライアントで接続する
-    async fn connect_quic(
-        address: std::net::SocketAddr,
-        certificate: rustls::pki_types::CertificateDer<'static>,
-    ) -> tobi_quic::Connection {
-        let mut roots = rustls::RootCertStore::empty();
-        roots
-            .add(certificate)
-            .expect("自己署名証明書を信頼ストアへ追加できること");
-        let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .expect("TLS 1.3 を設定できること")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-        let client = super::super::quic::build_client(&std::sync::Arc::new(tls), false)
-            .expect("QUIC クライアントを構築できること");
-        super::super::quic::connect(&client, address, "localhost")
-            .await
-            .expect("MOQ relay 相当のサーバーへ接続できること")
-    }
-
-    /// tobi-quic の接続で単方向ストリームが往復すること
-    ///
-    /// MOQT の data stream は単方向ストリームで送る。実際の QUIC 接続で
-    /// open / write / finish / accept / read が成立することを確かめる。
-    #[tokio::test(flavor = "multi_thread")]
-    async fn quic_unidirectional_stream_round_trip() {
-        let (address, mut server, certificate) = start_quic_server();
-        // サーバーの accept が QUIC のハンドシェイクを進めるため、クライアントの
-        // 接続より先に待たせておく
-        let server_task = tokio::spawn(async move {
-            let connection = server.accept().await.expect("接続を受け入れられること");
-            let (_, acceptor) = connection.split();
-            let mut acceptor = MoqRecvAcceptor::Quic(acceptor);
-            let mut stream = acceptor
-                .accept_receive_stream()
-                .await
-                .expect("単方向 stream を受け入れられること")
-                .expect("stream が届いていること");
-            let mut buf = vec![0u8; 64];
-            let mut total = 0;
-            loop {
-                let size = stream
-                    .read(&mut buf[total..])
-                    .await
-                    .expect("読み込めること");
-                if size == 0 {
-                    break;
-                }
-                total += size;
-            }
-            buf.truncate(total);
-            buf
-        });
-
-        let connection = connect_quic(address, certificate).await;
-        let (client_handle, _) = connection.split();
-        let mut client = MoqConnectionHandle::Quic(client_handle);
-
-        let payload = b"hello tobi-quic";
-        let mut send = client
-            .open_send_stream()
-            .await
-            .expect("単方向 stream を開けること");
-        send.write_all(payload).await.expect("payload を書けること");
-        send.finish().await.expect("FIN を送れること");
-
-        let received = tokio::time::timeout(std::time::Duration::from_secs(10), server_task)
-            .await
-            .expect("stream の受信がタイムアウトしないこと")
-            .expect("サーバータスクが完了すること");
-        assert_eq!(received, payload);
-    }
-
-    /// tobi-quic の接続で DATAGRAM が送受信できること
-    ///
-    /// MOQT の OBJECT_DATAGRAM は QUIC DATAGRAM で運ぶ。loopback の実 QUIC 接続で、
-    /// 送信した datagram が反対側の受信口で取り出せることを確かめる。
-    #[tokio::test(flavor = "multi_thread")]
-    async fn quic_datagram_round_trip() {
-        let (address, mut server, certificate) = start_quic_server();
-        // サーバーの accept が QUIC のハンドシェイクを進めるため、クライアントの
-        // 接続より先に待たせておく
-        let server_task = tokio::spawn(async move {
-            let connection = server.accept().await.expect("接続を受け入れられること");
-            let mut receiver = MoqDatagramReceiver::Quic(connection);
-            receiver
-                .recv_datagrams()
-                .await
-                .expect("datagram を受信できること")
-                .expect("接続が閉じていないこと")
-        });
-
-        let connection = connect_quic(address, certificate).await;
-        let (client_handle, _) = connection.split();
-        let client = MoqConnectionHandle::Quic(client_handle);
-
-        let payload = b"audio object";
-        client
-            .send_datagram(payload)
-            .await
-            .expect("datagram を送信できること");
-
-        let received = tokio::time::timeout(std::time::Duration::from_secs(10), server_task)
-            .await
-            .expect("datagram の受信がタイムアウトしないこと")
-            .expect("サーバータスクが完了すること");
-        assert!(
-            received.iter().any(|datagram| datagram == payload),
-            "送信した datagram が受信できること: {received:?}"
         );
     }
 }

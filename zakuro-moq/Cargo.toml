@@ -41,15 +41,43 @@ webpki-roots = "1"
 # 負荷試験ツール共通の基盤 (統計 / HTTP サーバー / JSON-RPC)
 zakuro-core = { path = "../zakuro-core" }
 
+# CA 証明書を ngtcp2 に 1 枚ずつ渡すための PEM エンコード (quic-ngtcp2 で使う)
+[dependencies.base64ct]
+version = "1.8"
+features = ["alloc"]
+optional = true
+
+# s2n-quic の datagram 送受信 API が要求するバイト列型 (quic-s2n で使う)
+[dependencies.bytes]
+version = "1.12"
+optional = true
+
 # 複数キーを持つ依存はインラインテーブルではなくテーブルセクションで記述する。
 # tombi は行長超過のインラインテーブルを複数行に展開するが、複数行インラインテーブルは
 # TOML 1.1 の機能であり cargo がマニフェストを解析できない場合がある。
+
+# s2n-quic による QUIC 接続 (quic-s2n で使う)。
+# datagram provider を有効にして max_datagram_frame_size を広告する
+[dependencies.s2n-quic]
+version = "1.91"
+default-features = false
+features = [
+  "provider-address-token-default",
+  "provider-tls-rustls",
+  "unstable-provider-datagram",
+]
+optional = true
 
 # Media over QUIC Transport (MOQT) の Sans I/O プロトコル実装。
 # crates.io には未公開のため git 依存とし、再現性のため rev を固定する
 [dependencies.shiguredo_moqt]
 git = "https://github.com/shiguredo/moqt-rs"
-rev = "49c711e5832272a7dbde3f8953a6dd62815f7ad6"
+rev = "66eb946135b4f077eafdbac15f68f35078cb724d"
+
+# ngtcp2 による QUIC 接続 (quic-ngtcp2 で使う)
+[dependencies.shiguredo_ngtcp2_tokio]
+version = "2026.1.0-canary.4"
+optional = true
 
 # QMux (draft-ietf-quic-qmux-02) の Sans I/O 実装。
 # crates.io には未公開のため git 依存とし、再現性のため rev を固定する。
@@ -92,3 +120,17 @@ rev = "3e0dc0f6a7404b940a67a42e04f986a79811a046"
 [dev-dependencies]
 # QUIC と WebTransport の接続テスト用の自己署名証明書生成
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+# ngtcp2 の接続テスト用の証明書ファイルを保持する
+tempfile = "3.27"
+
+[features]
+default = ["quic-tobi"]
+# ngtcp2 (shiguredo_ngtcp2_tokio) をネイティブ QUIC のバックエンドにする
+quic-ngtcp2 = ["dep:base64ct", "dep:shiguredo_ngtcp2_tokio"]
+# s2n-quic をネイティブ QUIC のバックエンドにする
+quic-s2n = ["dep:bytes", "dep:s2n-quic"]
+# tobi-quic をネイティブ QUIC のバックエンドにする
+#
+# WebTransport over HTTP/3 は tobi-webtransport を使うため、この選択の対象外である。
+# ネイティブ QUIC のバックエンドは 3 つのうちちょうど 1 つを有効にすること
+quic-tobi = []

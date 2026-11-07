@@ -21,9 +21,9 @@ draft 由来であり、改訂や RFC 化で変わりうる。
 
 ### 1.1 ALPN / SETTINGS / Extended CONNECT
 
-HTTP/2 の ALPN は `h2` である (RFC 9113 §3.3)。MOQT のプロトコル識別子 `moqt-22` は
+HTTP/2 の ALPN は `h2` である (RFC 9113 §3.3)。MOQT のプロトコル識別子 `moqt-23` は
 TLS の ALPN ではなく、Extended CONNECT の `WT-Available-Protocols` / `WT-Protocol` で
-交渉する (draft-ietf-moq-transport-22 §6.2 (Session establishment))。
+交渉する (draft-ietf-moq-transport-23 §6.2 (Session establishment))。
 
 - クライアントは `SETTINGS_ENABLE_CONNECT_PROTOCOL=1` と `SETTINGS_WT_ENABLED=1`、
   WT の初期フロー制御値を SETTINGS で広告する (draft-ietf-webtrans-http2-15 §3.1 / §4.3.1)。
@@ -31,12 +31,12 @@ TLS の ALPN ではなく、Extended CONNECT の `WT-Available-Protocols` / `WT-
 - ピアが両方の SETTINGS を広告するまで CONNECT を送らない (§3.1 の MUST NOT)。
 - CONNECT は `:method=CONNECT`、`:protocol=webtransport`、`:scheme=https`、
   `:authority`、`:path` を設定する (§3.1 / §3.2)。`WT-Available-Protocols` には
-  RFC 8941 の sf-string として `"moqt-22"` を 1 要素の List で載せる。
-- 2xx 応答と `WT-Protocol: moqt-22` を検証してからストリームを開く (§3.3)。
+  RFC 8941 の sf-string として `"moqt-23"` を 1 要素の List で載せる。
+- 2xx 応答と `WT-Protocol: moqt-23` を検証してからストリームを開く (§3.3)。
 
 ### 1.2 MOQT の SETUP
 
-draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) は WebTransport での送信を
+draft-ietf-moq-transport-23 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) は WebTransport での送信を
 MUST NOT とする。wt-h3 と同じく `Transport::WebTransport` を `Session` に渡し、SETUP に
 AUTHORITY / PATH を載せない。
 
@@ -52,7 +52,7 @@ WT のストリーム ID は QUIC のストリーム ID を 2 bit の規約ご�
 ### 1.4 reset と STOP_SENDING
 
 - 送信方向の reset は `WT_RESET_STREAM` capsule で行う (§6.2)。MOQT のストリームリセット
-  エラーコード (draft-ietf-moq-transport-22 §12.5) をそのまま載せる。
+  エラーコード (draft-ietf-moq-transport-23 §12.5) をそのまま載せる。
 - 受信した reset は読み込みエラーに [`StreamReset`](../zakuro-moq/src/moq_client.rs) を
   載せ、`session.rs` が downcast して MOQT のストリーム reset として扱う。
 - `WT_STOP_SENDING` を受けた送信ストリームは、以降の write / finish をエラーにする (§6.3)。

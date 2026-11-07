@@ -157,6 +157,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | asn1-rs-derive | 0.6.0 | MIT OR Apache-2.0 |
 | asn1-rs-impl | 0.2.0 | MIT/Apache-2.0 |
 | atoi | 2.0.0 | MIT |
+| atomic-waker | 1.1.2 | Apache-2.0 OR MIT |
 | autocfg | 1.5.1 | Apache-2.0 OR MIT |
 | aws-lc-rs | 1.19.0 | ISC AND (Apache-2.0 OR ISC) |
 | aws-lc-sys | 0.47.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) |
@@ -164,15 +165,18 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | base64 | 0.23.1 | MIT OR Apache-2.0 |
 | base64ct | 1.8.3 | Apache-2.0 OR MIT |
 | bindgen | 0.72.1 | BSD-3-Clause |
+| bindgen | 0.73.2 | BSD-3-Clause |
 | bit-vec | 0.9.1 | Apache-2.0 OR MIT |
 | bitflags | 1.3.2 | MIT/Apache-2.0 |
 | bitflags | 2.13.2 | MIT OR Apache-2.0 |
 | bumpalo | 3.20.3 | MIT OR Apache-2.0 |
+| byteorder | 1.5.0 | Unlicense OR MIT |
 | bytes | 1.12.1 | MIT |
 | cast | 0.3.0 | MIT OR Apache-2.0 |
 | cc | 1.6.0 | MIT OR Apache-2.0 |
 | cexpr | 0.6.0 | Apache-2.0/MIT |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 |
+| chacha20 | 0.10.2 | MIT OR Apache-2.0 |
 | chrono | 0.4.45 | MIT OR Apache-2.0 |
 | clang-sys | 1.9.1 | Apache-2.0 |
 | cmake | 0.1.58 | MIT OR Apache-2.0 |
@@ -183,6 +187,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | const-random-macro | 0.1.16 | MIT OR Apache-2.0 |
 | core-foundation | 0.10.1 | MIT OR Apache-2.0 |
 | core-foundation-sys | 0.8.7 | MIT OR Apache-2.0 |
+| cpufeatures | 0.3.1 | MIT OR Apache-2.0 |
 | cranelift-assembler-x64 | 0.133.3 | Apache-2.0 WITH LLVM-exception |
 | cranelift-assembler-x64-meta | 0.133.3 | Apache-2.0 WITH LLVM-exception |
 | cranelift-bforest | 0.133.3 | Apache-2.0 WITH LLVM-exception |
@@ -199,6 +204,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | cranelift-native | 0.133.3 | Apache-2.0 WITH LLVM-exception |
 | cranelift-srcgen | 0.133.3 | Apache-2.0 WITH LLVM-exception |
 | crc32fast | 1.5.2 | MIT OR Apache-2.0 |
+| crossbeam-utils | 0.8.23 | MIT OR Apache-2.0 |
 | crossterm | 0.28.1 | MIT |
 | crossterm_winapi | 0.9.1 | MIT |
 | crunchy | 0.2.4 | MIT |
@@ -226,7 +232,11 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | foldhash | 0.1.5 | Zlib |
 | foldhash | 0.2.0 | Zlib |
 | fs_extra | 1.3.0 | MIT |
+| futures | 0.3.34 | MIT OR Apache-2.0 |
+| futures-channel | 0.3.34 | MIT OR Apache-2.0 |
 | futures-core | 0.3.34 | MIT OR Apache-2.0 |
+| futures-io | 0.3.34 | MIT OR Apache-2.0 |
+| futures-macro | 0.3.34 | MIT OR Apache-2.0 |
 | futures-sink | 0.3.34 | MIT OR Apache-2.0 |
 | futures-task | 0.3.34 | MIT OR Apache-2.0 |
 | futures-util | 0.3.34 | MIT OR Apache-2.0 |
@@ -241,12 +251,14 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 |
 | hashlink | 0.10.0 | MIT OR Apache-2.0 |
 | heck | 0.5.0 | MIT OR Apache-2.0 |
+| hex-literal | 1.1.0 | MIT OR Apache-2.0 |
 | http | 1.5.0 | MIT OR Apache-2.0 |
 | httparse | 1.10.1 | MIT OR Apache-2.0 |
 | iana-time-zone | 0.1.65 | MIT OR Apache-2.0 |
 | iana-time-zone-haiku | 0.1.2 | MIT OR Apache-2.0 |
 | indexmap | 2.14.2 | Apache-2.0 OR MIT |
 | insta | 1.49.0 | Apache-2.0 |
+| intrusive-collections | 0.10.3 | MIT OR Apache-2.0 |
 | itertools | 0.13.0 | MIT OR Apache-2.0 |
 | itoa | 1.0.18 | MIT OR Apache-2.0 |
 | jiff | 0.2.37 | Unlicense OR MIT |
@@ -290,6 +302,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | num-complex | 0.4.6 | MIT OR Apache-2.0 |
 | num-conv | 0.2.2 | MIT OR Apache-2.0 |
 | num-integer | 0.1.47 | MIT OR Apache-2.0 |
+| num-rational | 0.4.2 | MIT OR Apache-2.0 |
 | num-traits | 0.2.19 | MIT OR Apache-2.0 |
 | oid-registry | 0.8.1 | MIT OR Apache-2.0 |
 | once_cell | 1.21.4 | MIT OR Apache-2.0 |
@@ -309,6 +322,8 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | r-efi | 5.3.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later |
 | r-efi | 6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later |
 | raden | 2026.2.0 | Apache-2.0 |
+| rand | 0.10.3 | MIT OR Apache-2.0 |
+| rand_core | 0.10.1 | MIT OR Apache-2.0 |
 | rcgen | 0.14.10 | MIT OR Apache-2.0 |
 | redox_syscall | 0.5.18 | MIT |
 | regalloc2 | 0.15.2 | Apache-2.0 WITH LLVM-exception |
@@ -330,6 +345,13 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | rustls-webpki | 0.103.15 | ISC |
 | rustversion | 1.0.23 | MIT OR Apache-2.0 |
 | ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 |
+| s2n-codec | 0.91.0 | Apache-2.0 |
+| s2n-quic | 1.91.0 | Apache-2.0 |
+| s2n-quic-core | 0.91.0 | Apache-2.0 |
+| s2n-quic-crypto | 0.91.0 | Apache-2.0 |
+| s2n-quic-platform | 0.91.0 | Apache-2.0 |
+| s2n-quic-rustls | 0.91.0 | Apache-2.0 |
+| s2n-quic-transport | 0.91.0 | Apache-2.0 |
 | same-file | 1.0.6 | Unlicense/MIT |
 | schannel | 0.1.29 | MIT |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 |
@@ -342,11 +364,15 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | serde_json | 1.0.151 | MIT OR Apache-2.0 |
 | sharded-slab | 0.1.7 | MIT |
 | shiguredo_cmake | 4.4.0 | Apache-2.0 |
+| shiguredo_fdk_aac | 2026.1.0 | Apache-2.0 |
 | shiguredo_http11 | 2026.6.1 | Apache-2.0 |
-| shiguredo_http2 | 2026.1.0-canary.16 | Apache-2.0 |
+| shiguredo_http2 | 2026.1.0-canary.17 | Apache-2.0 |
 | shiguredo_http3 | 2026.1.0-canary.14 | Apache-2.0 |
 | shiguredo_moqt | 2026.0.0 | Apache-2.0 |
 | shiguredo_mp4 | 2026.5.0 | Apache-2.0 |
+| shiguredo_ngtcp2 | 2026.1.0-canary.4 | Apache-2.0 |
+| shiguredo_ngtcp2_sys | 2026.1.0-canary.4 | Apache-2.0 |
+| shiguredo_ngtcp2_tokio | 2026.1.0-canary.4 | Apache-2.0 |
 | shiguredo_openh264 | 2026.2.0 | Apache-2.0 |
 | shiguredo_opus | 2026.3.0 | Apache-2.0 |
 | shiguredo_qmux | 2026.0.0 | Apache-2.0 |
@@ -361,6 +387,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | simd_cesu8 | 1.2.0 | Apache-2.0 OR MIT |
 | simdutf8 | 0.1.5 | MIT OR Apache-2.0 |
 | similar | 2.7.0 | Apache-2.0 |
+| siphasher | 1.0.4 | MIT OR Apache-2.0 |
 | slab | 0.4.12 | MIT |
 | smallvec | 1.16.2 | MIT OR Apache-2.0 |
 | socket2 | 0.6.5 | MIT OR Apache-2.0 |
@@ -370,7 +397,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | strum_macros | 0.27.2 | MIT |
 | subtle | 2.6.1 | BSD-3-Clause |
 | syn | 2.0.119 | MIT OR Apache-2.0 |
-| syn | 3.0.6 | MIT OR Apache-2.0 |
+| syn | 3.0.9 | MIT OR Apache-2.0 |
 | synstructure | 0.13.2 | MIT |
 | tar | 0.4.46 | MIT OR Apache-2.0 |
 | target-lexicon | 0.13.5 | Apache-2.0 WITH LLVM-exception |

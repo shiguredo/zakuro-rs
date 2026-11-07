@@ -377,7 +377,7 @@ pub(crate) async fn run(
 
 /// GOAWAY の New Session URI から移行先の接続先を決定する
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY): New Session URI が空の場合は現在の URI を
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY): New Session URI が空の場合は現在の URI を
 /// 再利用し、非空の場合はクライアントはその URI を新セッションに使わなければならない
 /// (MUST)。URI の形式不正時の扱いは仕様に規定が無い。黙って現在の URI へフォールバックすると
 /// relay の誤りを隠したまま別の接続先へ繋ぐ可能性があるため、エラーにして停止する。
@@ -496,7 +496,7 @@ mod tests {
 
     /// New Session URI が空の場合は現在の接続先を再利用すること
     ///
-    /// draft-ietf-moq-transport-22 §9.2 (GOAWAY): "If the URI is zero bytes long, the
+    /// draft-ietf-moq-transport-23 §9.2 (GOAWAY): "If the URI is zero bytes long, the
     /// current URI is reused instead."
     #[test]
     fn resolve_next_endpoint_reuses_current_uri_when_empty() {

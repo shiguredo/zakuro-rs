@@ -1,7 +1,7 @@
 # MOQT の配送方式 (subgroup / datagram) 切り替えの検討メモ
 
 zakuro-moq で object の配送方式 (Delivery Mode) をトラック単位で選べるようにするための
-検討結果と実装方針。仕様は draft-ietf-moq-transport-22 (MOQT)、draft-ietf-moq-loc-04 (LOC)、
+検討結果と実装方針。仕様は draft-ietf-moq-transport-23 (MOQT)、draft-ietf-moq-loc-04 (LOC)、
 RFC 9000、RFC 9221 を前提とする。節番号は将来の draft 改訂で変わる可能性がある。
 
 ## 結論
@@ -9,7 +9,7 @@ RFC 9000、RFC 9221 を前提とする。節番号は将来の draft 改訂で�
 - `--tracks` と JSONC に配送方式を追加し、トラック単位で `subgroup` / `datagram` を選ぶ。
   既定は従来どおり `subgroup` とする。
 - Delivery Mode は Original Publisher が object ごとに決める値であり
-  (draft-ietf-moq-transport-22 §2.1.1 (Object Fields))、購読側とは交渉しない。したがって
+  (draft-ietf-moq-transport-23 §2.1.1 (Object Fields))、購読側とは交渉しない。したがって
   zakuro-moq の publish 設定として持つのが正しい。
 - datagram 配送を成立させるには、下位トランスポート (tobi-quic / WebTransport over
   HTTP/3 / WebTransport over HTTP/2 / QMux) の datagram 送受信と、購読側の datagram 受信が
@@ -23,7 +23,7 @@ RFC 9000、RFC 9221 を前提とする。節番号は将来の draft 改訂で�
 
 - Delivery Mode は object ごとの値で、Original Publisher が最初の送信方法で確定する。
   同じ subscription では、その object を確定した方式で送らなければならない
-  (draft-ietf-moq-transport-22 §2.1.1 (Object Fields))。
+  (draft-ietf-moq-transport-23 §2.1.1 (Object Fields))。
 - datagram で届いた object は Delivery Mode = Datagram、subgroup stream で届いた object は
   Delivery Mode = Subgroup になる (§11.2.1 / §11.3.1)。
 - 同じトラックで datagram と subgroup を混在させることは仕様上可能である。zakuro-moq は
@@ -35,7 +35,7 @@ RFC 9000、RFC 9221 を前提とする。節番号は将来の draft 改訂で�
 
 - datagram は分割できず、1 つが 1 つの QUIC パケット (WebTransport では HTTP Datagram) に
   収まる必要がある。経路の上限を超えた object は通知なく破棄される
-  (draft-ietf-moq-transport-22 §11.2 (Datagrams))。
+  (draft-ietf-moq-transport-23 §11.2 (Datagrams))。
 - datagram は再送されない (RFC 9221 §3)。QUIC の輻輳制御の制約は受ける。
 - Group の終端を知らせる FIN が無いため、Group の最終 object に END_OF_GROUP bit を立てる
   (§11.2.1 (Object Datagram))。この bit は「同じ Group ID で、この Object ID より大きい
@@ -67,7 +67,7 @@ RFC 9000、RFC 9221 を前提とする。節番号は将来の draft 改訂で�
 - LOC の Timestamp / Timescale プロパティは subgroup 配送と共通にする。
 - Group ID と Object ID の進め方は subgroup 配送と同じにする。Group の最終 object には
   END_OF_GROUP bit を立てる。
-- Session のフィルタ評価に落ちた object はワイヤへ送らない (draft-ietf-moq-transport-22
+- Session のフィルタ評価に落ちた object はワイヤへ送らない (draft-ietf-moq-transport-23
   §3.3.3 (Combining Filters))。subgroup 配送と同じ扱いである。
 - 送信キューが満杯の場合は空きができるまで待つ。待たずに捨てると、音声の欠落として現れる
   うえ送信数の計測もずれる。

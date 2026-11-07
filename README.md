@@ -20,7 +20,7 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 | バイナリ | ディレクトリ | 対象 | 主な依存 |
 |---|---|---|---|
 | `zakuro` | `zakuro/` | Sora WebRTC SFU | libwebrtc (Sora Rust SDK)・DuckDB |
-| `zakuro-moq` | `zakuro-moq/` | Sora MoQ (Media over QUIC 実装) のリレー | tobi-quic / tobi-webtransport、moqt-rs (`shiguredo_moqt`) |
+| `zakuro-moq` | `zakuro-moq/` | Sora MoQ (Media over QUIC 実装) のリレー | tobi-quic / tobi-webtransport (既定)、s2n-quic、ngtcp2、moqt-rs (`shiguredo_moqt`) |
 
 両者で共有する基盤 (統計・HTTP サーバー・JSON-RPC) は `zakuro-core/` に置いています。
 
@@ -242,14 +242,14 @@ TLS は既定で証明書を検証します。relay の CA 証明書を指定す
 
 `--transport` で下位トランスポートを選びます (既定は `quic`)。
 
-- `quic`: tobi-quic による QUIC 直接接続。UDP が必要です。ALPN は `moqt-22` です。
+- `quic`: tobi-quic による QUIC 直接接続。UDP が必要です。ALPN は `moqt-23` です。
 - `wt-h3`: tobi-webtransport による WebTransport over HTTP/3 接続。UDP が必要です。
-  ALPN は `h3`、WebTransport のサブプロトコルは `moqt-22` です。
+  ALPN は `h3`、WebTransport のサブプロトコルは `moqt-23` です。
   URL は `moqt://` のまま指定し、パスとクエリーは HTTPS の Extended CONNECT に渡します。
   tobi-webtransport が QUIC 接続を公開しないため QUIC の keep-alive は設定できません。
   Forward State 0 などで無通信が続くと、relay の idle timeout で切られる可能性があります。
 - `wt-h2`: WebTransport over HTTP/2 接続。TCP + TLS 上で動くため UDP は不要です。
-  ALPN は `h2`、WebTransport のサブプロトコルは `moqt-22` です。URL は `moqt://` のまま
+  ALPN は `h2`、WebTransport のサブプロトコルは `moqt-23` です。URL は `moqt://` のまま
   指定し、パスとクエリーは Extended CONNECT に渡します。reset は `WT_RESET_STREAM`
   capsule で行うため RESET_STREAM_AT は不要ですが、relay の WebTransport capsule 対応に
   依存する experimental な経路です。QUIC を使いません。
@@ -257,11 +257,34 @@ TLS は既定で証明書を検証します。relay の CA 証明書を指定す
   QUIC version 1 のストリームと DATAGRAM を多重化するため、UDP が使えない環境でも接続できます。
   QMux 上の MOQT は experimental であり、QMux を終端できる relay が必要です。TCP の再送で
   遅延が伸びるため、遅延を重視する試験では QUIC 直接接続を使ってください。ALPN は QUIC 直接接続と
-  同じ `moqt-22` です。DATAGRAM は TCP 上で信頼的かつ順序どおりに届きます。
+  同じ `moqt-23` です。DATAGRAM は TCP 上で信頼的かつ順序どおりに届きます。
 
-QUIC 直接接続は tobi-quic (`shiguredo/tobi-quic` の main ブランチ) を使います。UDP ソケットは
-インスタンス内でアドレスファミリごとに共有し、仮想クライアントごとに接続を 1 本確立します。
-tobi-quic は `RESET_STREAM_AT` の受理を広告し、ピアが対応している場合は送信済みデータの配信を
+QUIC 直接接続の実装は Cargo feature で選びます (`--quic-backend` のような CLI オプションは
+ありません)。3 つのうちちょうど 1 つを有効にしてください。
+
+| feature | QUIC 実装 | 備考 |
+| --- | --- | --- |
+| `quic-tobi` (既定) | tobi-quic (`shiguredo/tobi-quic` の main ブランチ) | |
+| `quic-s2n` | s2n-quic | |
+| `quic-ngtcp2` | ngtcp2 (`shiguredo_ngtcp2_tokio`) | |
+
+この選択が影響するのは `--transport quic` だけです。`wt-h3` は常に tobi-webtransport を
+使うため、どの feature でも利用できます。
+
+```bash
+# 既定の tobi-quic でビルドする
+cargo build -p zakuro-moq
+
+# s2n-quic でビルドする
+cargo build -p zakuro-moq --no-default-features --features quic-s2n
+
+# ngtcp2 でビルドする
+cargo build -p zakuro-moq --no-default-features --features quic-ngtcp2
+```
+
+どのバックエンドでも UDP ソケットはインスタンス内でアドレスファミリごとに共有し、仮想
+クライアントごとに接続を 1 本確立します (ngtcp2 は接続ごとにソケットを作ります)。
+`quic-tobi` は `RESET_STREAM_AT` の受理を広告し、ピアが対応している場合は送信済みデータの配信を
 保証してストリームを reset します。対応していないピアには通常の `RESET_STREAM` を送ります。
 
 `wt-h3` は tobi-webtransport (`shiguredo/tobi-quic` の main ブランチ) を使います。
@@ -324,7 +347,7 @@ WebTransport over HTTP/2 の実装方針と制約は
 ### 配送方式 (`subgroup` / `datagram`)
 
 MOQT の object の配送方式 (Delivery Mode) は Original Publisher が object ごとに決める値で、
-購読側とは交渉しません (draft-ietf-moq-transport-22 §2.1.1 (Object Fields))。zakuro-moq は
+購読側とは交渉しません (draft-ietf-moq-transport-23 §2.1.1 (Object Fields))。zakuro-moq は
 トラック単位で選べます。`--tracks` の 4 番目に `subgroup` または `datagram` を指定し、
 省略した場合は `subgroup` になります。
 
@@ -342,7 +365,7 @@ cargo run -p zakuro-moq -- \
 1 object が小さく、遅れた object を届けるより落とす方がよいメディアに向いています
 (draft-ietf-moq-loc-04 §4.1 (Application with one audio track))。subgroup 配送では Group の
 終端を stream の FIN で伝えますが、datagram には FIN が無いため Group の最終 object に
-END_OF_GROUP bit を立てます (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))。
+END_OF_GROUP bit を立てます (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))。
 
 datagram は分割できず、1 つの QUIC パケットに収まる必要があります (RFC 9221 §5)。経路の
 上限を超えた datagram は送信できないため、`--datagram-max-size` (既定 1160 バイト) を上限と

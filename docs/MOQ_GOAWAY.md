@@ -1,7 +1,7 @@
 # MOQT GOAWAY 移行 (New Session URI への再接続) 検討メモ
 
 zakuro-moq が GOAWAY を受信したときに New Session URI へ再接続する仕組みの検討結果と実装方針。
-仕様は draft-ietf-moq-transport-22 (2026-10-01 発行、最新の公開 I-D)、依存は
+仕様は draft-ietf-moq-transport-23 (2026-10-01 発行、最新の公開 I-D)、依存は
 `shiguredo_moqt` rev `49c711e` を前提とする。本文書は実装前の検討内容を残したものであり、
 実装は本文書の「結論」と「設計」に従っている。本文中の `ファイル:行` は実装前の検討時点のものを
 含むため、現在のソース上の位置はシンボル名で検索すること。
@@ -22,7 +22,7 @@ zakuro-moq が GOAWAY を受信したときに New Session URI へ再接続す�
 
 ## 1. 一次資料の規範
 
-出典: https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.txt
+出典: https://www.ietf.org/archive/id/draft-ietf-moq-transport-23.txt
 (§ 番号は -22 のもの。引用は原文のまま)
 
 ### 1.1 §6.6.1 Graceful Session Migration
@@ -142,7 +142,7 @@ moqt-rs f91baf3 の受信側挙動:
   あることを info ログに出す (記録しない)。URI はログ注入を避けるため Debug 表記でログに出す。
 - 移行判定は `should_migrate(has_goaway, migrate_on_goaway, cancelled)` に集約した。
   GOAWAY 受信後に新規 request を送らないよう、ループ先頭と PUBLISH / SUBSCRIBE を送る前、
-  メインループ末尾で判定する。これは draft-ietf-moq-transport-22 §9.2 (GOAWAY) の SHOULD NOT
+  メインループ末尾で判定する。これは draft-ietf-moq-transport-23 §9.2 (GOAWAY) の SHOULD NOT
   と、moqt-rs が `send_publish` / `send_subscribe` を
   `SendRequestError::PeerGoawayReceived` で拒否する挙動に合わせるためである。
 - メインループ末尾でも判定して break する。break 後の既存終了処理が publisher stream の

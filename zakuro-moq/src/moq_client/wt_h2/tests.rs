@@ -471,9 +471,9 @@ fn verify_connect_request(headers: &[HeaderField]) -> std::result::Result<(), St
     }
     let available = value(b"wt-available-protocols")
         .ok_or_else(|| "WT-Available-Protocols がありません".to_string())?;
-    if available != br#""moqt-22""# {
+    if available != br#""moqt-23""# {
         return Err(format!(
-            "WT-Available-Protocols が moqt-22 ではありません: {:?}",
+            "WT-Available-Protocols が moqt-23 ではありません: {:?}",
             String::from_utf8_lossy(available)
         ));
     }
@@ -618,22 +618,22 @@ fn build_connect_headers_offers_moqt_protocol() {
         .expect("WT-Available-Protocols が設定されること");
     // RFC 8941 の sf-string を 1 要素の List として送る
     assert_eq!(
-        available, br#""moqt-22""#,
-        "WT-Available-Protocols が moqt-22 であること"
+        available, br#""moqt-23""#,
+        "WT-Available-Protocols が moqt-23 であること"
     );
 }
 
-/// 2xx 応答の WT-Protocol が moqt-22 なら受理する
+/// 2xx 応答の WT-Protocol が moqt-23 なら受理する
 #[test]
-fn verify_wt_protocol_accepts_moqt_22() {
-    let headers = vec![HeaderField::from_static(b"wt-protocol", b"\"moqt-22\"")];
-    verify_wt_protocol(&headers).expect("moqt-22 は受理されること");
+fn verify_wt_protocol_accepts_moqt_23() {
+    let headers = vec![HeaderField::from_static(b"wt-protocol", b"\"moqt-23\"")];
+    verify_wt_protocol(&headers).expect("moqt-23 は受理されること");
 }
 
 /// WT-Protocol のパラメータは無視する (RFC 8941 / draft-ietf-webtrans-http2-15 §3.3)
 #[test]
 fn verify_wt_protocol_ignores_parameters() {
-    let headers = vec![HeaderField::from_static(b"wt-protocol", b"\"moqt-22\";x=1")];
+    let headers = vec![HeaderField::from_static(b"wt-protocol", b"\"moqt-23\";x=1")];
     verify_wt_protocol(&headers).expect("パラメータ付きでも受理されること");
 }
 
@@ -644,7 +644,7 @@ fn verify_wt_protocol_rejects_invalid_selection() {
         // 別のプロトコル
         &b"\"moqt-21\""[..],
         // List (Item of String ではない)
-        &b"\"moqt-22\", \"moqt-21\""[..],
+        &b"\"moqt-23\", \"moqt-21\""[..],
         // 非 String
         &b"token"[..],
     ] {
@@ -1558,8 +1558,8 @@ async fn connect_requires_wt_protocol_selection() {
 
     let error = expect_connect_error(connect_client(addr, &client_tls).await);
     assert!(
-        error.to_string().contains("moqt-22"),
-        "moqt-22 の交渉失敗のエラーになること: {error}"
+        error.to_string().contains("moqt-23"),
+        "moqt-23 の交渉失敗のエラーになること: {error}"
     );
 
     server
