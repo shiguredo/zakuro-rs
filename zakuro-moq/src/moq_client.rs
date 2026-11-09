@@ -132,9 +132,10 @@ pub(crate) async fn run(
         .iter()
         .map(|track| session::TrackConfig {
             name: format!("{}-{}-{}", track.name, instance_id, vc_id),
-            object_rate: track.object_rate,
-            object_size: track.object_size,
-            delivery: track.delivery,
+            object_rate: track.media.object_rate(),
+            object_size: track.media.object_size(),
+            objects_per_group: track.media.objects_per_group(),
+            delivery: track.media.delivery(),
         })
         .collect();
     let track_names: Vec<String> = tracks.iter().map(|t| t.name.clone()).collect();

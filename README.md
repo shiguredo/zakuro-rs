@@ -228,11 +228,23 @@ Sora MoQ (Media over QUIC 実装) のリレーに対する publish 負荷試験�
 cargo run -p zakuro-moq -- \
   --url moqt://relay.example.com:4433 \
   --namespace zakuro \
-  --tracks video:30:1000,audio:50:200 \
+  --tracks video:30:1000000:2,audio:24000:0.02 \
   --vcs 50 \
   --vcs-hatch-rate 10 \
   --duration 60
 ```
+
+payload は符号化しません。ビットレートから求めたサイズのダミーバイト列 (`位置 % 251`) を送ります。
+コーデックを載せる経路はありません。
+
+映像の `video:30:1000000:2` は、30 fps、1_000_000 bit/s、Group 間隔 2 秒です。
+2 秒ぶんの 60 フレームを 1 Group にし、その Group を Subgroup ID 0 の stream 1 本で送り、
+終わりで FIN します (draft-ietf-moq-loc-05 §4.2)。1 frame のサイズは
+`bitrate / 8 / framerate` を丸めたバイト数です。
+
+音声の `audio:24000:0.02` は、24_000 bit/s、チャンク間隔 20 ms です。
+1 チャンクが 1 object かつ 1 Group で、Object ID は 0 のまま Group ID だけが増えます。
+配送は datagram です (draft-ietf-moq-loc-05 §4.1)。
 
 TLS は既定で証明書を検証します。relay の CA 証明書を指定する場合は `--ca-cert <PEM>`、
 検証をスキップする場合は `--insecure` を使います。`quic` / `wt-h3` / `wt-h2` / `qmux` の
@@ -290,8 +302,8 @@ cargo build -p zakuro-moq --no-default-features --features quic-ngtcp2
 `wt-h3` は tobi-webtransport (`shiguredo/tobi-quic` の main ブランチ) を使います。
 HTTP/3 SETTINGS と QUIC transport parameter を検証してから接続し、単方向・双方向ストリーム、
 WT フロー制御、reset / STOP_SENDING、drain / close を処理します。
-MOQT の object は既定では subgroup stream で送信し、トラック単位で OBJECT_DATAGRAM にも
-切り替えられます。詳細は「配送方式」の節を参照してください。
+映像は subgroup stream、音声は OBJECT_DATAGRAM で送ります。Group の切り方は
+「映像と音声」の節を参照してください。
 
 `wt-h2` は tokio + `shiguredo_http2` (Sans I/O) + rustls で実装しています。HTTP/2 SETTINGS
 (`SETTINGS_ENABLE_CONNECT_PROTOCOL` / `SETTINGS_WT_ENABLED` / WT 初期フロー制御) と
@@ -303,7 +315,7 @@ DATAGRAM は `WT_DATAGRAM` capsule で運びます。接続ごとに TCP ソケ�
 ```bash
 cargo run -p zakuro-moq -- \
   --url moqt://relay.example.com:4433 \
-  --tracks video:30:1000 \
+  --tracks video \
   --vcs 10
 ```
 
@@ -313,7 +325,7 @@ WebTransport over HTTP/3 経由で接続する場合は次のように指定し�
 cargo run -p zakuro-moq -- \
   --url moqt://relay.example.com:4433/moq \
   --transport wt-h3 \
-  --tracks video:30:1000 \
+  --tracks video \
   --vcs 10
 ```
 
@@ -324,7 +336,7 @@ over HTTP/2 を終端できる必要があります。
 cargo run -p zakuro-moq -- \
   --url moqt://relay.example.com:4433/moq \
   --transport wt-h2 \
-  --tracks video:30:1000 \
+  --tracks video \
   --vcs 10
 ```
 
@@ -335,7 +347,7 @@ cargo run -p zakuro-moq -- \
   --url moqt://relay.example.com:4433 \
   --transport qmux \
   --namespace zakuro \
-  --tracks video:30:1000 \
+  --tracks video \
   --vcs 10
 ```
 
@@ -344,28 +356,38 @@ WebTransport over HTTP/2 の実装方針と制約は
 [docs/MOQ_WEBTRANSPORT_H2.md](docs/MOQ_WEBTRANSPORT_H2.md)、配送方式の判断は
 [docs/MOQ_DELIVERY_MODE.md](docs/MOQ_DELIVERY_MODE.md) にまとめています。
 
-### 配送方式 (`subgroup` / `datagram`)
+### 映像と音声
 
-MOQT の object の配送方式 (Delivery Mode) は Original Publisher が object ごとに決める値で、
-購読側とは交渉しません (draft-ietf-moq-transport-23 §2.1.1 (Object Fields))。zakuro-moq は
-トラック単位で選べます。`--tracks` の 4 番目に `subgroup` または `datagram` を指定し、
-省略した場合は `subgroup` になります。
+配送方式はメディア種別で決まります。映像は subgroup、音声は datagram です。
+Delivery Mode は Original Publisher が object ごとに決める値で、購読側とは交渉しません
+(draft-ietf-moq-transport-23 §2.1.1 (Object Fields))。
+
+`--tracks` の形式は次のとおりです。名前が `video` または `audio` のときは種別を省略できます。
+省略したパラメータは既定値 (映像は 30 fps、1_000_000 bit/s、Group 間隔 2 秒。音声は
+24_000 bit/s、チャンク間隔 0.02 秒) になります。
+
+- 映像: `名前[:video]:[framerate[:bitrate[:interval]]]`
+- 音声: `名前[:audio]:[bitrate[:interval]]`
+- `framerate` は frames/sec、`bitrate` は bit/sec、映像の `interval` は Group 間隔 (秒)、
+  音声の `interval` はチャンク間隔 (秒) です
+- `framerate * interval` は 1 以上の整数フレームになる必要があります
+- 別名のトラックは `screen:video:30:1000000:2` のように種別を明示します
 
 ```bash
 cargo run -p zakuro-moq -- \
   --url moqt://relay.example.com:4433 \
   --namespace zakuro \
-  --tracks video:30:1000:subgroup,audio:50:200:datagram \
+  --tracks screen:video:30:1000000:2,audio \
   --vcs 50 \
   --vcs-hatch-rate 10 \
   --duration 60
 ```
 
-`datagram` を指定したトラックは OBJECT_DATAGRAM で object を送ります。音声のように
-1 object が小さく、遅れた object を届けるより落とす方がよいメディアに向いています
-(draft-ietf-moq-loc-04 §4.1 (Application with one audio track))。subgroup 配送では Group の
-終端を stream の FIN で伝えますが、datagram には FIN が無いため Group の最終 object に
+音声は OBJECT_DATAGRAM で送ります。1 object が 1 Group なので、毎 object に
 END_OF_GROUP bit を立てます (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))。
+映像の subgroup stream は Group の終わりを FIN で伝えます。
+datagram は再送されず、遅れた object を届けるより落とす方がよい音声に向いています
+(draft-ietf-moq-loc-05 §4.1 (Application with one audio track))。
 
 datagram は分割できず、1 つの QUIC パケットに収まる必要があります (RFC 9221 §5)。経路の
 上限を超えた datagram は送信できないため、`--datagram-max-size` (既定 1160 バイト) を上限と
@@ -406,7 +428,7 @@ publish 側と subscribe 側で同じ `--vcs` を指定すると 1 対 1 で対�
 ```bash
 # 配信側
 cargo run -p zakuro-moq -- --url moqt://relay.example.com:4433 --namespace zakuro \
-  --tracks video:30:1000,audio:50:200 --vcs 10
+  --tracks video:30:1000000:2,audio:24000:0.02 --vcs 10
 
 # 視聴側 (別プロセス)
 cargo run -p zakuro-moq -- --url moqt://relay.example.com:4433 --namespace zakuro \
@@ -425,7 +447,7 @@ cargo run -p zakuro-moq -- --url moqt://relay.example.com:4433 --namespace zakur
 ```bash
 # 配信側 (1 仮想クライアント = 1 トラック video-0-0)
 cargo run -p zakuro-moq -- --url moqt://relay.example.com:4433 --namespace zakuro \
-  --tracks video:30:1000 --vcs 1
+  --tracks video --vcs 1
 
 # 視聴側 (10 仮想クライアントが同じ video-0-0 を購読する)
 cargo run -p zakuro-moq -- --url moqt://relay.example.com:4433 --namespace zakuro \
@@ -444,7 +466,7 @@ datagram 経由でも同じように検査します。実メディアを配信�
 | `--url` | MOQ relay の URL (`moqt://host:port`)。必須 |
 | `--transport` | 下位トランスポート (`quic` / `wt-h3` / `wt-h2` / `qmux`、デフォルト: `quic`) |
 | `--namespace` | Track Namespace (デフォルト: `zakuro`) |
-| `--tracks` | publish するトラック (`名前[:レート[:サイズ[:配送方式]]]` のカンマ区切り、配送方式は `subgroup` / `datagram`、デフォルト: `video`。`--subscribe-tracks` 指定時は publish しない) |
+| `--tracks` | publish するトラック。映像は `名前[:video]:[framerate[:bitrate[:interval]]]`、音声は `名前[:audio]:[bitrate[:interval]]`。名前が `video` / `audio` のときは種別を省略できる。デフォルトは `video`。`--subscribe-tracks` 指定時に省略すると publish しない |
 | `--datagram-max-size` | datagram 配送で送る object 1 個のサイズ上限 (バイト、デフォルト: 1160) |
 | `--subscribe-tracks` | 購読するトラック名のカンマ区切り。`{instance}` / `{vc}` を書くと置換し、書かなければ `<名前>-<インスタンス>-<仮想クライアント>` になる |
 | `--verify-payload` | 受信 payload が zakuro-moq の publisher のパターンと一致するかを検査する |
@@ -470,8 +492,8 @@ datagram 経由でも同じように検査します。実メディアを配信�
   "transport": "quic",
   "namespace": "zakuro",
   "tracks": [
-    { "name": "video", "object-rate": 30, "object-size": 1000 },
-    { "name": "audio", "object-rate": 50, "object-size": 200, "delivery-mode": "datagram" }
+    { "name": "video", "framerate": 30, "bitrate": 1000000, "interval": 2 },
+    { "name": "audio", "bitrate": 24000, "interval": 0.02 }
   ],
   "datagram-max-size": 1160,
   "vcs": 50,

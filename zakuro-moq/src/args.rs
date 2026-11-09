@@ -7,11 +7,41 @@ use crate::error::{ErrorMessage, Result};
 use crate::logging::LogLevel;
 use crate::moq_client::MoqTransport;
 
-/// `--tracks` で object レートを省略したときの既定値 (objects/sec)
-const DEFAULT_OBJECT_RATE: f64 = 30.0;
+/// 映像トラックの既定フレームレート (frames/sec)
+///
+/// draft-ietf-moq-loc-05 §4.2 (Application with one single quality video track) の例に
+/// 合わせる。節番号は draft 由来であり将来の改版で変わる可能性がある。
+const DEFAULT_VIDEO_FRAMERATE: f64 = 30.0;
 
-/// `--tracks` で object サイズを省略したときの既定値 (バイト)
-const DEFAULT_OBJECT_SIZE: usize = 1000;
+/// 映像トラックの既定ビットレート (bit/sec)
+const DEFAULT_VIDEO_BITRATE: u64 = 1_000_000;
+
+/// 映像トラックの既定 Group 間隔 (秒)
+///
+/// IDR 境界の間隔である。この秒数ぶんのフレームを 1 Group に入れる。
+const DEFAULT_VIDEO_INTERVAL: f64 = 2.0;
+
+/// 音声トラックの既定ビットレート (bit/sec)
+///
+/// draft-ietf-moq-loc-05 §4.1 (Application with one audio track) の例に合わせる。
+const DEFAULT_AUDIO_BITRATE: u64 = 24_000;
+
+/// 音声トラックの既定チャンク間隔 (秒)
+///
+/// 1 チャンクが 1 object かつ 1 Group になる。20 ms は音声フレームの一般的な長さである。
+const DEFAULT_AUDIO_INTERVAL: f64 = 0.02;
+
+/// 映像の Group 間隔として受け付ける最大秒数
+const MAX_VIDEO_INTERVAL: f64 = 60.0;
+
+/// 音声チャンク間隔として受け付ける範囲 (秒)
+const AUDIO_INTERVAL_RANGE: std::ops::RangeInclusive<f64> = 0.001..=1.0;
+
+/// `framerate * interval` を整数フレームとみなす許容誤差
+const FRAME_COUNT_EPSILON: f64 = 1e-3;
+
+/// 1 Group に入れる object 数の上限
+const MAX_OBJECTS_PER_GROUP: u64 = 100_000;
 
 /// datagram 配送で送る object 1 個のサイズ上限の既定値 (バイト)
 ///
@@ -71,34 +101,17 @@ const MAX_DURATION_SECONDS: f64 = 1e9;
 /// object の配送方式 (draft-ietf-moq-transport-23 §2.1.1 (Object Fields))
 ///
 /// Delivery Mode は Original Publisher が object ごとに決める値であり、購読側とは
-/// 交渉しない。zakuro-moq はトラック単位で方式を固定する (仕様上は同じトラックで
-/// subgroup と datagram を混在させられるが、負荷試験では比較しやすいようトラック単位にする)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// 交渉しない。zakuro-moq はメディア種別で方式を固定する。映像は subgroup、音声は
+/// datagram である。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeliveryMode {
     /// subgroup stream で送る
-    #[default]
     Subgroup,
     /// OBJECT_DATAGRAM で送る
     Datagram,
 }
 
 impl DeliveryMode {
-    /// CLI / JSONC の値から配送方式を解釈する
-    ///
-    /// # Errors
-    ///
-    /// `subgroup` / `datagram` 以外の値はエラーになる。
-    fn parse(value: &str) -> Result<Self> {
-        match value {
-            "subgroup" => Ok(Self::Subgroup),
-            "datagram" => Ok(Self::Datagram),
-            _ => Err(ErrorMessage::new(format!(
-                "配送方式は subgroup または datagram で指定してください: {value:?}"
-            ))
-            .into()),
-        }
-    }
-
     /// CLI とログに載せる名前を返す
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -108,17 +121,118 @@ impl DeliveryMode {
     }
 }
 
+/// トラックのメディア種別
+///
+/// payload は符号化しない。ビットレートから求めたバイト数のダミー object を、
+/// ここで決めた Group / Subgroup 境界で送る。コーデックを載せるのは負荷試験の
+/// 通常経路ではない。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum TrackMedia {
+    /// 単一品質の映像
+    ///
+    /// Group は `interval` 秒 (IDR 境界) ごとに切り、Group 内のフレームは
+    /// Subgroup ID 0 の stream 1 本に載せる (draft-ietf-moq-loc-05 §4.2)。
+    /// 節番号は draft 由来であり将来の改版で変わる可能性がある。
+    Video {
+        /// フレームレート (frames/sec)。1 フレームが 1 object になる
+        framerate: f64,
+        /// ビットレート (bit/sec)。1 frame のサイズは `bitrate / 8 / framerate`
+        bitrate: u64,
+        /// Group 間隔 (秒)
+        interval: f64,
+        /// `bitrate` と `framerate` から求めた 1 object の payload サイズ (バイト)
+        object_size: usize,
+        /// 1 Group のフレーム数 (`framerate * interval`)
+        objects_per_group: u64,
+    },
+    /// 音声
+    ///
+    /// 1 チャンクが 1 object かつ 1 Group で、Object ID は 0 のまま進む
+    /// (draft-ietf-moq-loc-05 §4.1)。配送は datagram である。
+    Audio {
+        /// ビットレート (bit/sec)
+        bitrate: u64,
+        /// チャンク間隔 (秒)。1 チャンクが 1 object になる
+        interval: f64,
+        /// `bitrate` と `interval` から求めた 1 object の payload サイズ (バイト)
+        object_size: usize,
+    },
+}
+
+impl TrackMedia {
+    /// 1 秒あたりに送る object 数を返す
+    pub(crate) fn object_rate(self) -> f64 {
+        match self {
+            Self::Video { framerate, .. } => framerate,
+            Self::Audio { interval, .. } => 1.0 / interval,
+        }
+    }
+
+    /// 1 object の payload サイズ (バイト) を返す
+    pub(crate) fn object_size(self) -> usize {
+        match self {
+            Self::Video { object_size, .. } | Self::Audio { object_size, .. } => object_size,
+        }
+    }
+
+    /// 1 Group に入れる object 数を返す
+    ///
+    /// 音声は常に 1 である。
+    pub(crate) fn objects_per_group(self) -> u64 {
+        match self {
+            Self::Video {
+                objects_per_group, ..
+            } => objects_per_group,
+            Self::Audio { .. } => 1,
+        }
+    }
+
+    /// このメディアの配送方式を返す
+    pub(crate) fn delivery(self) -> DeliveryMode {
+        match self {
+            Self::Video { .. } => DeliveryMode::Subgroup,
+            Self::Audio { .. } => DeliveryMode::Datagram,
+        }
+    }
+
+    /// CLI とログに載せる種別名を返す
+    pub(crate) fn kind_name(self) -> &'static str {
+        match self {
+            Self::Video { .. } => "video",
+            Self::Audio { .. } => "audio",
+        }
+    }
+}
+
 /// トラック 1 本の設定
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TrackSpec {
     /// トラック名の接頭辞 (実行時に `<名前>-<instance>-<vc>` とする)
     pub(crate) name: String,
-    /// 1 秒あたりに送る object 数
-    pub(crate) object_rate: f64,
-    /// 1 object の payload サイズ (バイト)
-    pub(crate) object_size: usize,
-    /// object の配送方式
-    pub(crate) delivery: DeliveryMode,
+    /// メディアのシミュレーション
+    pub(crate) media: TrackMedia,
+}
+
+impl TrackSpec {
+    /// CLI の `--tracks` に戻せる文字列を返す
+    fn to_cli(&self) -> String {
+        match self.media {
+            TrackMedia::Video {
+                framerate,
+                bitrate,
+                interval,
+                ..
+            } => format!(
+                "{}:video:{}:{bitrate}:{}",
+                self.name,
+                format_f64(framerate),
+                format_f64(interval),
+            ),
+            TrackMedia::Audio {
+                bitrate, interval, ..
+            } => format!("{}:audio:{bitrate}:{}", self.name, format_f64(interval),),
+        }
+    }
 }
 
 /// プロセス全体で共有する設定
@@ -440,8 +554,8 @@ fn parse_instance_args(
         .unwrap_or_else(|| "zakuro".to_string());
 
     let tracks_arg: Option<String> = noargs::opt("tracks")
-        .doc("Tracks to publish (name[:rate[:size[:delivery]]], comma separated, default: video)")
-        .example("video:30:1000,audio:50:200:datagram")
+        .doc("Tracks to publish (video[:framerate:bitrate:interval] or audio[:bitrate:interval], comma separated, default: video)")
+        .example("video:30:1000000:2,audio:24000:0.02")
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
@@ -595,13 +709,16 @@ fn validate_instance_args(
     }
     for track in tracks
         .iter()
-        .filter(|track| track.delivery == DeliveryMode::Datagram)
+        .filter(|track| track.media.delivery() == DeliveryMode::Datagram)
     {
-        let required = track.object_size + DATAGRAM_HEADER_MAX_SIZE;
+        let required = track.media.object_size() + DATAGRAM_HEADER_MAX_SIZE;
         if required > datagram_max_size {
             return Err(ErrorMessage::new(format!(
                 "datagram 配送のトラックが --datagram-max-size に収まりません: track={} object-size={} ヘッダ込み={} --datagram-max-size={}",
-                track.name, track.object_size, required, datagram_max_size
+                track.name,
+                track.media.object_size(),
+                required,
+                datagram_max_size
             ))
             .into());
         }
@@ -661,9 +778,10 @@ fn validate_instance_args(
 
 /// `--tracks` の値を解釈する
 ///
-/// 形式は `名前[:レート[:サイズ[:配送方式]]]` のカンマ区切り。レートとサイズを省略した
-/// 場合は既定値 (`30` objects/sec、`1000` バイト) を、配送方式を省略した場合は
-/// `subgroup` を使う。配送方式は `subgroup` または `datagram` である。
+/// 映像は `名前[:video]:[framerate[:bitrate[:interval]]]`、音声は
+/// `名前[:audio]:[bitrate[:interval]]` である。名前が `video` または `audio` のときは
+/// 種別を省略できる。省略したパラメータはメディア種別の既定値になる。payload は
+/// 符号化せず、ビットレートから求めたサイズのダミーバイト列を送る。
 fn parse_tracks(value: &str) -> Result<Vec<TrackSpec>> {
     if value.trim().is_empty() {
         return Err(ErrorMessage::new("--tracks に空文字列は指定できません").into());
@@ -674,68 +792,238 @@ fn parse_tracks(value: &str) -> Result<Vec<TrackSpec>> {
         if entry.is_empty() {
             return Err(ErrorMessage::new(format!("--tracks の要素が空です: {value}")).into());
         }
-        let mut parts = entry.split(':');
-        let name = parts.next().unwrap_or_default().trim().to_string();
-        if name.is_empty() {
-            return Err(
-                ErrorMessage::new(format!("--tracks のトラック名が空です: {entry}")).into(),
-            );
-        }
-        if name.len() + TRACK_NAME_SUFFIX_BUDGET > MAX_TRACK_NAME_LENGTH {
+        let spec = parse_track_entry(entry)?;
+        if tracks.iter().any(|t: &TrackSpec| t.name == spec.name) {
             return Err(ErrorMessage::new(format!(
-                "--tracks のトラック名は {MAX_TRACK_NAME_LENGTH} バイト以下にしてください (仮想クライアント識別子の suffix を含む): {name}"
+                "--tracks に同名のトラックがあります: {}",
+                spec.name
             ))
             .into());
         }
-        let object_rate = match parts.next() {
-            Some(rate) => rate.trim().parse::<f64>().map_err(|_| {
-                ErrorMessage::new(format!("--tracks のレートが数値ではありません: {entry}"))
-            })?,
-            None => DEFAULT_OBJECT_RATE,
-        };
-        if !OBJECT_RATE_RANGE.contains(&object_rate) {
-            return Err(ErrorMessage::new(format!(
-                "--tracks のレートは {} から {} の範囲で指定してください: {entry}",
-                OBJECT_RATE_RANGE.start(),
-                OBJECT_RATE_RANGE.end()
-            ))
-            .into());
-        }
-        let object_size = match parts.next() {
-            Some(size) => size.trim().parse::<usize>().map_err(|_| {
-                ErrorMessage::new(format!("--tracks のサイズが数値ではありません: {entry}"))
-            })?,
-            None => DEFAULT_OBJECT_SIZE,
-        };
-        let delivery = match parts.next() {
-            Some(delivery) => DeliveryMode::parse(delivery.trim())?,
-            None => DeliveryMode::default(),
-        };
-        if parts.next().is_some() {
-            return Err(ErrorMessage::new(format!(
-                "--tracks の形式は 名前[:レート[:サイズ[:配送方式]]] です: {entry}"
-            ))
-            .into());
-        }
-        if object_size == 0 || object_size > MAX_OBJECT_SIZE {
-            return Err(ErrorMessage::new(format!(
-                "--tracks のサイズは 1 から {MAX_OBJECT_SIZE} の範囲で指定してください: {entry}"
-            ))
-            .into());
-        }
-        if tracks.iter().any(|t: &TrackSpec| t.name == name) {
-            return Err(
-                ErrorMessage::new(format!("--tracks に同名のトラックがあります: {name}")).into(),
-            );
-        }
-        tracks.push(TrackSpec {
-            name,
-            object_rate,
-            object_size,
-            delivery,
-        });
+        tracks.push(spec);
     }
     Ok(tracks)
+}
+
+/// `--tracks` の 1 要素を解釈する
+fn parse_track_entry(entry: &str) -> Result<TrackSpec> {
+    let parts: Vec<&str> = entry.split(':').map(str::trim).collect();
+    let name = parts.first().copied().unwrap_or_default();
+    if name.is_empty() {
+        return Err(ErrorMessage::new(format!("--tracks のトラック名が空です: {entry}")).into());
+    }
+    if name.len() + TRACK_NAME_SUFFIX_BUDGET > MAX_TRACK_NAME_LENGTH {
+        return Err(ErrorMessage::new(format!(
+            "--tracks のトラック名は {MAX_TRACK_NAME_LENGTH} バイト以下にしてください (仮想クライアント識別子の suffix を含む): {name}"
+        ))
+        .into());
+    }
+    let (explicit_kind, params) = match parts.get(1) {
+        Some(token) if is_media_kind(token) => (Some(*token), &parts[2..]),
+        _ => (None, &parts[1..]),
+    };
+    let kind = match explicit_kind {
+        Some("video") => "video",
+        Some("audio") => "audio",
+        Some(other) => {
+            return Err(ErrorMessage::new(format!(
+                "--tracks の種別は video または audio で指定してください: {other}"
+            ))
+            .into());
+        }
+        None if is_media_kind(name) => name,
+        None => {
+            return Err(ErrorMessage::new(format!(
+                "--tracks の種別が分かりません。名前:video:... または 名前:audio:... で指定してください: {entry}"
+            ))
+            .into());
+        }
+    };
+    match kind {
+        "video" => parse_video_track(name, params, entry),
+        "audio" => parse_audio_track(name, params, entry),
+        _ => Err(ErrorMessage::new(format!(
+            "--tracks の種別は video または audio で指定してください: {entry}"
+        ))
+        .into()),
+    }
+}
+
+/// トークンがメディア種別かどうか
+fn is_media_kind(token: &str) -> bool {
+    matches!(token, "video" | "audio")
+}
+
+/// 映像トラックを組み立てる
+fn parse_video_track(name: &str, params: &[&str], entry: &str) -> Result<TrackSpec> {
+    if params.len() > 3 {
+        return Err(ErrorMessage::new(format!(
+            "--tracks の映像は 名前[:video]:[framerate[:bitrate[:interval]]] です: {entry}"
+        ))
+        .into());
+    }
+    let framerate = match params.first() {
+        Some(token) => parse_f64(token, "framerate", entry)?,
+        None => DEFAULT_VIDEO_FRAMERATE,
+    };
+    let bitrate = match params.get(1) {
+        Some(token) => parse_u64(token, "bitrate", entry)?,
+        None => DEFAULT_VIDEO_BITRATE,
+    };
+    let interval = match params.get(2) {
+        Some(token) => parse_f64(token, "interval", entry)?,
+        None => DEFAULT_VIDEO_INTERVAL,
+    };
+    Ok(TrackSpec {
+        name: name.to_string(),
+        media: video_media(name, framerate, bitrate, interval)?,
+    })
+}
+
+/// 音声トラックを組み立てる
+fn parse_audio_track(name: &str, params: &[&str], entry: &str) -> Result<TrackSpec> {
+    if params.len() > 2 {
+        return Err(ErrorMessage::new(format!(
+            "--tracks の音声は 名前[:audio]:[bitrate[:interval]] です: {entry}"
+        ))
+        .into());
+    }
+    let bitrate = match params.first() {
+        Some(token) => parse_u64(token, "bitrate", entry)?,
+        None => DEFAULT_AUDIO_BITRATE,
+    };
+    let interval = match params.get(1) {
+        Some(token) => parse_f64(token, "interval", entry)?,
+        None => DEFAULT_AUDIO_INTERVAL,
+    };
+    Ok(TrackSpec {
+        name: name.to_string(),
+        media: audio_media(name, bitrate, interval)?,
+    })
+}
+
+/// 映像の Group / object サイズを決める
+///
+/// # Errors
+///
+/// フレームレート、ビットレート、Group 間隔が範囲外の場合、または
+/// `framerate * interval` が整数フレームにならない場合はエラーになる。
+fn video_media(name: &str, framerate: f64, bitrate: u64, interval: f64) -> Result<TrackMedia> {
+    if !OBJECT_RATE_RANGE.contains(&framerate) {
+        return Err(ErrorMessage::new(format!(
+            "トラック '{name}' の framerate は {} から {} の範囲で指定してください",
+            OBJECT_RATE_RANGE.start(),
+            OBJECT_RATE_RANGE.end()
+        ))
+        .into());
+    }
+    if !interval.is_finite() || interval <= 0.0 || interval > MAX_VIDEO_INTERVAL {
+        return Err(ErrorMessage::new(format!(
+            "トラック '{name}' の interval は 0 より大きく {MAX_VIDEO_INTERVAL} 以下の秒数で指定してください"
+        ))
+        .into());
+    }
+    let frames = framerate * interval;
+    let rounded = frames.round();
+    if !rounded.is_finite()
+        || (frames - rounded).abs() > FRAME_COUNT_EPSILON
+        || rounded < 1.0
+        || rounded > MAX_OBJECTS_PER_GROUP as f64
+    {
+        return Err(ErrorMessage::new(format!(
+            "トラック '{name}' の framerate と interval の積が 1 から {MAX_OBJECTS_PER_GROUP} の整数フレームになりません: {frames}"
+        ))
+        .into());
+    }
+    let object_size = object_size_from_bitrate(name, bitrate, 1.0 / framerate)?;
+    Ok(TrackMedia::Video {
+        framerate,
+        bitrate,
+        interval,
+        object_size,
+        objects_per_group: rounded as u64,
+    })
+}
+
+/// 音声の object サイズを決める
+///
+/// 1 チャンクが 1 Group になるため、Group あたりの object 数は 1 で固定する。
+///
+/// # Errors
+///
+/// ビットレートまたはチャンク間隔が範囲外の場合はエラーになる。
+fn audio_media(name: &str, bitrate: u64, interval: f64) -> Result<TrackMedia> {
+    if !AUDIO_INTERVAL_RANGE.contains(&interval) {
+        return Err(ErrorMessage::new(format!(
+            "トラック '{name}' の interval は {} から {} 秒の範囲で指定してください",
+            AUDIO_INTERVAL_RANGE.start(),
+            AUDIO_INTERVAL_RANGE.end()
+        ))
+        .into());
+    }
+    let rate = 1.0 / interval;
+    if !OBJECT_RATE_RANGE.contains(&rate) {
+        return Err(ErrorMessage::new(format!(
+            "トラック '{name}' の送信レートが範囲外です: {rate}"
+        ))
+        .into());
+    }
+    let object_size = object_size_from_bitrate(name, bitrate, interval)?;
+    Ok(TrackMedia::Audio {
+        bitrate,
+        interval,
+        object_size,
+    })
+}
+
+/// ビットレートと 1 object の秒数から payload サイズを求める
+///
+/// 実コーデックのフレームサイズではなく、平均ビットレートを均等に割ったダミーサイズである。
+fn object_size_from_bitrate(name: &str, bitrate: u64, seconds: f64) -> Result<usize> {
+    if bitrate == 0 {
+        return Err(ErrorMessage::new(format!(
+            "トラック '{name}' の bitrate は 1 以上で指定してください"
+        ))
+        .into());
+    }
+    let bytes = (bitrate as f64) * seconds / 8.0;
+    let rounded = bytes.round();
+    if !rounded.is_finite() || rounded < 1.0 || rounded > MAX_OBJECT_SIZE as f64 {
+        return Err(ErrorMessage::new(format!(
+            "トラック '{name}' の bitrate から求めた object サイズが 1 から {MAX_OBJECT_SIZE} の範囲にありません: {bytes}"
+        ))
+        .into());
+    }
+    Ok(rounded as usize)
+}
+
+/// 小数を CLI に戻す
+///
+/// 整数値は小数点を付けない。`30.0` を `30` にすると、JSONC から展開した文字列が
+/// 人が書く `--tracks` と同じ形になる。
+fn format_f64(value: f64) -> String {
+    if value.is_finite() && value.fract() == 0.0 && value.abs() < 1e15 {
+        format!("{}", value as i64)
+    } else {
+        format!("{value}")
+    }
+}
+
+/// CLI の数値トークンを `f64` として読む
+fn parse_f64(token: &str, field: &str, entry: &str) -> Result<f64> {
+    token.parse::<f64>().map_err(|_| {
+        ErrorMessage::new(format!("--tracks の {field} が数値ではありません: {entry}")).into()
+    })
+}
+
+/// CLI の数値トークンを `u64` として読む
+fn parse_u64(token: &str, field: &str, entry: &str) -> Result<u64> {
+    token.parse::<u64>().map_err(|_| {
+        ErrorMessage::new(format!(
+            "--tracks の {field} が 0 以上の整数ではありません: {entry}"
+        ))
+        .into()
+    })
 }
 
 /// `--subscribe-tracks` の値を解釈する
@@ -926,7 +1214,10 @@ fn expand_instances(value: RawJsonValue<'_, '_>, template: &[String]) -> Result<
     Ok(result)
 }
 
-/// `tracks` 配列を `--tracks name:rate:size[:delivery],...` へ変換する
+/// `tracks` 配列を `--tracks` の文字列へ変換する
+///
+/// 変換後の文字列は CLI と同じ解釈になる。未指定のパラメータは CLI の既定値を埋めてから
+/// 文字列にする。
 fn push_tracks(value: RawJsonValue<'_, '_>, argv: &mut Vec<String>) -> Result<()> {
     if value.kind() != JsonValueKind::Array {
         return Err(ErrorMessage::new("'tracks' は JSON 配列で指定してください").into());
@@ -943,56 +1234,154 @@ fn push_tracks(value: RawJsonValue<'_, '_>, argv: &mut Vec<String>) -> Result<()
             ))
             .into());
         }
-        let name: String = element
-            .to_member("name")
-            .map_err(|_| ErrorMessage::new(format!("tracks[{i}] に name がありません")))?
-            .required()
-            .map_err(|_| ErrorMessage::new(format!("tracks[{i}] に name がありません")))?
-            .try_into()
-            .map_err(|e: nojson::JsonParseError| ErrorMessage::new(format!("{e}")))?;
-        // 未指定は CLI 側と同じ既定値にする。指定されているのに型が違う場合は黙って
-        // 既定値へ落とさずエラーにする (指定したつもりの負荷が出ない事故を防ぐ)
-        let rate = match member_value(element, "object-rate")? {
-            Some(value) => {
-                let rate: f64 = value.try_into().map_err(|_| {
-                    ErrorMessage::new(format!(
-                        "tracks[{i}] の object-rate が数値ではありません: {}",
-                        value.as_raw_str()
-                    ))
-                })?;
-                rate
-            }
-            None => DEFAULT_OBJECT_RATE,
-        };
-        let size = match member_value(element, "object-size")? {
-            Some(value) => {
-                let size: usize = value.try_into().map_err(|_| {
-                    ErrorMessage::new(format!(
-                        "tracks[{i}] の object-size が 0 以上の整数ではありません: {}",
-                        value.as_raw_str()
-                    ))
-                })?;
-                size
-            }
-            None => DEFAULT_OBJECT_SIZE,
-        };
-        let delivery = match member_value(element, "delivery-mode")? {
-            Some(value) => {
-                let text: String = value.try_into().map_err(|_| {
-                    ErrorMessage::new(format!(
-                        "tracks[{i}] の delivery-mode が文字列ではありません: {}",
-                        value.as_raw_str()
-                    ))
-                })?;
-                DeliveryMode::parse(&text)?
-            }
-            None => DeliveryMode::default(),
-        };
-        specs.push(format!("{name}:{rate}:{size}:{}", delivery.as_str()));
+        specs.push(track_spec_from_json(i, element)?.to_cli());
     }
     argv.push("--tracks".to_string());
     argv.push(specs.join(","));
     Ok(())
+}
+
+/// JSONC のトラック 1 件を解釈する
+fn track_spec_from_json(index: usize, element: RawJsonValue<'_, '_>) -> Result<TrackSpec> {
+    let mut name: Option<String> = None;
+    let mut kind: Option<&str> = None;
+    let mut framerate: Option<f64> = None;
+    let mut bitrate: Option<u64> = None;
+    let mut interval: Option<f64> = None;
+    let members = element
+        .to_object()
+        .map_err(|e| ErrorMessage::new(format!("tracks[{index}] のパースに失敗しました: {e}")))?;
+    for (key_value, value) in members {
+        let key: String = key_value
+            .try_into()
+            .map_err(|e: nojson::JsonParseError| ErrorMessage::new(format!("{e}")))?;
+        match key.as_str() {
+            "name" => {
+                name = Some(json_string(index, "name", value)?);
+            }
+            "kind" => {
+                let text = json_string(index, "kind", value)?;
+                if !is_media_kind(&text) {
+                    return Err(ErrorMessage::new(format!(
+                        "tracks[{index}] の kind は video または audio で指定してください: {text}"
+                    ))
+                    .into());
+                }
+                kind = Some(if text == "video" { "video" } else { "audio" });
+            }
+            "framerate" => {
+                framerate = Some(json_f64(index, "framerate", value)?);
+            }
+            "bitrate" => {
+                bitrate = Some(json_u64(index, "bitrate", value)?);
+            }
+            "interval" => {
+                interval = Some(json_f64(index, "interval", value)?);
+            }
+            "object-rate" | "object-size" | "delivery-mode" => {
+                return Err(ErrorMessage::new(format!(
+                    "tracks[{index}] の {key} は指定できません。映像は framerate / bitrate / interval、音声は bitrate / interval で指定してください"
+                ))
+                .into());
+            }
+            other => {
+                return Err(ErrorMessage::new(format!(
+                    "tracks[{index}] に未知のキーがあります: {other}"
+                ))
+                .into());
+            }
+        }
+    }
+    let Some(name) = name else {
+        return Err(ErrorMessage::new(format!("tracks[{index}] に name がありません")).into());
+    };
+    // kind はループ内で 'static の "video" / "audio" だけを残している。
+    // 名前からの推定はここでコピーし、以降 name を動かせるようにする。
+    let resolved = match kind {
+        Some("video") => "video",
+        Some("audio") => "audio",
+        Some(_) => {
+            return Err(ErrorMessage::new(format!(
+                "tracks[{index}] の kind は video または audio で指定してください"
+            ))
+            .into());
+        }
+        None if name == "video" || name == "audio" => {
+            if name == "video" {
+                "video"
+            } else {
+                "audio"
+            }
+        }
+        None => {
+            return Err(ErrorMessage::new(format!(
+                "tracks[{index}] の種別が分かりません。kind を video または audio で指定してください"
+            ))
+            .into());
+        }
+    };
+    match resolved {
+        "video" => {
+            let media = video_media(
+                &name,
+                framerate.unwrap_or(DEFAULT_VIDEO_FRAMERATE),
+                bitrate.unwrap_or(DEFAULT_VIDEO_BITRATE),
+                interval.unwrap_or(DEFAULT_VIDEO_INTERVAL),
+            )?;
+            Ok(TrackSpec { name, media })
+        }
+        "audio" => {
+            if framerate.is_some() {
+                return Err(ErrorMessage::new(format!(
+                    "tracks[{index}] の音声に framerate は指定できません"
+                ))
+                .into());
+            }
+            let media = audio_media(
+                &name,
+                bitrate.unwrap_or(DEFAULT_AUDIO_BITRATE),
+                interval.unwrap_or(DEFAULT_AUDIO_INTERVAL),
+            )?;
+            Ok(TrackSpec { name, media })
+        }
+        _ => Err(ErrorMessage::new(format!(
+            "tracks[{index}] の kind は video または audio で指定してください"
+        ))
+        .into()),
+    }
+}
+
+/// JSON の文字列メンバーを読む
+fn json_string(index: usize, field: &str, value: RawJsonValue<'_, '_>) -> Result<String> {
+    value.try_into().map_err(|_| {
+        ErrorMessage::new(format!(
+            "tracks[{index}] の {field} が文字列ではありません: {}",
+            value.as_raw_str()
+        ))
+        .into()
+    })
+}
+
+/// JSON の数値メンバーを `f64` として読む
+fn json_f64(index: usize, field: &str, value: RawJsonValue<'_, '_>) -> Result<f64> {
+    value.try_into().map_err(|_| {
+        ErrorMessage::new(format!(
+            "tracks[{index}] の {field} が数値ではありません: {}",
+            value.as_raw_str()
+        ))
+        .into()
+    })
+}
+
+/// JSON の数値メンバーを `u64` として読む
+fn json_u64(index: usize, field: &str, value: RawJsonValue<'_, '_>) -> Result<u64> {
+    value.try_into().map_err(|_| {
+        ErrorMessage::new(format!(
+            "tracks[{index}] の {field} が 0 以上の整数ではありません: {}",
+            value.as_raw_str()
+        ))
+        .into()
+    })
 }
 
 /// `subscribe-tracks` 配列を `--subscribe-tracks a,b` へ変換する
@@ -1014,17 +1403,6 @@ fn push_subscribe_tracks(value: RawJsonValue<'_, '_>, argv: &mut Vec<String>) ->
     argv.push("--subscribe-tracks".to_string());
     argv.push(names.join(","));
     Ok(())
-}
-
-/// オブジェクトのメンバーを取り出す (未指定なら `None`)
-fn member_value<'a, 'b>(
-    object: RawJsonValue<'a, 'b>,
-    key: &str,
-) -> Result<Option<RawJsonValue<'a, 'b>>> {
-    match object.to_member(key) {
-        Ok(member) => Ok(member.required().ok()),
-        Err(_) => Ok(None),
-    }
 }
 
 /// JSON のメンバーを `--key value` の形で argv へ積む
@@ -1067,39 +1445,55 @@ fn push_kv(key: &str, value: RawJsonValue<'_, '_>, argv: &mut Vec<String>) -> Re
 mod tests {
     use super::*;
 
-    /// `名前:レート:サイズ` を解釈できること
+    /// 映像は Group を interval で切り、音声は 1 object を 1 Group にすること
     #[test]
-    fn parse_tracks_reads_full_spec() {
-        let tracks = parse_tracks("video:30:1000,audio:50:200").expect("解釈に成功すること");
+    fn parse_tracks_reads_video_and_audio() {
+        let tracks =
+            parse_tracks("video:30:1000000:2,audio:24000:0.02").expect("解釈に成功すること");
         assert_eq!(tracks.len(), 2);
         assert_eq!(tracks[0].name, "video");
-        assert_eq!(tracks[0].object_rate, 30.0);
-        assert_eq!(tracks[0].object_size, 1000);
-        // 配送方式を省略した場合は subgroup になる
-        assert_eq!(tracks[0].delivery, DeliveryMode::Subgroup);
+        assert_eq!(tracks[0].media.object_rate(), 30.0);
+        // 1_000_000 bit/s / 30 fps / 8 = 4166.666... を 4167 バイトに丸める
+        assert_eq!(tracks[0].media.object_size(), 4167);
+        assert_eq!(tracks[0].media.objects_per_group(), 60);
+        assert_eq!(tracks[0].media.delivery(), DeliveryMode::Subgroup);
         assert_eq!(tracks[1].name, "audio");
-        assert_eq!(tracks[1].object_rate, 50.0);
-        assert_eq!(tracks[1].object_size, 200);
-        assert_eq!(tracks[1].delivery, DeliveryMode::Subgroup);
+        assert_eq!(tracks[1].media.object_rate(), 50.0);
+        assert_eq!(tracks[1].media.object_size(), 60);
+        assert_eq!(tracks[1].media.objects_per_group(), 1);
+        assert_eq!(tracks[1].media.delivery(), DeliveryMode::Datagram);
+        assert_eq!(tracks[1].media.delivery().as_str(), "datagram");
     }
 
-    /// 配送方式を指定できること
+    /// 名前が video / audio 以外のときは種別を明示すること
     #[test]
-    fn parse_tracks_reads_delivery_mode() {
-        let tracks = parse_tracks("video:30:1000:subgroup,audio:50:200:datagram")
-            .expect("解釈に成功すること");
-        assert_eq!(tracks[0].delivery, DeliveryMode::Subgroup);
-        assert_eq!(tracks[1].delivery, DeliveryMode::Datagram);
-        assert_eq!(tracks[1].delivery.as_str(), "datagram");
+    fn parse_tracks_reads_explicit_kind() {
+        let tracks = parse_tracks("screen:video:15:500000:2").expect("解釈に成功すること");
+        assert_eq!(tracks[0].name, "screen");
+        assert_eq!(tracks[0].media.object_rate(), 15.0);
+        assert_eq!(tracks[0].media.objects_per_group(), 30);
+        assert_eq!(tracks[0].media.delivery(), DeliveryMode::Subgroup);
     }
 
-    /// レートとサイズを省略すると既定値になること
+    /// パラメータを省略するとメディア種別の既定値になること
     #[test]
     fn parse_tracks_uses_defaults() {
-        let tracks = parse_tracks("video").expect("解釈に成功すること");
-        assert_eq!(tracks[0].object_rate, DEFAULT_OBJECT_RATE);
-        assert_eq!(tracks[0].object_size, DEFAULT_OBJECT_SIZE);
-        assert_eq!(tracks[0].delivery, DeliveryMode::Subgroup);
+        let video = parse_tracks("video").expect("解釈に成功すること");
+        assert_eq!(video[0].media.object_rate(), DEFAULT_VIDEO_FRAMERATE);
+        assert_eq!(video[0].media.objects_per_group(), 60);
+        assert_eq!(video[0].media.delivery(), DeliveryMode::Subgroup);
+
+        let audio = parse_tracks("audio").expect("解釈に成功すること");
+        assert_eq!(audio[0].media.object_rate(), 50.0);
+        assert_eq!(audio[0].media.object_size(), 60);
+        assert_eq!(audio[0].media.objects_per_group(), 1);
+        assert_eq!(audio[0].media.delivery(), DeliveryMode::Datagram);
+    }
+
+    /// framerate と interval の積が整数フレームにならない映像は拒否すること
+    #[test]
+    fn parse_tracks_rejects_non_integer_frame_count() {
+        assert!(parse_tracks("video:29.97:1000000:2").is_err());
     }
 
     /// `Duration` で表現できない時間指定を拒否すること
@@ -1244,25 +1638,34 @@ mod tests {
     fn jsonc_tracks_reject_invalid_types() {
         let invalid_rate = r#"{
             "url": "moqt://relay.example.com:4433",
-            "tracks": [ { "name": "video", "object-rate": "abc" } ]
+            "tracks": [ { "name": "video", "framerate": "abc" } ]
         }"#;
         assert!(
             parse_jsonc_config(invalid_rate).is_err(),
-            "object-rate の型不正を許容してはならない"
+            "framerate の型不正を許容してはならない"
         );
 
-        let negative_size = r#"{
+        let negative_bitrate = r#"{
             "url": "moqt://relay.example.com:4433",
-            "tracks": [ { "name": "video", "object-size": -5 } ]
+            "tracks": [ { "name": "video", "bitrate": -5 } ]
         }"#;
         assert!(
-            parse_jsonc_config(negative_size).is_err(),
-            "object-size の負値を許容してはならない"
+            parse_jsonc_config(negative_bitrate).is_err(),
+            "bitrate の負値を許容してはならない"
+        );
+
+        let removed_key = r#"{
+            "url": "moqt://relay.example.com:4433",
+            "tracks": [ { "name": "video", "object-rate": 30 } ]
+        }"#;
+        assert!(
+            parse_jsonc_config(removed_key).is_err(),
+            "object-rate を許容してはならない"
         );
 
         let missing_name = r#"{
             "url": "moqt://relay.example.com:4433",
-            "tracks": [ { "object-rate": 30 } ]
+            "tracks": [ { "framerate": 30 } ]
         }"#;
         assert!(
             parse_jsonc_config(missing_name).is_err(),
@@ -1301,8 +1704,8 @@ mod tests {
             "url": "moqt://relay.example.com:4433",
             "namespace": "zakuro",
             "tracks": [
-                { "name": "video", "object-rate": 30, "object-size": 1000 },
-                { "name": "audio", "object-rate": 50 }
+                { "name": "video", "framerate": 30, "bitrate": 1000000, "interval": 2 },
+                { "name": "mic", "kind": "audio", "bitrate": 24000, "interval": 0.02 }
             ]
         }"#;
         let config = parse_jsonc_config(content).expect("パースに成功すること");
@@ -1314,44 +1717,24 @@ mod tests {
             .expect("--tracks があること");
         assert_eq!(
             argv[tracks_pos + 1],
-            format!("video:30:1000:subgroup,audio:50:{DEFAULT_OBJECT_SIZE}:subgroup")
+            "video:video:30:1000000:2,mic:audio:24000:0.02"
         );
+        let tracks = parse_tracks(&argv[tracks_pos + 1]).expect("展開結果を再解釈できること");
+        assert_eq!(tracks[0].media.objects_per_group(), 60);
+        assert_eq!(tracks[1].media.objects_per_group(), 1);
+        assert_eq!(tracks[1].media.delivery(), DeliveryMode::Datagram);
     }
 
-    /// JSONC の tracks 配列で delivery-mode を指定できること
+    /// JSONC の音声トラックは framerate を受け取らないこと
     #[test]
-    fn jsonc_tracks_read_delivery_mode() {
+    fn jsonc_audio_rejects_framerate() {
         let content = r#"{
             "url": "moqt://relay.example.com:4433",
-            "tracks": [
-                { "name": "video", "object-rate": 30, "object-size": 1000 },
-                { "name": "audio", "delivery-mode": "datagram" }
-            ]
-        }"#;
-        let config = parse_jsonc_config(content).expect("パースに成功すること");
-        let argv = &config.instance_argvs[0];
-        let tracks_pos = argv
-            .iter()
-            .position(|s| s == "--tracks")
-            .expect("--tracks があること");
-        assert_eq!(
-            argv[tracks_pos + 1],
-            format!(
-                "video:30:1000:subgroup,audio:{DEFAULT_OBJECT_RATE}:{DEFAULT_OBJECT_SIZE}:datagram"
-            )
-        );
-    }
-
-    /// JSONC の delivery-mode は文字列でなければならないこと
-    #[test]
-    fn jsonc_tracks_reject_invalid_delivery_mode_type() {
-        let content = r#"{
-            "url": "moqt://relay.example.com:4433",
-            "tracks": [ { "name": "audio", "delivery-mode": 1 } ]
+            "tracks": [ { "name": "audio", "framerate": 50 } ]
         }"#;
         assert!(
             parse_jsonc_config(content).is_err(),
-            "delivery-mode の型不正を許容してはならない"
+            "音声の framerate を許容してはならない"
         );
     }
 
@@ -1381,24 +1764,24 @@ mod tests {
             )
         };
 
-        // 既定の上限に収まる音声相当のサイズは通る
+        // 既定の上限に収まる音声相当のサイズは通る (24 kbit/s * 20 ms = 60 バイト)
         assert!(
-            validate(Some("audio:50:200:datagram"), DEFAULT_DATAGRAM_MAX_SIZE).is_ok(),
+            validate(Some("audio:24000:0.02"), DEFAULT_DATAGRAM_MAX_SIZE).is_ok(),
             "上限に収まる datagram トラックを拒否してはならない"
         );
-        // ヘッダ込みで上限を超えるサイズは拒否する
+        // ヘッダ込みで上限を超えるサイズは拒否する (480 kbit/s * 20 ms = 1200 バイト)
         assert!(
-            validate(Some("audio:50:1200:datagram"), DEFAULT_DATAGRAM_MAX_SIZE).is_err(),
+            validate(Some("audio:480000:0.02"), DEFAULT_DATAGRAM_MAX_SIZE).is_err(),
             "ヘッダ込みで上限を超える datagram トラックを許容してはならない"
         );
-        // subgroup 配送なら datagram の上限に縛られない
+        // 映像は subgroup なので datagram の下限でも拒否しない
         assert!(
-            validate(Some("video:30:1000:subgroup"), DEFAULT_DATAGRAM_MAX_SIZE).is_ok(),
-            "subgroup 配送のトラックを datagram の上限で拒否してはならない"
+            validate(Some("video"), 1).is_ok(),
+            "映像トラックを datagram の上限で拒否してはならない"
         );
         // 上限の範囲外は拒否する
-        assert!(validate(Some("audio:50:200:datagram"), 0).is_err());
-        assert!(validate(Some("audio:50:200:datagram"), 65536).is_err());
+        assert!(validate(Some("audio"), 0).is_err());
+        assert!(validate(Some("audio"), 65536).is_err());
     }
 
     /// `--datagram-max-size` を解釈できること
@@ -1408,14 +1791,14 @@ mod tests {
             "zakuro-moq",
             vec![
                 "--url=moqt://relay.example.com:4433".to_string(),
-                "--tracks=audio:50:200:datagram".to_string(),
+                "--tracks=audio".to_string(),
                 "--datagram-max-size=1200".to_string(),
             ],
             &mut Vec::new(),
         )
         .expect("解釈に成功すること");
         assert_eq!(instance.datagram_max_size, 1200);
-        assert_eq!(instance.tracks[0].delivery, DeliveryMode::Datagram);
+        assert_eq!(instance.tracks[0].media.delivery(), DeliveryMode::Datagram);
 
         let (default_instance, _help) = parse_instance_args(
             "zakuro-moq",

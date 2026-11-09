@@ -1,5 +1,9 @@
 # MOQT の配送方式 (subgroup / datagram) 切り替えの検討メモ
 
+このメモは、配送方式をトラック単位のオプションにした時点の検討である。
+現行の zakuro-moq は、映像を framerate / bitrate / interval から Group と Subgroup に区切り、
+音声を datagram で 1 object = 1 Group にする。指定方法は README の MOQ 版を参照する。
+
 zakuro-moq で object の配送方式 (Delivery Mode) をトラック単位で選べるようにするための
 検討結果と実装方針。仕様は draft-ietf-moq-transport-23 (MOQT)、draft-ietf-moq-loc-04 (LOC)、
 RFC 9000、RFC 9221 を前提とする。節番号は将来の draft 改訂で変わる可能性がある。

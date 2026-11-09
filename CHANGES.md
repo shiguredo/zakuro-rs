@@ -2,6 +2,8 @@
 
 ## develop
 
+- [CHANGE] zakuro-moq のトラック指定を、映像は framerate / bitrate / interval で Group と Subgroup を区切り、音声は datagram で 1 object を 1 Group にするシミュレーションへ変える。payload はダミーバイト列のままとする
+  - @voluntas
 - [CHANGE] CLI 引数 `--fake-video-capture` を `--input-y4m` にリネームする
   - @voluntas
 - [ADD] DuckDB ファイルへの統計情報出力 (`--duckdb-output-dir` / `--duckdb-interval` / `--no-duckdb-output`) に対応する

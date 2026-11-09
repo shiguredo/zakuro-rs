@@ -194,7 +194,17 @@ async fn run_instance(
     let track_names: Vec<String> = instance
         .tracks
         .iter()
-        .map(|t| format!("{}:{}", t.name, t.delivery.as_str()))
+        .map(|t| {
+            format!(
+                "{}:{}:{}:rate={}:bytes={}:group={}",
+                t.name,
+                t.media.kind_name(),
+                t.media.delivery().as_str(),
+                t.media.object_rate(),
+                t.media.object_size(),
+                t.media.objects_per_group(),
+            )
+        })
         .collect();
     tracing::info!(
         "Zakuro instance {} (MOQ): transport={} vcs={} vcs-hatch-rate={} duration={:?} repeat-interval={:?} reconnect-on-goaway={} namespace={} tracks=[{}] datagram-max-size={} subscribe-tracks=[{}] verify-payload={}",
@@ -213,11 +223,12 @@ async fn run_instance(
     );
 
     // object の payload は最大サイズで 1 つだけ作り、トラック・仮想クライアント間で共有する。
-    // 送信側と受信側で内容を比較しやすいよう、位置に依存するパターンで埋める
+    // 符号化はしない。位置に依存するダミーパターンで埋め、受信側が同じ列かを比較できるようにする。
+    // 映像の Object ID 0 は Group の先頭 (IDR 境界) であり、バイト列自体は他のフレームと同じである。
     let max_object_size = instance
         .tracks
         .iter()
-        .map(|t| t.object_size)
+        .map(|t| t.media.object_size())
         .max()
         .unwrap_or(0);
     let mut payload = Vec::new();

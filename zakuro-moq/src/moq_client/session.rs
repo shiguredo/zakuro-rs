@@ -99,7 +99,13 @@ pub(crate) struct TrackConfig {
     /// 1 秒あたりに送る object 数
     pub(crate) object_rate: f64,
     /// 1 object の payload サイズ (バイト)
+    ///
+    /// 符号化結果ではなく、ビットレートから均等に割ったダミーサイズである。
     pub(crate) object_size: usize,
+    /// 1 Group に入れる object 数
+    ///
+    /// 映像は IDR 間隔のフレーム数、音声は 1 である。
+    pub(crate) objects_per_group: u64,
     /// object の配送方式
     pub(crate) delivery: DeliveryMode,
 }
@@ -310,7 +316,9 @@ struct Publisher {
     object_id: u64,
     /// 現在の subgroup stream で直前に送った Object ID
     prev_object_id: Option<u64>,
-    /// 1 Group あたりの object 数 (約 1 秒分)
+    /// 1 Group あたりの object 数
+    ///
+    /// 映像は IDR 間隔のフレーム数、音声は 1 である。
     objects_per_group: u64,
     /// これまでに送った object 数 (Timestamp の算出に使う)
     sent_objects: u64,
@@ -331,7 +339,9 @@ impl Publisher {
         datagram_max_size: usize,
     ) -> Self {
         let period = Duration::from_secs_f64(1.0 / config.object_rate);
-        let objects_per_group = config.object_rate.round().max(1.0) as u64;
+        // Group 長は送信レートから決めない。映像は interval 秒のフレーム数、
+        // 音声は 1 object = 1 Group として設定側が渡す。
+        let objects_per_group = config.objects_per_group;
         Self {
             config,
             request_id: None,
@@ -413,7 +423,10 @@ impl Publisher {
                 .await;
         }
 
-        // Group の終わりに達していたら FIN で閉じ、次の Group へ進む
+        // Group の終わりに達していたら FIN で閉じ、次の Group へ進む。
+        // 単一品質の映像は Group ごとに subgroup stream を 1 本だけ開く
+        // (draft-ietf-moq-loc-05 §4.2 (Application with one single quality video track))。
+        // 節番号は draft 由来であり将来の改版で変わる可能性がある。
         if self.object_id >= self.objects_per_group {
             self.close_stream(session).await;
             self.group_id += 1;
@@ -430,7 +443,7 @@ impl Publisher {
             let header = SubgroupHeader {
                 track_alias: self.track_alias,
                 group_id: self.group_id,
-                // Subgroup は Group 内で 1 本に固定する (Subgroup ID 0)
+                // 単一品質の映像は Group 内の Subgroup を 1 本に固定する (Subgroup ID 0)
                 subgroup_id: SubgroupIdMode::Zero,
                 // DEFAULT_PRIORITY bit を立て、優先度はトラックの既定値に任せる
                 publisher_priority: None,
@@ -536,7 +549,10 @@ impl Publisher {
             .request_id
             .expect("logical invariant: send_next_datagram is called only after publish is sent");
 
-        // Group の終わりに達していたら次の Group へ進む (datagram では stream を閉じない)
+        // Group の終わりに達していたら次の Group へ進む (datagram では stream を閉じない)。
+        // 音声は 1 object = 1 Group なので毎回ここを通り、Object ID は 0 のままになる
+        // (draft-ietf-moq-loc-05 §4.1 (Application with one audio track))。
+        // 節番号は draft 由来であり将来の改版で変わる可能性がある。
         if self.object_id >= self.objects_per_group {
             self.group_id += 1;
             self.object_id = 0;
@@ -2310,6 +2326,7 @@ mod tests {
             name: "video-0-0".to_string(),
             object_rate: 30.0,
             object_size: 1000,
+            objects_per_group: 60,
             delivery: DeliveryMode::Subgroup,
         }];
         let config = SessionConfig {
@@ -2376,6 +2393,7 @@ mod tests {
                 name: "video".to_string(),
                 object_rate: 40.0,
                 object_size: 100,
+                objects_per_group: 60,
                 delivery: DeliveryMode::Subgroup,
             },
             1,
@@ -2383,7 +2401,8 @@ mod tests {
             1160,
         );
         assert_eq!(publisher.period, Duration::from_millis(25));
-        assert_eq!(publisher.objects_per_group, 40);
+        // Group 長は object_rate の 1 秒分ではなく、設定したフレーム数を使う
+        assert_eq!(publisher.objects_per_group, 60);
     }
 
     /// Forward State がトラックごとに独立していること
@@ -2397,6 +2416,7 @@ mod tests {
             name: name.to_string(),
             object_rate: 30.0,
             object_size: 100,
+            objects_per_group: 60,
             delivery: DeliveryMode::Subgroup,
         };
         let mut video = Publisher::new(track("video"), 1, now, 1160);
@@ -2440,6 +2460,7 @@ mod tests {
                 name: "video".to_string(),
                 object_rate: 30.0,
                 object_size: 100,
+                objects_per_group: 60,
                 delivery: DeliveryMode::Subgroup,
             },
             1,
@@ -2466,6 +2487,7 @@ mod tests {
                 name: "video".to_string(),
                 object_rate: 30.0,
                 object_size: 100,
+                objects_per_group: 60,
                 delivery: DeliveryMode::Subgroup,
             },
             1,
@@ -2494,6 +2516,7 @@ mod tests {
                 name: "video".to_string(),
                 object_rate: 30.0,
                 object_size: 100,
+                objects_per_group: 60,
                 delivery: DeliveryMode::Subgroup,
             },
             1,
