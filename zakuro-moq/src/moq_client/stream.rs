@@ -45,7 +45,7 @@ pub(crate) enum MoqSendStream {
     /// WebTransport over HTTP/2 の送信ストリーム
     WtH2(wt_h2::SendStream),
     /// QMux の送信ストリーム
-    Qmux(tokio_qmux::SendStream),
+    Qmux(shiguredo_tokio_qmux::SendStream),
 }
 
 impl MoqSendStream {
@@ -83,7 +83,7 @@ impl MoqSendStream {
             Self::Ngtcp2(stream) => stream.write_all(buf).await,
             Self::WtH3(stream) => stream.write_all(buf).await,
             Self::WtH2(stream) => stream.write_all(buf).await,
-            // tokio-qmux の write は渡したデータをすべて受け付けるまで待つ
+            // shiguredo_tokio_qmux の write は渡したデータをすべて受け付けるまで待つ
             Self::Qmux(stream) => stream.write(buf).await.map(|_| ()).map_err(io_error),
         }
     }
@@ -153,7 +153,7 @@ pub(crate) enum MoqRecvStream {
     /// WebTransport over HTTP/2 の受信ストリーム
     WtH2(wt_h2::RecvStream),
     /// QMux の受信ストリーム
-    Qmux(tokio_qmux::RecvStream),
+    Qmux(shiguredo_tokio_qmux::RecvStream),
 }
 
 impl MoqRecvStream {
@@ -265,7 +265,7 @@ pub(crate) enum MoqConnectionHandle {
     /// WebTransport over HTTP/2 の接続ハンドル
     WtH2(wt_h2::Handle),
     /// QMux 接続のハンドル
-    Qmux(std::sync::Arc<tokio_qmux::Connection>),
+    Qmux(std::sync::Arc<shiguredo_tokio_qmux::Connection>),
 }
 
 impl MoqConnectionHandle {
@@ -342,7 +342,7 @@ impl MoqConnectionHandle {
                 Ok((MoqRecvStream::WtH2(recv), MoqSendStream::WtH2(send)))
             }
             Self::Qmux(connection) => {
-                // tokio-qmux は (送信, 受信) の順で返す
+                // shiguredo_tokio_qmux は (送信, 受信) の順で返す
                 let (send, recv) = connection.open_bidirectional().await.map_err(io_error)?;
                 Ok((MoqRecvStream::Qmux(recv), MoqSendStream::Qmux(send)))
             }
@@ -483,7 +483,7 @@ pub(crate) enum MoqRecvAcceptor {
     /// WebTransport over HTTP/2 の単方向ストリーム acceptor
     WtH2(wt_h2::RecvAcceptor),
     /// QMux 接続 (accept は `&self` で待てる)
-    Qmux(std::sync::Arc<tokio_qmux::Connection>),
+    Qmux(std::sync::Arc<shiguredo_tokio_qmux::Connection>),
 }
 
 impl MoqRecvAcceptor {
@@ -548,7 +548,7 @@ pub(crate) enum MoqBidiAcceptor {
     /// WebTransport over HTTP/2 の双方向ストリーム acceptor
     WtH2(wt_h2::BidiAcceptor),
     /// QMux 接続 (accept は `&self` で待てる)
-    Qmux(std::sync::Arc<tokio_qmux::Connection>),
+    Qmux(std::sync::Arc<shiguredo_tokio_qmux::Connection>),
 }
 
 impl MoqBidiAcceptor {
@@ -600,7 +600,7 @@ impl MoqBidiAcceptor {
                 .accept_bidirectional()
                 .await
                 .map(|stream| {
-                    // tokio-qmux は (送信, 受信) の順で返す
+                    // shiguredo_tokio_qmux は (送信, 受信) の順で返す
                     stream
                         .map(|(send, recv)| (MoqRecvStream::Qmux(recv), MoqSendStream::Qmux(send)))
                 })
@@ -630,7 +630,7 @@ pub(crate) enum MoqDatagramReceiver {
     /// WebTransport over HTTP/2 の駆動タスクが転送する datagram
     WtH2(mpsc::UnboundedReceiver<Vec<u8>>),
     /// QMux 接続の datagram 受信
-    Qmux(std::sync::Arc<tokio_qmux::Connection>),
+    Qmux(std::sync::Arc<shiguredo_tokio_qmux::Connection>),
 }
 
 impl MoqDatagramReceiver {
@@ -760,14 +760,14 @@ mod tests {
     /// モックやスタブではなく、qmux-rs の本物の状態機械を両端で動かす。TLS と TCP は
     /// 外部サーバが必要なため単体テストでは扱わず、ここではストリーム操作だけを検証する。
     fn qmux_pair() -> (
-        std::sync::Arc<tokio_qmux::Connection>,
-        std::sync::Arc<tokio_qmux::Connection>,
+        std::sync::Arc<shiguredo_tokio_qmux::Connection>,
+        std::sync::Arc<shiguredo_tokio_qmux::Connection>,
     ) {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let config = super::super::qmux::build_config();
-        let client = tokio_qmux::Connection::new(Role::Client, client_io, config.clone())
+        let client = shiguredo_tokio_qmux::Connection::new(Role::Client, client_io, config.clone())
             .expect("client 側の QMux 接続を作れること");
-        let server = tokio_qmux::Connection::new(Role::Server, server_io, config)
+        let server = shiguredo_tokio_qmux::Connection::new(Role::Server, server_io, config)
             .expect("server 側の QMux 接続を作れること");
         (std::sync::Arc::new(client), std::sync::Arc::new(server))
     }

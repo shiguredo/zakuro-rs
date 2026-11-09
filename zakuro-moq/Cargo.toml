@@ -72,7 +72,7 @@ optional = true
 # crates.io には未公開のため git 依存とし、再現性のため rev を固定する
 [dependencies.shiguredo_moqt]
 git = "https://github.com/shiguredo/moqt-rs"
-rev = "66eb946135b4f077eafdbac15f68f35078cb724d"
+rev = "2699bd26e280accd5fe5fd8642353a59315291e9"
 
 # ngtcp2 による QUIC 接続 (quic-ngtcp2 で使う)
 [dependencies.shiguredo_ngtcp2_tokio]
@@ -81,10 +81,16 @@ optional = true
 
 # QMux (draft-ietf-quic-qmux-02) の Sans I/O 実装。
 # crates.io には未公開のため git 依存とし、再現性のため rev を固定する。
-# rev は moqt-rs の examples/tokio-moq が固定している値と揃える
+# qmux-rs の main は空の初期コミットしか無いため develop を参照する。
+# rev を上げるときは shiguredo_tokio_qmux と同じ rev にする
 [dependencies.shiguredo_qmux]
 git = "https://github.com/shiguredo/qmux-rs"
-rev = "3e0dc0f6a7404b940a67a42e04f986a79811a046"
+rev = "93519b49de77bfb4cc0579c90dfed64665857603"
+
+# QMux の Tokio ラッパー。shiguredo_tokio_qmux は publish = false のため git 依存で固定する
+[dependencies.shiguredo_tokio_qmux]
+git = "https://github.com/shiguredo/qmux-rs"
+rev = "93519b49de77bfb4cc0579c90dfed64665857603"
 
 # QUIC (RFC 9000) と DATAGRAM (RFC 9221) のクライアント。
 # 時雨堂の QUIC 実装を常に追うため、crates.io ではなく git の main ブランチを参照する。
@@ -111,11 +117,6 @@ features = [
   "sync",
   "time",
 ]
-
-# QMux の Tokio ラッパー。tokio-qmux は publish = false のため git 依存で固定する
-[dependencies.tokio-qmux]
-git = "https://github.com/shiguredo/qmux-rs"
-rev = "3e0dc0f6a7404b940a67a42e04f986a79811a046"
 
 [dev-dependencies]
 # QUIC と WebTransport の接続テスト用の自己署名証明書生成

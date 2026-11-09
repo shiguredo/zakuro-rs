@@ -35,7 +35,7 @@ pub(crate) enum MoqTransport {
     /// reset を `WT_RESET_STREAM` capsule で行うため `RESET_STREAM_AT` は不要だが、
     /// relay の capsule 対応に依存する。
     WtH2,
-    /// QMux (TLS over TCP + tokio-qmux)
+    /// QMux (TLS over TCP + shiguredo_tokio_qmux)
     Qmux,
 }
 
@@ -540,7 +540,7 @@ impl EndpointState {
     async fn connect_qmux(
         &self,
         tls: &Arc<rustls::ClientConfig>,
-    ) -> Result<Arc<tokio_qmux::Connection>> {
+    ) -> Result<Arc<shiguredo_tokio_qmux::Connection>> {
         let mut last_error: Option<ErrorMessage> = None;
         let last_index = self.addrs.len().saturating_sub(1);
         for (index, addr) in self.addrs.iter().enumerate() {
@@ -837,7 +837,7 @@ pub(crate) enum MoqConnection {
     /// WebTransport over HTTP/2 接続
     WtH2(wt_h2::Connection),
     /// QMux 接続
-    Qmux(Arc<tokio_qmux::Connection>),
+    Qmux(Arc<shiguredo_tokio_qmux::Connection>),
 }
 
 impl MoqConnection {

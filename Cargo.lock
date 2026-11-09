@@ -1596,7 +1596,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1942,7 +1942,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2305,7 +2305,7 @@ checksum = "34ea51db2d642ec4b4c185e01ca31fb56383241b0968ea7ea586b347ba515e6b"
 [[package]]
 name = "shiguredo_moqt"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/moqt-rs?rev=66eb946135b4f077eafdbac15f68f35078cb724d#66eb946135b4f077eafdbac15f68f35078cb724d"
+source = "git+https://github.com/shiguredo/moqt-rs?rev=2699bd26e280accd5fe5fd8642353a59315291e9#2699bd26e280accd5fe5fd8642353a59315291e9"
 dependencies = [
  "base64ct",
  "hashbrown 0.17.1",
@@ -2379,7 +2379,16 @@ dependencies = [
 [[package]]
 name = "shiguredo_qmux"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/qmux-rs?rev=3e0dc0f6a7404b940a67a42e04f986a79811a046#3e0dc0f6a7404b940a67a42e04f986a79811a046"
+source = "git+https://github.com/shiguredo/qmux-rs?rev=93519b49de77bfb4cc0579c90dfed64665857603#93519b49de77bfb4cc0579c90dfed64665857603"
+
+[[package]]
+name = "shiguredo_tokio_qmux"
+version = "0.0.0"
+source = "git+https://github.com/shiguredo/qmux-rs?rev=93519b49de77bfb4cc0579c90dfed64665857603#93519b49de77bfb4cc0579c90dfed64665857603"
+dependencies = [
+ "shiguredo_qmux",
+ "tokio",
+]
 
 [[package]]
 name = "shiguredo_toml"
@@ -2689,7 +2698,7 @@ dependencies = [
 [[package]]
 name = "tobi_core"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#640349265c78a5e050eaec6f31a728b8221b995d"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
 dependencies = [
  "hashbrown 0.17.1",
  "libm",
@@ -2698,7 +2707,7 @@ dependencies = [
 [[package]]
 name = "tobi_crypto"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#640349265c78a5e050eaec6f31a728b8221b995d"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
 dependencies = [
  "aws-lc-rs",
  "tobi_core",
@@ -2708,7 +2717,7 @@ dependencies = [
 [[package]]
 name = "tobi_http3"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#640349265c78a5e050eaec6f31a728b8221b995d"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
 dependencies = [
  "shiguredo_http3",
  "tobi_quic",
@@ -2718,7 +2727,7 @@ dependencies = [
 [[package]]
 name = "tobi_platform"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#640349265c78a5e050eaec6f31a728b8221b995d"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
 dependencies = [
  "aws-lc-rs",
  "libc",
@@ -2736,7 +2745,7 @@ dependencies = [
 [[package]]
 name = "tobi_qlog"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#640349265c78a5e050eaec6f31a728b8221b995d"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
 dependencies = [
  "nojson",
  "tobi_core",
@@ -2745,7 +2754,7 @@ dependencies = [
 [[package]]
 name = "tobi_quic"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#640349265c78a5e050eaec6f31a728b8221b995d"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
 dependencies = [
  "aws-lc-rs",
  "nojson",
@@ -2761,7 +2770,7 @@ dependencies = [
 [[package]]
 name = "tobi_rustls"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#640349265c78a5e050eaec6f31a728b8221b995d"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
 dependencies = [
  "aws-lc-rs",
  "rustls",
@@ -2771,7 +2780,7 @@ dependencies = [
 [[package]]
 name = "tobi_transport"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#640349265c78a5e050eaec6f31a728b8221b995d"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
 dependencies = [
  "tobi_core",
  "tobi_crypto",
@@ -2783,7 +2792,7 @@ dependencies = [
 [[package]]
 name = "tobi_webtransport"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#640349265c78a5e050eaec6f31a728b8221b995d"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
 dependencies = [
  "rustls",
  "shiguredo_http3",
@@ -2819,15 +2828,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
-]
-
-[[package]]
-name = "tokio-qmux"
-version = "0.0.0"
-source = "git+https://github.com/shiguredo/qmux-rs?rev=3e0dc0f6a7404b940a67a42e04f986a79811a046#3e0dc0f6a7404b940a67a42e04f986a79811a046"
-dependencies = [
- "shiguredo_qmux",
- "tokio",
 ]
 
 [[package]]
@@ -3257,15 +3257,6 @@ dependencies = [
 
 [[package]]
 name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
-dependencies = [
- "windows-targets",
-]
-
-[[package]]
-name = "windows-sys"
 version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
@@ -3446,11 +3437,11 @@ dependencies = [
  "shiguredo_moqt",
  "shiguredo_ngtcp2_tokio",
  "shiguredo_qmux",
+ "shiguredo_tokio_qmux",
  "tempfile",
  "tobi_quic",
  "tobi_webtransport",
  "tokio",
- "tokio-qmux",
  "tokio-rustls",
  "tokio-stream",
  "tokio-util",

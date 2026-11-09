@@ -376,6 +376,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | shiguredo_openh264 | 2026.2.0 | Apache-2.0 |
 | shiguredo_opus | 2026.3.0 | Apache-2.0 |
 | shiguredo_qmux | 2026.0.0 | Apache-2.0 |
+| shiguredo_tokio_qmux | 0.0.0 | UNKNOWN |
 | shiguredo_toml | 2026.2.0 | Apache-2.0 |
 | shiguredo_video_device | 2026.3.0 | Apache-2.0 |
 | shiguredo_webrtc | 0.154.1-canary.5 | Apache-2.0 |
@@ -420,7 +421,6 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | tobi_webtransport | 2026.0.0 | Apache-2.0 |
 | tokio | 1.54.1 | MIT |
 | tokio-macros | 2.7.2 | MIT |
-| tokio-qmux | 0.0.0 | UNKNOWN |
 | tokio-rustls | 0.26.6 | MIT OR Apache-2.0 |
 | tokio-stream | 0.1.19 | MIT |
 | tokio-util | 0.7.19 | MIT |
@@ -466,7 +466,6 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | windows-result | 0.4.1 | MIT OR Apache-2.0 |
 | windows-strings | 0.5.1 | MIT OR Apache-2.0 |
 | windows-sys | 0.52.0 | MIT OR Apache-2.0 |
-| windows-sys | 0.59.0 | MIT OR Apache-2.0 |
 | windows-sys | 0.61.2 | MIT OR Apache-2.0 |
 | windows-targets | 0.52.6 | MIT OR Apache-2.0 |
 | windows-threading | 0.2.1 | MIT OR Apache-2.0 |

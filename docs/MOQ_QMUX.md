@@ -3,8 +3,9 @@
 zakuro-moq が QMux (draft-ietf-quic-qmux-02) 経由で MOQT relay へ接続するための検討結果と
 実装方針。仕様は draft-ietf-moq-transport-23 (2026-10-01 発行、最新の公開 I-D) と
 draft-ietf-quic-qmux-02、依存は `shiguredo_moqt` rev `49c711e` と qmux-rs rev `3e0dc0f` を
-前提とする。本文中の `ファイル:行` は実装前の検討時点のものを含むため、現在のソース上の位置は
-シンボル名で検索すること。
+前提とする (依存 rev はその後更新されており、qmux-rs は crate 名を `shiguredo_tokio_qmux`
+へ改名後の rev `93519b4` とする)。本文中の `ファイル:行` は実装前の検討時点のものを含むため、
+現在のソース上の位置はシンボル名で検索すること。
 
 ## 結論
 
@@ -14,7 +15,7 @@ draft-ietf-quic-qmux-02、依存は `shiguredo_moqt` rev `49c711e` と qmux-rs r
 - MOQT 本体は TCP など他のトランスポート上で直接動かす方法を定義していない
   (draft-ietf-moq-transport-23 §6.2)。QMux 上の MOQT は individual draft
   (`draft-nandakumar-moq-qmux-moqt-00`) が扱う experimental な組み合わせである。
-- 実装は qmux-rs の `tokio_qmux::Connection` を使い、QUIC の型に直接依存している
+- 実装は qmux-rs の `shiguredo_tokio_qmux::Connection` を使い、QUIC の型に直接依存している
   `session.rs` はストリームの enum アダプタ経由にする。trait は作らない。
 - moqt-rs の rev を `49c711e` へ更新する。`Transport::Qmux` はこの rev で追加されており、
   zakuro-moq が使う `Session` の公開 API に破壊的変更は無い。
@@ -53,7 +54,7 @@ peer の control stream は最初の単方向 stream として受理する。
 QMux の DATAGRAM は下位の TCP が再送するため経路損失では失われないが、受信側のバッファが
 溢れると破棄され得る (draft-ietf-quic-qmux-02 Section 6)。zakuro-moq は datagram 配送を
 指定したトラックの object を DATAGRAM で送受信する。`max_datagram_frame_size` は
-tokio-qmux の 1 Record の上限に合わせて広告する。
+shiguredo_tokio_qmux の 1 Record の上限に合わせて広告する。
 
 ### 1.5 TLS
 
@@ -72,8 +73,8 @@ QMux の実効 idle timeout は両端の広告値のうち 0 でない値の最�
 ## 2. 実装構造
 
 - `zakuro-moq/src/moq_client/qmux.rs`: QMux 接続の確立 (TCP + TLS + ALPN 確認 +
-  `tokio_qmux::Connection` の生成)、QMux の `Config`、keep-alive の PING タスク。
-- `zakuro-moq/src/moq_client/stream.rs`: tobi-quic と tokio-qmux のストリーム・接続ハンドル・
+  `shiguredo_tokio_qmux::Connection` の生成)、QMux の `Config`、keep-alive の PING タスク。
+- `zakuro-moq/src/moq_client/stream.rs`: tobi-quic と shiguredo_tokio_qmux のストリーム・接続ハンドル・
   accept・datagram の送受信を enum で包むアダプタ。`write_all` / `finish` / `reset` は
   QMux 側が async のため両経路とも async に揃える。`read` は QMux の `Ok(None)` (FIN) を
   `Ok(0)` に正規化する。datagram の受信は QMux 接続の受信キューから取り出す。

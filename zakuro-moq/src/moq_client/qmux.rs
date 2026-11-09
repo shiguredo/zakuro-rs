@@ -74,7 +74,7 @@ pub(crate) async fn connect(
     socket_addr: SocketAddr,
     server_name: &str,
     tls_config: Arc<rustls::ClientConfig>,
-) -> Result<Arc<tokio_qmux::Connection>> {
+) -> Result<Arc<shiguredo_tokio_qmux::Connection>> {
     // QMux は 1 本のバイトストリームを多重化するため、Nagle による遅延が全ストリームに乗る。
     // 負荷試験では小さな object を高頻度に送るため無効化する
     let tcp = TcpStream::connect(socket_addr)
@@ -101,7 +101,7 @@ pub(crate) async fn connect(
         .into());
     }
 
-    let connection = tokio_qmux::Connection::new(Role::Client, tls, build_config())
+    let connection = shiguredo_tokio_qmux::Connection::new(Role::Client, tls, build_config())
         .map_err(|e| ErrorMessage::new(format!("QMux 接続の生成に失敗しました: {e}")))?;
     Ok(Arc::new(connection))
 }
@@ -136,7 +136,7 @@ pub(crate) fn build_config() -> Config {
 ///
 /// タスクは `token` のキャンセルか、接続の終了 (PING の送信失敗) で終了する。
 pub(crate) fn spawn_keep_alive(
-    connection: &Arc<tokio_qmux::Connection>,
+    connection: &Arc<shiguredo_tokio_qmux::Connection>,
     token: &CancellationToken,
 ) {
     let connection = Arc::clone(connection);
@@ -181,7 +181,7 @@ pub(crate) fn spawn_keep_alive(
 /// QMux の実効 idle timeout は、両端が広告した値のうち 0 でない値の最小値である
 /// (RFC 9000 Section 10.1)。0 は無効を表す。PING の間隔は実効値の 1/3 を基本とし、
 /// 下限と上限で挟む。
-fn keep_alive_interval(connection: &tokio_qmux::Connection) -> Option<Duration> {
+fn keep_alive_interval(connection: &shiguredo_tokio_qmux::Connection) -> Option<Duration> {
     let peer_timeout_ms = connection
         .peer_transport_parameters()
         .map(|parameters| parameters.max_idle_timeout);
