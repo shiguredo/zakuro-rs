@@ -72,7 +72,7 @@ optional = true
 # crates.io には未公開のため git 依存とし、再現性のため rev を固定する
 [dependencies.shiguredo_moqt]
 git = "https://github.com/shiguredo/moqt-rs"
-rev = "2699bd26e280accd5fe5fd8642353a59315291e9"
+rev = "8bf5904986a13eaec935599163d8d553b4247b56"
 
 # ngtcp2 による QUIC 接続 (quic-ngtcp2 で使う)
 [dependencies.shiguredo_ngtcp2_tokio]

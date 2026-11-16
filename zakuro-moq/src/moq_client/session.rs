@@ -2229,6 +2229,16 @@ async fn drain_events(
                 state.connection_handle.close(error.code).await;
                 state.closed_reason = Some(format!("{:#x} {}", error.code, error.reason));
             }
+            // namespace 操作と SUBSCRIBE_TRACKS は zakuro-moq が送らないため、これらの
+            // イベントは通常は到達しない。到達してもセッションの状態を変えずに無視する
+            // (draft-ietf-moq-transport-23 §9.13〜§9.18)。未知の variant を wildcard で
+            // 握りつぶすと、今後の追加に気づけなくなるため、variant を明示する
+            SessionEvent::PublishNamespaceReceived { .. }
+            | SessionEvent::SubscribeNamespaceReceived { .. }
+            | SessionEvent::SubscribeTracksReceived { .. }
+            | SessionEvent::NamespaceReceived { .. }
+            | SessionEvent::NamespaceDoneReceived { .. }
+            | SessionEvent::PublishSkippedReceived { .. } => {}
             // publisher 専用クライアントでは扱わないイベント
             SessionEvent::FetchOkReceived { .. }
             | SessionEvent::PublishStateNotifyReceived { .. }

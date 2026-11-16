@@ -2305,10 +2305,11 @@ checksum = "34ea51db2d642ec4b4c185e01ca31fb56383241b0968ea7ea586b347ba515e6b"
 [[package]]
 name = "shiguredo_moqt"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/moqt-rs?rev=2699bd26e280accd5fe5fd8642353a59315291e9#2699bd26e280accd5fe5fd8642353a59315291e9"
+source = "git+https://github.com/shiguredo/moqt-rs?rev=8bf5904986a13eaec935599163d8d553b4247b56#8bf5904986a13eaec935599163d8d553b4247b56"
 dependencies = [
  "base64ct",
  "hashbrown 0.17.1",
+ "libm",
  "noflate",
  "nojson",
 ]
