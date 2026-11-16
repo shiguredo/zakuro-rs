@@ -1,7 +1,7 @@
 # moqt-rs の rev を 8bf5904 へ更新する
 
 - Created: 2026-11-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-16
 - Branch: feature/update-moqt-rs-8bf5904
 - Polished: {YYYY-MM-DD}
 
@@ -49,3 +49,21 @@
 - `zakuro-moq` のコンパイル、clippy、テストが通ること
 - ワークスペース全体が `cargo check` で通ること
 - ALPN と既存の PUBLISH / SUBSCRIBE の挙動が変わっていないこと
+
+## 解決方法
+
+- `zakuro-moq/Cargo.toml` の `shiguredo_moqt` の rev を
+  `8bf5904986a13eaec935599163d8d553b4247b56` へ更新し、`cargo update -p shiguredo_moqt` で
+  `Cargo.lock` を再生成した。`Cargo.lock` の差分は `shiguredo_moqt` の source の rev だけである
+- `zakuro-moq/src/moq_client/session.rs` の `drain_events` に、追加された 6 つの
+  `SessionEvent` を無視する arm を追加した。zakuro-moq は namespace 操作と
+  SUBSCRIBE_TRACKS を送らないため、これらは通常は到達しない。未知の variant を
+  wildcard で握りつぶさず、variant を明示して今後の追加をコンパイルエラーで検出できる
+  ようにした
+- 既存の PUBLISH / SUBSCRIBE 経路のコードは変更していない。ALPN は `moqt-23` のままである
+- 検証: `cargo fmt --all -- --check` / `cargo clippy --locked -p zakuro-moq --all-targets -- -D warnings` /
+  `cargo test --locked -p zakuro-moq` (126 件 pass) / `cargo +1.99 check --locked --workspace` が exit 0
+- この環境の stable は Cargo 1.100 で、`libduckdb-sys` が Cargo 1.100 の build directory
+  配置を解釈できず `cargo check --locked --workspace` が失敗する。これは今回の変更とは
+  無関係な既存の問題であり、MSRV の 1.99 ではワークスペース全体の check が通る
+- CI の stable ジョブも同じ `libduckdb-sys` の問題で失敗しており、MSRV ジョブは成功している
