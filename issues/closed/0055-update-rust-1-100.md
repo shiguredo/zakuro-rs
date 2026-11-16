@@ -58,3 +58,9 @@ Rust 1.100 (Cargo 1.100) の変更で CI の ubuntu ジョブが失敗してい�
   `cargo +1.99 check --locked --workspace` が exit 0
 - fdk-aac のヘッダーは Ubuntu の `libfdk-aac-dev` を展開して
   `FDK_AAC_INCLUDE_DIR` を指定して検証した
+
+## reopened にする理由
+
+duckdb 1.20000.2 への更新後、libduckdb-sys が実行ファイルへ DuckDB 共有ライブラリの
+rpath を埋め込まなくなった。`cargo build` 後の `./target/debug/zakuro --help` が
+`libduckdb.so` を見つけられず、CI の smoke が失敗したため reopened にする。
