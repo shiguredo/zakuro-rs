@@ -541,9 +541,9 @@ mod tests {
             matches!(scenario.ops[0], ScenarioOp::Reconnect),
             "先頭は Reconnect であること"
         );
-        for i in 1..10 {
+        for (i, op) in scenario.ops.iter().enumerate().skip(1) {
             assert!(
-                matches!(scenario.ops[i], ScenarioOp::Sleep { .. }),
+                matches!(op, ScenarioOp::Sleep { .. }),
                 "op[{i}] は Sleep であること"
             );
         }
