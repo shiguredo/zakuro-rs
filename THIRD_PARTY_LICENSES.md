@@ -363,7 +363,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | shiguredo_fdk_aac | 2026.1.0 | Apache-2.0 |
 | shiguredo_http11 | 2026.6.1 | Apache-2.0 |
 | shiguredo_http2 | 2026.1.0-canary.17 | Apache-2.0 |
-| shiguredo_http3 | 2026.1.0-canary.14 | Apache-2.0 |
+| shiguredo_http3 | 2026.1.0-canary.16 | Apache-2.0 |
 | shiguredo_moqt | 2026.0.0 | Apache-2.0 |
 | shiguredo_mp4 | 2026.5.0 | Apache-2.0 |
 | shiguredo_ngtcp2 | 2026.1.0-canary.4 | Apache-2.0 |

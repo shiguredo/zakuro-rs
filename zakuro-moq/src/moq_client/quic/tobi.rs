@@ -106,7 +106,10 @@ pub(crate) async fn connect(
         .map_err(|e| ErrorMessage::new(format!("MOQ relay への QUIC 接続に失敗しました: {e}")))?;
     // ALPN が一致しないと MOQT ではなく別のプロトコルで接続してしまうため、
     // ハンドシェイク直後に確認する
-    if connection.application_protocol().await.as_deref() != Some(ALPN) {
+    let alpn = connection.application_protocol().await.map_err(|e| {
+        ErrorMessage::new(format!("MOQ relay の ALPN 取得に失敗しました: {e}"))
+    })?;
+    if alpn.as_deref() != Some(ALPN) {
         return Err(ErrorMessage::new(format!(
             "MOQ relay が {} ALPN を選択しませんでした",
             String::from_utf8_lossy(ALPN)

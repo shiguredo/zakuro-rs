@@ -2256,9 +2256,9 @@ checksum = "6e463850a8f89e97b65869b74ffb0fa89b2a93fe4a240ae4f40b5555ca661b29"
 
 [[package]]
 name = "shiguredo_http3"
-version = "2026.1.0-canary.14"
+version = "2026.1.0-canary.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34ea51db2d642ec4b4c185e01ca31fb56383241b0968ea7ea586b347ba515e6b"
+checksum = "7db6788a921e17a85903bddd18464d99c79d5fb3b6cf5193b90373a075fa35c0"
 
 [[package]]
 name = "shiguredo_moqt"
@@ -2580,7 +2580,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -2657,7 +2657,7 @@ dependencies = [
 [[package]]
 name = "tobi_core"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#1a178417a286512e936dda3393d531cf2afa3a08"
 dependencies = [
  "hashbrown 0.17.1",
  "libm",
@@ -2666,7 +2666,7 @@ dependencies = [
 [[package]]
 name = "tobi_crypto"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#1a178417a286512e936dda3393d531cf2afa3a08"
 dependencies = [
  "aws-lc-rs",
  "tobi_core",
@@ -2676,7 +2676,7 @@ dependencies = [
 [[package]]
 name = "tobi_http3"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#1a178417a286512e936dda3393d531cf2afa3a08"
 dependencies = [
  "shiguredo_http3",
  "tobi_quic",
@@ -2686,7 +2686,7 @@ dependencies = [
 [[package]]
 name = "tobi_platform"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#1a178417a286512e936dda3393d531cf2afa3a08"
 dependencies = [
  "aws-lc-rs",
  "libc",
@@ -2704,7 +2704,7 @@ dependencies = [
 [[package]]
 name = "tobi_qlog"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#1a178417a286512e936dda3393d531cf2afa3a08"
 dependencies = [
  "nojson",
  "tobi_core",
@@ -2713,7 +2713,7 @@ dependencies = [
 [[package]]
 name = "tobi_quic"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#1a178417a286512e936dda3393d531cf2afa3a08"
 dependencies = [
  "aws-lc-rs",
  "nojson",
@@ -2729,7 +2729,7 @@ dependencies = [
 [[package]]
 name = "tobi_rustls"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#1a178417a286512e936dda3393d531cf2afa3a08"
 dependencies = [
  "aws-lc-rs",
  "rustls",
@@ -2739,7 +2739,7 @@ dependencies = [
 [[package]]
 name = "tobi_transport"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#1a178417a286512e936dda3393d531cf2afa3a08"
 dependencies = [
  "tobi_core",
  "tobi_crypto",
@@ -2751,7 +2751,7 @@ dependencies = [
 [[package]]
 name = "tobi_webtransport"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/tobi-quic?branch=main#fc7762068d1a8c36deaaf49115c01e3d993202a6"
+source = "git+https://github.com/shiguredo/tobi-quic?branch=main#1a178417a286512e936dda3393d531cf2afa3a08"
 dependencies = [
  "rustls",
  "shiguredo_http3",
@@ -3320,8 +3320,8 @@ dependencies = [
  "aws-lc-rs",
  "duckdb",
  "insta",
- "libduckdb-sys",
  "jiff",
+ "libduckdb-sys",
  "log",
  "noargs",
  "nojson",
