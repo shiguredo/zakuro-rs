@@ -22,4 +22,14 @@ fn main() {
     for suffix in ["", "/deps"] {
         println!("cargo:rustc-link-arg-bins=-Wl,-rpath,{rpath_prefix}{suffix}");
     }
+
+    // libduckdb-sys は prebuilt DuckDB を展開したディレクトリを
+    // `DEP_DUCKDB_INCLUDE` で公開する。`cargo run` やテストでは Cargo が
+    // 探索パスを設定するが、ビルドしたバイナリを直接起動するときは設定されない
+    // ため、そのディレクトリを rpath に追加する。
+    println!("cargo:rerun-if-env-changed=DEP_DUCKDB_INCLUDE");
+    if let Ok(dir) = std::env::var("DEP_DUCKDB_INCLUDE") {
+        // ビルドツリーから直接起動する場合に libduckdb.so を見つけられるようにする。
+        println!("cargo:rustc-link-arg-bins=-Wl,-rpath,{dir}");
+    }
 }

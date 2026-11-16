@@ -3320,6 +3320,7 @@ dependencies = [
  "aws-lc-rs",
  "duckdb",
  "insta",
+ "libduckdb-sys",
  "jiff",
  "log",
  "noargs",

@@ -24,6 +24,7 @@ aws-lc-rs = "1.18"
 # prebuilt ダウンロードは download-lib feature で有効化する
 # (libduckdb-sys 1.20000 以降が Cargo 1.100 の build directory 配置に対応する)
 duckdb = { version = "1.20000", default-features = false, features = ["download-lib"] }
+
 # UTC タイムスタンプ整形 (DuckDB ファイル名生成用)
 jiff = "0.2"
 # 共有クレート (zakuro-core) のログファサードの受け口
@@ -72,6 +73,12 @@ features = [
   "sync",
   "time",
 ]
+
+# build.rs が DEP_DUCKDB_INCLUDE から prebuilt DuckDB の配置を取得し、rpath に追加する。
+# バージョンは duckdb が要求する libduckdb-sys と揃える。
+[dependencies.libduckdb-sys]
+version = "1.20000"
+default-features = false
 
 [dev-dependencies]
 # スナップショットテスト (フォーマッタ出力の golden master)
