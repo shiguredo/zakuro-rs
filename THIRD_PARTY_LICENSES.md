@@ -142,26 +142,26 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | anstyle | 1.0.14 | MIT OR Apache-2.0 |
 | anyhow | 1.0.104 | MIT OR Apache-2.0 |
 | arbitrary | 1.4.2 | MIT OR Apache-2.0 |
-| arrow | 58.4.0 | Apache-2.0 |
-| arrow-arith | 58.4.0 | Apache-2.0 |
-| arrow-array | 58.4.0 | Apache-2.0 AND MIT |
-| arrow-buffer | 58.4.0 | Apache-2.0 |
-| arrow-cast | 58.4.0 | Apache-2.0 |
-| arrow-data | 58.4.0 | Apache-2.0 |
-| arrow-ord | 58.4.0 | Apache-2.0 |
-| arrow-row | 58.4.0 | Apache-2.0 |
-| arrow-schema | 58.4.0 | Apache-2.0 |
-| arrow-select | 58.4.0 | Apache-2.0 |
-| arrow-string | 58.4.0 | Apache-2.0 |
+| arrow | 60.1.0 | Apache-2.0 |
+| arrow-arith | 60.1.0 | Apache-2.0 |
+| arrow-array | 60.1.0 | Apache-2.0 AND MIT |
+| arrow-buffer | 60.1.0 | Apache-2.0 |
+| arrow-cast | 60.1.0 | Apache-2.0 |
+| arrow-cmp | 60.1.0 | Apache-2.0 |
+| arrow-data | 60.1.0 | Apache-2.0 |
+| arrow-ord | 60.1.0 | Apache-2.0 |
+| arrow-row | 60.1.0 | Apache-2.0 |
+| arrow-schema | 60.1.0 | Apache-2.0 |
+| arrow-select | 60.1.0 | Apache-2.0 |
+| arrow-string | 60.1.0 | Apache-2.0 |
 | asn1-rs | 0.7.2 | MIT OR Apache-2.0 |
 | asn1-rs-derive | 0.6.0 | MIT OR Apache-2.0 |
 | asn1-rs-impl | 0.2.0 | MIT/Apache-2.0 |
-| atoi | 2.0.0 | MIT |
+| atoi | 3.1.1 | MIT |
 | atomic-waker | 1.1.2 | Apache-2.0 OR MIT |
 | autocfg | 1.5.1 | Apache-2.0 OR MIT |
 | aws-lc-rs | 1.19.0 | ISC AND (Apache-2.0 OR ISC) |
 | aws-lc-sys | 0.47.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) |
-| base64 | 0.22.1 | MIT OR Apache-2.0 |
 | base64 | 0.23.1 | MIT OR Apache-2.0 |
 | base64ct | 1.8.3 | Apache-2.0 OR MIT |
 | bindgen | 0.72.1 | BSD-3-Clause |
@@ -181,7 +181,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | clang-sys | 1.9.1 | Apache-2.0 |
 | cmake | 0.1.58 | MIT OR Apache-2.0 |
 | combine | 4.6.8 | MIT |
-| comfy-table | 7.1.4 | MIT |
+| comfy-table | 8.0.1 | MIT |
 | console | 0.16.6 | MIT |
 | const-random | 0.1.18 | MIT OR Apache-2.0 |
 | const-random-macro | 0.1.16 | MIT OR Apache-2.0 |
@@ -205,8 +205,6 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | cranelift-srcgen | 0.133.3 | Apache-2.0 WITH LLVM-exception |
 | crc32fast | 1.5.2 | MIT OR Apache-2.0 |
 | crossbeam-utils | 0.8.23 | MIT OR Apache-2.0 |
-| crossterm | 0.28.1 | MIT |
-| crossterm_winapi | 0.9.1 | MIT |
 | crunchy | 0.2.4 | MIT |
 | data-encoding | 2.11.1 | MIT |
 | defmt | 1.1.1 | MIT OR Apache-2.0 |
@@ -214,9 +212,8 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | defmt-parser | 1.0.0 | MIT OR Apache-2.0 |
 | der-parser | 10.0.0 | MIT OR Apache-2.0 |
 | deranged | 0.5.9 | MIT OR Apache-2.0 |
-| derive_arbitrary | 1.4.2 | MIT OR Apache-2.0 |
 | displaydoc | 0.2.7 | MIT OR Apache-2.0 |
-| duckdb | 1.10506.0 | MIT |
+| duckdb | 1.20000.2 | MIT |
 | dunce | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 |
 | either | 1.18.0 | MIT OR Apache-2.0 |
 | encode_unicode | 1.0.0 | Apache-2.0 OR MIT |
@@ -280,11 +277,10 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | lexical-write-float | 1.0.6 | MIT/Apache-2.0 |
 | lexical-write-integer | 1.0.6 | MIT/Apache-2.0 |
 | libc | 0.2.190 | MIT OR Apache-2.0 |
-| libduckdb-sys | 1.10506.0 | MIT |
+| libduckdb-sys | 1.20000.2 | MIT |
 | libloading | 0.8.9 | ISC |
 | libm | 0.2.16 | MIT |
 | linux-raw-sys | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
-| linux-raw-sys | 0.4.15 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | lock_api | 0.4.14 | MIT OR Apache-2.0 |
 | log | 0.4.34 | MIT OR Apache-2.0 |
 | mach2 | 0.4.3 | BSD-2-Clause OR MIT OR Apache-2.0 |
@@ -299,6 +295,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | nom | 7.1.3 | MIT |
 | nu-ansi-term | 0.50.3 | MIT |
 | num-bigint | 0.4.8 | MIT OR Apache-2.0 |
+| num-bigint | 0.5.1 | MIT OR Apache-2.0 |
 | num-complex | 0.4.6 | MIT OR Apache-2.0 |
 | num-conv | 0.2.2 | MIT OR Apache-2.0 |
 | num-integer | 0.1.47 | MIT OR Apache-2.0 |
@@ -335,7 +332,6 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT |
 | rustc_version | 0.4.1 | MIT OR Apache-2.0 |
 | rusticata-macros | 4.1.0 | MIT/Apache-2.0 |
-| rustix | 0.38.44 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | rustix | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | rustls | 0.23.45 | Apache-2.0 OR ISC OR MIT |
 | rustls-native-certs | 0.8.4 | Apache-2.0 OR ISC OR MIT |
@@ -438,7 +434,6 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | ureq-proto | 0.6.4 | MIT OR Apache-2.0 |
 | utf8-zero | 0.8.1 | MIT OR Apache-2.0 |
 | valuable | 0.1.1 | MIT |
-| vcpkg | 0.2.15 | MIT/Apache-2.0 |
 | version_check | 0.9.5 | MIT/Apache-2.0 |
 | walkdir | 2.5.0 | Unlicense/MIT |
 | wasi | 0.11.1+wasi-snapshot-preview1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
@@ -451,10 +446,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | wasmtime-internal-jit-icache-coherence | 46.0.3 | Apache-2.0 WITH LLVM-exception |
 | webpki-root-certs | 1.0.9 | CDLA-Permissive-2.0 |
 | webpki-roots | 1.0.9 | CDLA-Permissive-2.0 |
-| winapi | 0.3.9 | MIT/Apache-2.0 |
-| winapi-i686-pc-windows-gnu | 0.4.0 | MIT/Apache-2.0 |
 | winapi-util | 0.1.11 | Unlicense OR MIT |
-| winapi-x86_64-pc-windows-gnu | 0.4.0 | MIT/Apache-2.0 |
 | windows | 0.62.2 | MIT OR Apache-2.0 |
 | windows-collections | 0.3.2 | MIT OR Apache-2.0 |
 | windows-core | 0.62.2 | MIT OR Apache-2.0 |
@@ -488,10 +480,8 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | zerocopy-derive | 0.8.59 | BSD-2-Clause OR Apache-2.0 OR MIT |
 | zeroize | 1.9.0 | Apache-2.0 OR MIT |
 | zeroize_derive | 1.5.0 | Apache-2.0 OR MIT |
-| zip | 6.0.0 | MIT |
 | zlib-rs | 0.6.8 | Zlib |
 | zmij | 1.0.23 | MIT |
-| zopfli | 0.8.3 | Apache-2.0 |
 
 <!-- END CARGO DEPENDENCIES (auto-generated) -->
 

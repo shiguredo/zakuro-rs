@@ -59,7 +59,7 @@ C++ 版との対応表・実装状況は `docs/ZAKURO.md`、DuckDB のスキー�
 | libwebrtc | 時雨堂の prebuilt の**静的ライブラリ**をダウンロード | 静的 | なし |
 | Opus | 時雨堂の prebuilt の**静的ライブラリ**をダウンロード | 静的 | なし |
 
-- DuckDB は `.cargo/config.toml` の `DUCKDB_DOWNLOAD_LIB` で prebuilt をダウンロードしてリンクします。cargo はリポジトリ内の config を読むため、**clone したディレクトリ内でのビルド**でしか効きません
+- DuckDB は `duckdb` の `download-lib` feature と `.cargo/config.toml` の `DUCKDB_DOWNLOAD_LIB` で prebuilt をダウンロードしてリンクします。cargo はリポジトリ内の config を読むため、**clone したディレクトリ内でのビルド**でしか効きません
 - libwebrtc の prebuilt は ubuntu 22.04 / 24.04 / 26.04 と Raspberry Pi OS 向けです。それ以外は `WEBRTC_C_TARGET` にターゲット名を設定してください
 - macOS は Apple Silicon のみ対応です。Intel Mac 向けの prebuilt はありません
 
