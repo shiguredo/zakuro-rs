@@ -31,7 +31,7 @@ Rust 1.100 (Cargo 1.100) の変更で CI の ubuntu ジョブが失敗してい�
   テストの意味は変えない
 - `.cargo/config.toml` と README の DuckDB のダウンロード方法の記述を feature に合わせる
 - 検証は `cargo fmt --all -- --check`、`cargo clippy --locked -p zakuro --all-targets -- -D warnings`、
-  `cargo test --locked -p zakuro`、`cargo +1.99 check --locked --workspace` で行う
+  `cargo test --locked -p zakuro`、`cargo +1.100 check --locked --workspace` で行う
 
 ## 完了条件
 
@@ -45,6 +45,9 @@ Rust 1.100 (Cargo 1.100) の変更で CI の ubuntu ジョブが失敗してい�
   `duckdb` と `libduckdb-sys` が `1.20000.2` になり、`Cargo.lock` を再生成した
 - `libduckdb-sys 1.20000.2` は Cargo 1.100 の `build/<pkg>/<hash>/out` 配置に対応しているため、
   ubuntu の CI でも prebuilt DuckDB の展開先を決定できるようになった
+- duckdb 1.20000.2 の `libduckdb-sys` は実行ファイルへ rpath を埋め込まないため、
+  `libduckdb-sys` を直接依存に追加し、`zakuro/build.rs` で `DEP_DUCKDB_INCLUDE` を
+  rpath に追加した。`./target/debug/zakuro --help` が環境変数なしで動くことを確認した
 - `zakuro/src/scenario.rs` の `test_build_reconnect_scenario_structure` のループを
   `scenario.ops.iter().enumerate().skip(1)` に変え、Rust 1.100 の
   `needless_range_loop` の指摘を解消した。テストの意味は変えていない
@@ -55,7 +58,7 @@ Rust 1.100 (Cargo 1.100) の変更で CI の ubuntu ジョブが失敗してい�
   `cargo clippy --locked --workspace --all-targets --features fdk-aac -- -D warnings`、
   `cargo test --locked --workspace --features fdk-aac`
   (zakuro 316 件 / zakuro-core 8 件 / zakuro-moq 126 件)、
-  `cargo +1.99 check --locked --workspace` が exit 0
+  `cargo +1.100 check --locked --workspace` が exit 0
 - fdk-aac のヘッダーは Ubuntu の `libfdk-aac-dev` を展開して
   `FDK_AAC_INCLUDE_DIR` を指定して検証した
 
