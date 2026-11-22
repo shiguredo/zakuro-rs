@@ -7,8 +7,8 @@ use shiguredo_webrtc::{
     rtc_log_info, rtc_log_warning,
 };
 use sora_sdk::{
-    ConnectDataChannel, JsonString, Mp4VideoCapturer, Role, SignalingDirection, SoraConnection,
-    SoraConnectionContext, SoraConnectionEventHandler,
+    ConnectDataChannel, DisconnectReason as SdkDisconnectReason, JsonString, Mp4VideoCapturer,
+    Role, SignalingDirection, SoraConnection, SoraConnectionContext, SoraConnectionEventHandler,
 };
 use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::IntervalStream};
@@ -69,7 +69,7 @@ enum DisconnectReason {
     DurationExpired,
     ScenarioDisconnect,
     ScenarioExit,
-    Unexpected(sora_sdk::Result<()>),
+    Unexpected(sora_sdk::Result<SdkDisconnectReason>),
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -198,7 +198,7 @@ pub(crate) async fn run(
         // build_client() が返るのは接続オブジェクトを作れた時点であり、実際の接続は run() が行う。
         let mut run_future = Box::pin(client.run());
         // 確立前に run() が終わった場合、完了済み future を再 poll すると panic するため結果を保持する
-        let mut finished: Option<sora_sdk::Result<()>> = None;
+        let mut finished = None;
         let established = tokio::select! {
             biased;
             _ = token.cancelled() => false,
@@ -373,13 +373,31 @@ pub(crate) async fn run(
                 let _ = stats_tx
                     .send(StatsEvent::Disconnected { instance_id, vc_id })
                     .await;
-                if let Err(e) = result {
-                    rtc_log_warning!(
+                match result {
+                    Ok(reason) => {
+                        // SDK が切断理由を返しても、zakuro から要求していない切断は再試行する。
+                        // サーバーが指定した理由文字列はログに載せず、種別だけを記録する。
+                        let kind = match reason {
+                            SdkDisconnectReason::ClientDisconnect => "client-disconnect",
+                            SdkDisconnectReason::ServerClose { .. } => "server-close",
+                            SdkDisconnectReason::SignalingError { .. } => "signaling-error",
+                            SdkDisconnectReason::WebSocketClosed { .. } => "websocket-closed",
+                            SdkDisconnectReason::DataChannelClosed { .. } => "data-channel-closed",
+                            SdkDisconnectReason::PeerConnectionFailed => "peer-connection-failed",
+                        };
+                        rtc_log_warning!(
+                            "[i{}/vc-{}] unexpected disconnect: reason={}",
+                            instance_id,
+                            vc_id,
+                            kind,
+                        );
+                    }
+                    Err(e) => rtc_log_warning!(
                         "[i{}/vc-{}] unexpected disconnect: {}",
                         instance_id,
                         vc_id,
                         e,
-                    );
+                    ),
                 }
                 retry_count += 1;
                 if retry_count > config.max_retry {

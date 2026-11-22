@@ -218,8 +218,8 @@ POST /rpc          → JSON-RPC 2.0
 
 | ライブラリ | バージョン | 用途 |
 |-----------|-----------|------|
-| shiguredo_webrtc | 0.154.1-canary.5 | libwebrtc バインディング |
-| sora_sdk | 2026.2.0-canary.7 | Sora Rust SDK (接続状態の変化コールバックに対応) |
+| shiguredo_webrtc | 0.155 | libwebrtc バインディング |
+| sora_sdk | 2026.3 | Sora への接続、接続状態と切断理由の取得 |
 | shiguredo_http11 | 2026.6 | HTTP/1.1 サーバー |
 | shiguredo_openh264 | 2026.2 | OpenH264 バインディング |
 | shiguredo_video_device | 2026.3 | クロスプラットフォーム ビデオデバイス |

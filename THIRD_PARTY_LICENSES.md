@@ -342,7 +342,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | shiguredo_tokio_qmux | 0.0.0 | UNKNOWN |
 | shiguredo_toml | 2026.2.0 | Apache-2.0 |
 | shiguredo_video_device | 2026.4.0 | Apache-2.0 |
-| shiguredo_webrtc | 0.154.1-canary.5 | Apache-2.0 |
+| shiguredo_webrtc | 0.155.0 | Apache-2.0 |
 | shiguredo_websocket | 2026.3.0 | Apache-2.0 |
 | shlex | 1.3.0 | MIT OR Apache-2.0 |
 | shlex | 2.0.1 | MIT OR Apache-2.0 |
@@ -354,7 +354,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | slab | 0.4.12 | MIT |
 | smallvec | 1.16.2 | MIT OR Apache-2.0 |
 | socket2 | 0.6.5 | MIT OR Apache-2.0 |
-| sora_sdk | 2026.2.0-canary.7 | Apache-2.0 |
+| sora_sdk | 2026.3.0 | Apache-2.0 |
 | stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 |
 | strum | 0.27.2 | MIT |
 | strum_macros | 0.27.2 | MIT |
