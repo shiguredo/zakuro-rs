@@ -20,7 +20,7 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 | バイナリ | ディレクトリ | 対象 | 主な依存 |
 |---|---|---|---|
 | `zakuro` | `zakuro/` | Sora WebRTC SFU | libwebrtc (Sora Rust SDK)・DuckDB |
-| `zakuro-moq` | `zakuro-moq/` | Sora MoQ (Media over QUIC 実装) のリレー | tobi-quic / tobi-webtransport (既定)、s2n-quic、ngtcp2、moqt-rs (`shiguredo_moqt`) |
+| `zakuro-moq` | `zakuro-moq/` | Sora MoQ (Media over QUIC 実装) のリレー | tobi-quic、tobi-webtransport、moqt-rs (`shiguredo_moqt`) |
 
 両者で共有する基盤 (統計・HTTP サーバー・JSON-RPC) は `zakuro-core/` に置いています。
 
@@ -219,10 +219,16 @@ cargo run -- \
 
 ## MOQ 版 (`zakuro-moq`)
 
-Sora MoQ (Media over QUIC 実装) のリレーに対する publish 負荷試験を行います。
-1 仮想クライアント = 1 接続 (QUIC 直接接続または QMux) = 1 MOQT セッションで、指定した
-複数トラックを同時に publish します。Track Name は
-`<トラック名>-<インスタンス>-<仮想クライアント>` として仮想クライアントごとに一意化します。
+Sora MoQ (Media over QUIC 実装) のリレーに対し、publish の負荷試験を実行します。
+仮想クライアントごとに接続を 1 本確立し、1 つの MOQT セッションで複数のトラックを同時に publish します。
+Track Name は `<トラック名>-<インスタンス>-<仮想クライアント>` の形式で仮想クライアントごとに区別します。
+
+### ビルドと実行 (`zakuro-moq`)
+
+リポジトリのルートで `cargo build -p zakuro-moq` を実行してください。
+QUIC 直接接続には tobi-quic のみを使い、ビルド時に Cargo feature を指定する必要はありません。
+
+次の例では、既定の QUIC 直接接続で publish の負荷試験を実行します。
 
 ```bash
 cargo run -p zakuro-moq -- \
@@ -259,33 +265,9 @@ TLS は既定で証明書を検証します。relay の CA 証明書を指定す
   遅延が伸びるため、遅延を重視する試験では QUIC 直接接続を使ってください。ALPN は QUIC 直接接続と
   同じ `moqt-23` です。DATAGRAM は TCP 上で信頼的かつ順序どおりに届きます。
 
-QUIC 直接接続の実装は Cargo feature で選びます (`--quic-backend` のような CLI オプションは
-ありません)。3 つのうちちょうど 1 つを有効にしてください。
-
-| feature | QUIC 実装 | 備考 |
-| --- | --- | --- |
-| `quic-tobi` (既定) | tobi-quic (`shiguredo/tobi-quic` の main ブランチ) | |
-| `quic-s2n` | s2n-quic | |
-| `quic-ngtcp2` | ngtcp2 (`shiguredo_ngtcp2_tokio`) | |
-
-この選択が影響するのは `--transport quic` だけです。`wt-h3` は常に tobi-webtransport を
-使うため、どの feature でも利用できます。
-
-```bash
-# 既定の tobi-quic でビルドする
-cargo build -p zakuro-moq
-
-# s2n-quic でビルドする
-cargo build -p zakuro-moq --no-default-features --features quic-s2n
-
-# ngtcp2 でビルドする
-cargo build -p zakuro-moq --no-default-features --features quic-ngtcp2
-```
-
-どのバックエンドでも UDP ソケットはインスタンス内でアドレスファミリごとに共有し、仮想
-クライアントごとに接続を 1 本確立します (ngtcp2 は接続ごとにソケットを作ります)。
-`quic-tobi` は `RESET_STREAM_AT` の受理を広告し、ピアが対応している場合は送信済みデータの配信を
-保証してストリームを reset します。対応していないピアには通常の `RESET_STREAM` を送ります。
+QUIC 直接接続では、インスタンス内の仮想クライアントが接続先とアドレスファミリごとに UDP ソケットを共有します。
+tobi-quic は `RESET_STREAM_AT` の受理を広告し、ピアが対応している場合は送信済みデータの配信を
+保証してストリームをリセットします。対応していないピアには通常の `RESET_STREAM` を送ります。
 
 `wt-h3` は tobi-webtransport (`shiguredo/tobi-quic` の main ブランチ) を使います。
 HTTP/3 SETTINGS と QUIC transport parameter を検証してから接続し、単方向・双方向ストリーム、
@@ -299,13 +281,6 @@ Extended CONNECT、`WT-Available-Protocols` / `WT-Protocol` を検証してか�
 単方向・双方向ストリーム、WT フロー制御、`WT_RESET_STREAM` / `WT_STOP_SENDING` を処理します。
 DATAGRAM は `WT_DATAGRAM` capsule で運びます。接続ごとに TCP ソケットと駆動タスクを作ります。
 無通信の接続が relay に切られないよう、HTTP/2 PING を 5 秒間隔で送ります。
-
-```bash
-cargo run -p zakuro-moq -- \
-  --url moqt://relay.example.com:4433 \
-  --tracks video:30:1000 \
-  --vcs 10
-```
 
 WebTransport over HTTP/3 経由で接続する場合は次のように指定します。
 

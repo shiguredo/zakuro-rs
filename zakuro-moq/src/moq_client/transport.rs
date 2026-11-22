@@ -1,10 +1,9 @@
 //! MOQ relay への接続 (QUIC 直接接続 / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux)
 //!
 //! MOQT の接続先 URL の解釈、名前解決、TLS 設定、経路ごとのクライアント構築を担当する。
-//! QUIC 直接接続は Cargo feature で選んだバックエンド (tobi-quic / s2n-quic / ngtcp2)、
-//! WebTransport over HTTP/3 は tobi-webtransport、WebTransport over HTTP/2 と QMux は
-//! TLS over TCP を使う。各経路を `session.rs` からは [`MoqConnection`] として同じように
-//! 扱える。
+//! QUIC 直接接続は tobi-quic、WebTransport over HTTP/3 は tobi-webtransport を使う。
+//! WebTransport over HTTP/2 と QMux は TLS over TCP を使う。`session.rs` は各経路を
+//! [`MoqConnection`] として扱う。
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -247,17 +246,10 @@ pub(crate) struct MoqTlsOptions {
 ///
 /// 名前解決結果と SNI は接続先ごとに異なるため、接続先ごとに保持する。ネイティブ QUIC の
 /// クライアント (UDP ソケットとエンドポイントタスク) はインスタンス内の仮想クライアントで
-/// 共有する。有効なバックエンドのフィールドだけが存在する。
+/// 共有する。
 struct EndpointState {
     /// tobi-quic のクライアント (bool は IPv6 かどうか)
-    #[cfg(feature = "quic-tobi")]
     tobi_clients: Vec<(bool, tobi_quic::Client)>,
-    /// s2n-quic のクライアント (bool は IPv6 かどうか)
-    #[cfg(feature = "quic-s2n")]
-    s2n_clients: Vec<(bool, s2n_quic::Client)>,
-    /// ngtcp2 の接続設定 (接続ごとに UDP ソケットを作る)
-    #[cfg(feature = "quic-ngtcp2")]
-    ngtcp2_config: Option<Arc<shiguredo_ngtcp2_tokio::ClientConfig>>,
     /// WebTransport over HTTP/3 のクライアント (bool は IPv6 かどうか)
     wt_clients: Vec<(bool, tobi_webtransport::client::Client)>,
     /// TLS の SNI に使うサーバー名
@@ -272,46 +264,14 @@ impl EndpointState {
     /// # Errors
     ///
     /// クライアントの起動に失敗した場合はエラーになる。
-    #[cfg(feature = "quic-tobi")]
     fn build_quic_clients(&mut self, tls: &Arc<rustls::ClientConfig>) -> Result<()> {
         for is_ipv6 in [false, true] {
             if !self.addrs.iter().any(|addr| addr.is_ipv6() == is_ipv6) {
                 continue;
             }
             self.tobi_clients
-                .push((is_ipv6, quic::tobi::build_client(tls, is_ipv6)?));
+                .push((is_ipv6, quic::build_client(tls, is_ipv6)?));
         }
-        Ok(())
-    }
-
-    /// ネイティブ QUIC のクライアントを構築する (s2n-quic)
-    ///
-    /// # Errors
-    ///
-    /// クライアントの起動に失敗した場合はエラーになる。
-    #[cfg(feature = "quic-s2n")]
-    fn build_quic_clients(&mut self, tls: &quic::s2n::Tls) -> Result<()> {
-        for is_ipv6 in [false, true] {
-            if !self.addrs.iter().any(|addr| addr.is_ipv6() == is_ipv6) {
-                continue;
-            }
-            self.s2n_clients
-                .push((is_ipv6, quic::s2n::build_client(tls, is_ipv6)?));
-        }
-        Ok(())
-    }
-
-    /// ネイティブ QUIC の接続設定を保持する (ngtcp2)
-    ///
-    /// # Errors
-    ///
-    /// 設定が渡されなかった場合はエラーになる。
-    #[cfg(feature = "quic-ngtcp2")]
-    fn build_quic_clients(
-        &mut self,
-        config: &Arc<shiguredo_ngtcp2_tokio::ClientConfig>,
-    ) -> Result<()> {
-        self.ngtcp2_config = Some(Arc::clone(config));
         Ok(())
     }
 
@@ -338,7 +298,6 @@ impl EndpointState {
     /// # Errors
     ///
     /// 全ての接続先への接続に失敗した場合はエラーになる。
-    #[cfg(feature = "quic-tobi")]
     async fn connect_quic(&self) -> Result<MoqConnection> {
         let mut last_error: Option<ErrorMessage> = None;
         let last_index = self.addrs.len().saturating_sub(1);
@@ -357,11 +316,8 @@ impl EndpointState {
             } else {
                 CONNECT_ATTEMPT_TIMEOUT
             };
-            match tokio::time::timeout(
-                timeout,
-                quic::tobi::connect(client, *addr, &self.server_name),
-            )
-            .await
+            match tokio::time::timeout(timeout, quic::connect(client, *addr, &self.server_name))
+                .await
             {
                 Ok(Ok(connection)) => return Ok(MoqConnection::Quic(connection)),
                 Ok(Err(e)) => {
@@ -372,99 +328,6 @@ impl EndpointState {
                 Err(_) => {
                     last_error = Some(ErrorMessage::new(format!(
                         "MOQ relay への接続がタイムアウトしました ({addr})"
-                    )))
-                }
-            }
-        }
-        Err(last_error
-            .unwrap_or_else(|| ErrorMessage::new("MOQ relay への接続先がありません"))
-            .into())
-    }
-
-    /// この接続先へ QUIC 接続を確立する (s2n-quic)
-    ///
-    /// # Errors
-    ///
-    /// 全ての接続先への接続に失敗した場合はエラーになる。
-    #[cfg(feature = "quic-s2n")]
-    async fn connect_quic(&self) -> Result<MoqConnection> {
-        let mut last_error: Option<ErrorMessage> = None;
-        let last_index = self.addrs.len().saturating_sub(1);
-        for (index, addr) in self.addrs.iter().enumerate() {
-            let Some((_, client)) = self
-                .s2n_clients
-                .iter()
-                .find(|(is_ipv6, _)| *is_ipv6 == addr.is_ipv6())
-            else {
-                continue;
-            };
-            let timeout = if index == last_index {
-                CONNECT_FINAL_ATTEMPT_TIMEOUT
-            } else {
-                CONNECT_ATTEMPT_TIMEOUT
-            };
-            match tokio::time::timeout(
-                timeout,
-                quic::s2n::connect(client, *addr, &self.server_name),
-            )
-            .await
-            {
-                Ok(Ok(connection)) => return Ok(MoqConnection::S2n(connection)),
-                Ok(Err(e)) => {
-                    last_error = Some(ErrorMessage::new(format!(
-                        "MOQ relay への接続に失敗しました ({addr}): {e}"
-                    )))
-                }
-                Err(_) => {
-                    last_error = Some(ErrorMessage::new(format!(
-                        "MOQ relay への接続がタイムアウトしました ({addr})"
-                    )))
-                }
-            }
-        }
-        Err(last_error
-            .unwrap_or_else(|| ErrorMessage::new("MOQ relay への接続先がありません"))
-            .into())
-    }
-
-    /// この接続先へ QUIC 接続を確立する (ngtcp2)
-    ///
-    /// ngtcp2 は接続ごとに UDP ソケットを作るため、候補のアドレスファミリに合わせて
-    /// ローカルアドレスを選ぶ。
-    ///
-    /// # Errors
-    ///
-    /// 全ての接続先への接続に失敗した場合はエラーになる。
-    #[cfg(feature = "quic-ngtcp2")]
-    async fn connect_quic(&self) -> Result<MoqConnection> {
-        let config = self
-            .ngtcp2_config
-            .as_ref()
-            .ok_or_else(|| ErrorMessage::new("ngtcp2 の接続設定が構築されていません"))?;
-        let mut last_error: Option<ErrorMessage> = None;
-        let last_index = self.addrs.len().saturating_sub(1);
-        for (index, addr) in self.addrs.iter().enumerate() {
-            let timeout = if index == last_index {
-                CONNECT_FINAL_ATTEMPT_TIMEOUT
-            } else {
-                CONNECT_ATTEMPT_TIMEOUT
-            };
-            let local = quic::local_bind_addr(addr.is_ipv6());
-            match tokio::time::timeout(
-                timeout,
-                quic::ngtcp2::connect(*addr, local, &self.server_name, config),
-            )
-            .await
-            {
-                Ok(Ok(connection)) => return Ok(MoqConnection::Ngtcp2(connection)),
-                Ok(Err(e)) => {
-                    last_error = Some(ErrorMessage::new(format!(
-                        "MOQ relay への ngtcp2 接続に失敗しました ({addr}): {e}"
-                    )))
-                }
-                Err(_) => {
-                    last_error = Some(ErrorMessage::new(format!(
-                        "MOQ relay への ngtcp2 接続がタイムアウトしました ({addr})"
                     )))
                 }
             }
@@ -661,15 +524,8 @@ impl EndpointKey {
 pub(crate) struct MoqClientContext {
     /// 下位トランスポート種別 (インスタンス内で固定)
     transport: MoqTransport,
-    /// tobi-quic の TLS 設定 (QUIC 直接接続と WebTransport over HTTP/3 で共有する)
-    #[cfg(feature = "quic-tobi")]
+    /// QUIC 直接接続の TLS 設定 (ALPN はクライアント構築時に設定する)
     quic_tls: Option<Arc<rustls::ClientConfig>>,
-    /// s2n-quic の TLS 設定 (移行先が増えても作り直さない)
-    #[cfg(feature = "quic-s2n")]
-    quic_tls: Option<quic::s2n::Tls>,
-    /// ngtcp2 の接続設定 (接続ごとの UDP ソケットは共有しない)
-    #[cfg(feature = "quic-ngtcp2")]
-    ngtcp2_config: Option<Arc<shiguredo_ngtcp2_tokio::ClientConfig>>,
     /// WebTransport over HTTP/3 の TLS 設定 (ALPN は tobi-webtransport が設定する)
     wt_h3_tls: Option<Arc<rustls::ClientConfig>>,
     /// QMux の TLS 設定 (TCP + TLS のハンドシェイクに使う)
@@ -701,19 +557,14 @@ impl MoqClientContext {
     ) -> Result<Self> {
         let mut context = Self {
             transport,
-            #[cfg(feature = "quic-tobi")]
             quic_tls: None,
-            #[cfg(feature = "quic-s2n")]
-            quic_tls: None,
-            #[cfg(feature = "quic-ngtcp2")]
-            ngtcp2_config: None,
             wt_h3_tls: None,
             qmux_tls: None,
             wt_h2_tls: None,
             endpoints: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
         match transport {
-            MoqTransport::Quic => context.init_quic(tls_options)?,
+            MoqTransport::Quic => context.quic_tls = Some(build_quic_base_tls(tls_options)?),
             MoqTransport::WtH3 => context.wt_h3_tls = Some(build_quic_base_tls(tls_options)?),
             // WebTransport over HTTP/2 は TCP + TLS 上で動くため QUIC 実装を使わない
             MoqTransport::WtH2 => context.wt_h2_tls = Some(build_wt_h2_tls(tls_options)?),
@@ -726,40 +577,6 @@ impl MoqClientContext {
             .await
             .insert(EndpointKey::new(endpoint), Arc::new(state));
         Ok(context)
-    }
-
-    /// QUIC 直接接続の設定を構築する (tobi-quic)
-    ///
-    /// # Errors
-    ///
-    /// TLS 設定の構築に失敗した場合はエラーになる。
-    #[cfg(feature = "quic-tobi")]
-    fn init_quic(&mut self, tls_options: &MoqTlsOptions) -> Result<()> {
-        self.quic_tls = Some(build_quic_base_tls(tls_options)?);
-        Ok(())
-    }
-
-    /// QUIC 直接接続の設定を構築する (s2n-quic)
-    ///
-    /// # Errors
-    ///
-    /// TLS 設定の構築に失敗した場合はエラーになる。
-    #[cfg(feature = "quic-s2n")]
-    fn init_quic(&mut self, tls_options: &MoqTlsOptions) -> Result<()> {
-        self.quic_tls = Some(quic::s2n::build_tls(tls_options)?);
-        Ok(())
-    }
-
-    /// QUIC 直接接続の設定を構築する (ngtcp2)
-    ///
-    /// # Errors
-    ///
-    /// TLS 設定の構築に失敗した場合、または `--ca-cert` の読み込みに失敗した場合は
-    /// エラーになる。
-    #[cfg(feature = "quic-ngtcp2")]
-    fn init_quic(&mut self, tls_options: &MoqTlsOptions) -> Result<()> {
-        self.ngtcp2_config = Some(Arc::new(quic::ngtcp2::build_config(tls_options)?));
-        Ok(())
     }
 
     /// 指定した接続先へ選択中のトランスポートで接続を確立する
@@ -824,14 +641,7 @@ impl MoqClientContext {
 /// `session.rs` は経路を意識せずにこの型を分割し、ストリームの送受信と接続の終了を行う。
 pub(crate) enum MoqConnection {
     /// tobi-quic による QUIC 直接接続
-    #[cfg(feature = "quic-tobi")]
     Quic(tobi_quic::Connection),
-    /// s2n-quic による QUIC 直接接続
-    #[cfg(feature = "quic-s2n")]
-    S2n(s2n_quic::connection::Connection),
-    /// ngtcp2 による QUIC 直接接続
-    #[cfg(feature = "quic-ngtcp2")]
-    Ngtcp2(quic::ngtcp2::Connection),
     /// WebTransport over HTTP/3 接続
     WtH3(wt_h3::Connection),
     /// WebTransport over HTTP/2 接続
@@ -844,12 +654,7 @@ impl MoqConnection {
     /// この接続のトランスポート種別を返す
     pub(crate) fn transport(&self) -> MoqTransport {
         match self {
-            #[cfg(feature = "quic-tobi")]
             Self::Quic(_) => MoqTransport::Quic,
-            #[cfg(feature = "quic-s2n")]
-            Self::S2n(_) => MoqTransport::Quic,
-            #[cfg(feature = "quic-ngtcp2")]
-            Self::Ngtcp2(_) => MoqTransport::Quic,
             Self::WtH3(_) => MoqTransport::WtH3,
             Self::WtH2(_) => MoqTransport::WtH2,
             Self::Qmux(_) => MoqTransport::Qmux,
@@ -866,7 +671,6 @@ impl MoqConnection {
         MoqDatagramReceiver,
     ) {
         match self {
-            #[cfg(feature = "quic-tobi")]
             Self::Quic(connection) => {
                 // 単方向と双方向で acceptor を分ける。`split` は呼ぶたびに新しい
                 // `StreamAcceptor` を作るため、2 回呼んで 1 つずつ使う
@@ -877,27 +681,6 @@ impl MoqConnection {
                     MoqRecvAcceptor::Quic(recv_acceptor),
                     MoqBidiAcceptor::Quic(bidi_acceptor),
                     MoqDatagramReceiver::Quic(connection),
-                )
-            }
-            #[cfg(feature = "quic-s2n")]
-            Self::S2n(connection) => {
-                let (handle, acceptor) = connection.split();
-                let (bidi, recv) = acceptor.split();
-                (
-                    MoqConnectionHandle::S2n(handle.clone()),
-                    MoqRecvAcceptor::S2n(recv),
-                    MoqBidiAcceptor::S2n(bidi),
-                    MoqDatagramReceiver::S2n(handle),
-                )
-            }
-            #[cfg(feature = "quic-ngtcp2")]
-            Self::Ngtcp2(connection) => {
-                let (handle, recv, bidi, datagram) = connection.split();
-                (
-                    MoqConnectionHandle::Ngtcp2(handle),
-                    MoqRecvAcceptor::Ngtcp2(recv),
-                    MoqBidiAcceptor::Ngtcp2(bidi),
-                    MoqDatagramReceiver::Ngtcp2(datagram),
                 )
             }
             Self::WtH3(connection) => {
@@ -941,38 +724,18 @@ async fn build_endpoint_state(
 ) -> Result<EndpointState> {
     let addrs = resolve(&endpoint.host, endpoint.port).await?;
     let mut state = EndpointState {
-        #[cfg(feature = "quic-tobi")]
         tobi_clients: Vec::new(),
-        #[cfg(feature = "quic-s2n")]
-        s2n_clients: Vec::new(),
-        #[cfg(feature = "quic-ngtcp2")]
-        ngtcp2_config: None,
         wt_clients: Vec::new(),
         server_name: endpoint.host.clone(),
         addrs,
     };
     match context.transport {
         MoqTransport::Quic => {
-            #[cfg(feature = "quic-tobi")]
             state.build_quic_clients(
                 context
                     .quic_tls
                     .as_ref()
                     .expect("logical invariant: QUIC transport always has a TLS config"),
-            )?;
-            #[cfg(feature = "quic-s2n")]
-            state.build_quic_clients(
-                context
-                    .quic_tls
-                    .as_ref()
-                    .expect("logical invariant: QUIC transport always has a TLS config"),
-            )?;
-            #[cfg(feature = "quic-ngtcp2")]
-            state.build_quic_clients(
-                context
-                    .ngtcp2_config
-                    .as_ref()
-                    .expect("logical invariant: QUIC transport always has a ngtcp2 config"),
             )?;
         }
         MoqTransport::WtH3 => state.build_wt_clients(
@@ -1392,7 +1155,6 @@ mod tests {
     ///
     /// QUIC 直接接続は `moqt-23`、WebTransport over HTTP/3 は `h3` と経路で ALPN が
     /// 異なるため、共有する TLS 設定には載せず、クライアント構築時に設定する。
-    #[cfg(feature = "quic-tobi")]
     #[test]
     fn quic_tls_does_not_set_alpn() {
         let tls =
@@ -1422,32 +1184,16 @@ mod tests {
             MoqClientContext::new(&endpoint, &MoqTlsOptions::default(), MoqTransport::Qmux)
                 .await
                 .expect("コンテキストの構築に成功すること");
-        #[cfg(feature = "quic-tobi")]
         assert!(context.quic_tls.is_none());
-        #[cfg(feature = "quic-s2n")]
-        assert!(context.quic_tls.is_none());
-        #[cfg(feature = "quic-ngtcp2")]
-        assert!(context.ngtcp2_config.is_none());
         assert!(context.qmux_tls.is_some());
         let endpoints = context.endpoints.lock().await;
         let state = endpoints
             .values()
             .next()
             .expect("接続先が登録されていること");
-        #[cfg(feature = "quic-tobi")]
         assert!(
             state.tobi_clients.is_empty(),
             "QMux では QUIC クライアントを作らないこと"
-        );
-        #[cfg(feature = "quic-s2n")]
-        assert!(
-            state.s2n_clients.is_empty(),
-            "QMux では QUIC クライアントを作らないこと"
-        );
-        #[cfg(feature = "quic-ngtcp2")]
-        assert!(
-            state.ngtcp2_config.is_none(),
-            "QMux では QUIC の接続設定を作らないこと"
         );
         assert!(state.wt_clients.is_empty());
     }
@@ -1474,12 +1220,7 @@ mod tests {
             MoqClientContext::new(&endpoint, &MoqTlsOptions::default(), MoqTransport::WtH2)
                 .await
                 .expect("コンテキストの構築に成功すること");
-        #[cfg(feature = "quic-tobi")]
         assert!(context.quic_tls.is_none());
-        #[cfg(feature = "quic-s2n")]
-        assert!(context.quic_tls.is_none());
-        #[cfg(feature = "quic-ngtcp2")]
-        assert!(context.ngtcp2_config.is_none());
         assert!(context.qmux_tls.is_none());
         assert!(context.wt_h2_tls.is_some());
         let endpoints = context.endpoints.lock().await;
@@ -1487,20 +1228,9 @@ mod tests {
             .values()
             .next()
             .expect("接続先が登録されていること");
-        #[cfg(feature = "quic-tobi")]
         assert!(
             state.tobi_clients.is_empty(),
             "WebTransport over HTTP/2 では QUIC クライアントを作らないこと"
-        );
-        #[cfg(feature = "quic-s2n")]
-        assert!(
-            state.s2n_clients.is_empty(),
-            "WebTransport over HTTP/2 では QUIC クライアントを作らないこと"
-        );
-        #[cfg(feature = "quic-ngtcp2")]
-        assert!(
-            state.ngtcp2_config.is_none(),
-            "WebTransport over HTTP/2 では QUIC の接続設定を作らないこと"
         );
         assert!(state.wt_clients.is_empty());
     }
@@ -1522,31 +1252,12 @@ mod tests {
             .values()
             .next()
             .expect("接続先が登録されていること");
-        #[cfg(feature = "quic-tobi")]
-        {
-            assert_eq!(
-                state.tobi_clients.len(),
-                1,
-                "IPv4 のクライアントだけを作ること"
-            );
-            assert!(!state.tobi_clients[0].0, "IPv4 用のクライアントであること");
-        }
-        #[cfg(feature = "quic-s2n")]
-        {
-            assert_eq!(
-                state.s2n_clients.len(),
-                1,
-                "IPv4 のクライアントだけを作ること"
-            );
-            assert!(!state.s2n_clients[0].0, "IPv4 用のクライアントであること");
-        }
-        #[cfg(feature = "quic-ngtcp2")]
-        {
-            assert!(
-                state.ngtcp2_config.is_some(),
-                "接続設定を作ること (接続ごとにソケットを作る)"
-            );
-        }
+        assert_eq!(
+            state.tobi_clients.len(),
+            1,
+            "IPv4 のクライアントだけを作ること"
+        );
+        assert!(!state.tobi_clients[0].0, "IPv4 用のクライアントであること");
         assert!(state.wt_clients.is_empty());
     }
 

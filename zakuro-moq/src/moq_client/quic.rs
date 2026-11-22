@@ -11,8 +11,9 @@ use tobi_quic::core::connection::ConnectionConfig;
 use tobi_quic::core::transport_params::TransportParams;
 use tobi_quic::{Client, ClientTlsConfig, Connection, DatagramConfig, IoConfig};
 
-use super::super::transport::ALPN;
 use crate::error::{ErrorMessage, Result};
+
+use super::transport::ALPN;
 
 /// 受信ウィンドウ (接続全体、バイト)
 ///
@@ -39,6 +40,18 @@ const INITIAL_MAX_STREAMS_BIDI: u64 = 1_000;
 const KEEP_ALIVE_INTERVAL: tobi_quic::core::time::Duration =
     tobi_quic::core::time::Duration::from_secs(5);
 
+/// アドレスファミリに合わせたローカルバインドアドレスを返す
+///
+/// 1 つの UDP ソケットは別のアドレスファミリ宛に送信できないため、接続先の
+/// 名前解決結果に含まれるファミリごとにソケットを作る。
+pub(super) fn local_bind_addr(is_ipv6: bool) -> SocketAddr {
+    if is_ipv6 {
+        SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0))
+    } else {
+        SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0))
+    }
+}
+
 /// 指定したアドレスファミリ用のクライアントを構築する
 ///
 /// 渡す TLS 設定は経路で共有する土台であり、ALPN はここで MOQT の `moqt-23` に
@@ -52,7 +65,7 @@ pub(crate) fn build_client(tls: &Arc<rustls::ClientConfig>, is_ipv6: bool) -> Re
     let mut config = tls.as_ref().clone();
     config.alpn_protocols = vec![ALPN.to_vec()];
     let tls = ClientTlsConfig::new(Arc::new(config));
-    let io = IoConfig::new(super::local_bind_addr(is_ipv6));
+    let io = IoConfig::new(local_bind_addr(is_ipv6));
     Client::builder()
         .with_tls(tls)
         .with_io(io)
