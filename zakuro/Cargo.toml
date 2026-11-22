@@ -23,10 +23,10 @@ aws-lc-rs = "1.18"
 # bundled は CI でビルド時間 30 分以上かかるため使用しない
 # prebuilt ダウンロードは download-lib feature で有効化する
 # (libduckdb-sys 1.20000 以降が Cargo 1.100 の build directory 配置に対応する)
-duckdb = { version = "1.20000", default-features = false, features = ["download-lib"] }
+duckdb = { version = "1.20001", default-features = false, features = ["download-lib"] }
 
 # UTC タイムスタンプ整形 (DuckDB ファイル名生成用)
-jiff = "0.2"
+jiff = "1.0"
 # 共有クレート (zakuro-core) のログファサードの受け口
 log = "0.4"
 # CLI 引数パース
@@ -45,7 +45,7 @@ shiguredo_openh264 = "2026.2"
 # Opus デコード (MP4 音声を PCM へ変換する際に利用)
 shiguredo_opus = "2026.2"
 # クロスプラットフォーム ビデオデバイス
-shiguredo_video_device = "2026.3"
+shiguredo_video_device = "2026.4"
 # libwebrtc バインディング (sora_sdk が要求する ~0.154.1-canary.5 と揃え、同一 crate を 1 バージョンに統一する)
 shiguredo_webrtc = "0.154.1-canary.5"
 # Sora Rust SDK (on_connection_state_change などの状態変化コールバックは canary.7 以降)
@@ -61,6 +61,12 @@ zakuro-core = { path = "../zakuro-core" }
 # tombi は行長超過のインラインテーブルを複数行に展開するが、複数行インラインテーブルは
 # TOML 1.1 の機能であり cargo がマニフェストを解析できない場合がある。
 
+# build.rs が DEP_DUCKDB_INCLUDE から prebuilt DuckDB の配置を取得し、rpath に追加する。
+# バージョンは duckdb が要求する libduckdb-sys と揃える。
+[dependencies.libduckdb-sys]
+version = "1.20001"
+default-features = false
+
 # 非同期ランタイム
 [dependencies.tokio]
 version = "1.53"
@@ -73,12 +79,6 @@ features = [
   "sync",
   "time",
 ]
-
-# build.rs が DEP_DUCKDB_INCLUDE から prebuilt DuckDB の配置を取得し、rpath に追加する。
-# バージョンは duckdb が要求する libduckdb-sys と揃える。
-[dependencies.libduckdb-sys]
-version = "1.20000"
-default-features = false
 
 [dev-dependencies]
 # スナップショットテスト (フォーマッタ出力の golden master)

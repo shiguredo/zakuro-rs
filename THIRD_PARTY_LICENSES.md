@@ -138,7 +138,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | aho-corasick | 1.1.5 | Unlicense OR MIT |
 | allocator-api2 | 0.2.21 | MIT OR Apache-2.0 |
 | android_system_properties | 0.1.6 | MIT OR Apache-2.0 |
-| annotate-snippets | 0.12.16 | MIT OR Apache-2.0 |
+| annotate-snippets | 0.12.18 | MIT OR Apache-2.0 |
 | anstyle | 1.0.14 | MIT OR Apache-2.0 |
 | anyhow | 1.0.104 | MIT OR Apache-2.0 |
 | arbitrary | 1.4.2 | MIT OR Apache-2.0 |
@@ -201,13 +201,10 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | crc32fast | 1.5.2 | MIT OR Apache-2.0 |
 | crunchy | 0.2.4 | MIT |
 | data-encoding | 2.11.1 | MIT |
-| defmt | 1.1.1 | MIT OR Apache-2.0 |
-| defmt-macros | 1.1.1 | MIT OR Apache-2.0 |
-| defmt-parser | 1.0.0 | MIT OR Apache-2.0 |
 | der-parser | 10.0.0 | MIT OR Apache-2.0 |
 | deranged | 0.5.9 | MIT OR Apache-2.0 |
 | displaydoc | 0.2.7 | MIT OR Apache-2.0 |
-| duckdb | 1.20000.2 | MIT |
+| duckdb | 1.20001.0 | MIT |
 | dunce | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 |
 | either | 1.18.0 | MIT OR Apache-2.0 |
 | encode_unicode | 1.0.0 | Apache-2.0 OR MIT |
@@ -246,11 +243,11 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | insta | 1.49.0 | Apache-2.0 |
 | itertools | 0.13.0 | MIT OR Apache-2.0 |
 | itoa | 1.0.18 | MIT OR Apache-2.0 |
-| jiff | 0.2.37 | Unlicense OR MIT |
-| jiff-core | 0.1.1 | Unlicense OR MIT |
-| jiff-static | 0.2.37 | Unlicense OR MIT |
-| jiff-tzdb | 0.1.8 | Unlicense OR MIT |
-| jiff-tzdb-platform | 0.1.3 | Unlicense OR MIT |
+| jiff | 1.0.2 | Unlicense OR MIT |
+| jiff-core | 1.0.1 | Unlicense OR MIT |
+| jiff-static | 1.0.2 | Unlicense OR MIT |
+| jiff-tzdb | 1.0.0 | Unlicense OR MIT |
+| jiff-tzdb-platform | 1.0.0 | Unlicense OR MIT |
 | jni | 0.22.4 | MIT OR Apache-2.0 |
 | jni-macros | 0.22.4 | MIT OR Apache-2.0 |
 | jni-sys | 0.4.1 | MIT OR Apache-2.0 |
@@ -265,11 +262,11 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | lexical-write-float | 1.0.6 | MIT/Apache-2.0 |
 | lexical-write-integer | 1.0.6 | MIT/Apache-2.0 |
 | libc | 0.2.190 | MIT OR Apache-2.0 |
-| libduckdb-sys | 1.20000.2 | MIT |
+| libduckdb-sys | 1.20001.0 | MIT |
 | libloading | 0.8.9 | ISC |
 | libm | 0.2.16 | MIT |
 | linux-raw-sys | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
-| log | 0.4.34 | MIT OR Apache-2.0 |
+| log | 0.4.35 | MIT OR Apache-2.0 |
 | mach2 | 0.4.3 | BSD-2-Clause OR MIT OR Apache-2.0 |
 | memchr | 2.8.3 | Unlicense OR MIT |
 | memmap2 | 0.2.3 | MIT/Apache-2.0 |
@@ -314,7 +311,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | rustc_version | 0.4.1 | MIT OR Apache-2.0 |
 | rusticata-macros | 4.1.0 | MIT/Apache-2.0 |
 | rustix | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
-| rustls | 0.23.45 | Apache-2.0 OR ISC OR MIT |
+| rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT |
 | rustls-native-certs | 0.8.4 | Apache-2.0 OR ISC OR MIT |
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 |
 | rustls-platform-verifier | 0.7.1 | MIT OR Apache-2.0 |
@@ -344,7 +341,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | shiguredo_qmux | 2026.0.0 | Apache-2.0 |
 | shiguredo_tokio_qmux | 0.0.0 | UNKNOWN |
 | shiguredo_toml | 2026.2.0 | Apache-2.0 |
-| shiguredo_video_device | 2026.3.0 | Apache-2.0 |
+| shiguredo_video_device | 2026.4.0 | Apache-2.0 |
 | shiguredo_webrtc | 0.154.1-canary.5 | Apache-2.0 |
 | shiguredo_websocket | 2026.3.0 | Apache-2.0 |
 | shlex | 1.3.0 | MIT OR Apache-2.0 |
@@ -388,7 +385,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | tokio-macros | 2.7.2 | MIT |
 | tokio-rustls | 0.26.6 | MIT OR Apache-2.0 |
 | tokio-stream | 0.1.19 | MIT |
-| tokio-util | 0.7.19 | MIT |
+| tokio-util | 0.7.20 | MIT |
 | tracing | 0.1.44 | MIT |
 | tracing-attributes | 0.1.31 | MIT |
 | tracing-core | 0.1.36 | MIT |
@@ -414,7 +411,7 @@ zakuro は多数の Cargo クレートに依存する。以下は `Cargo.lock` �
 | wasmtime-internal-core | 46.0.3 | Apache-2.0 WITH LLVM-exception |
 | wasmtime-internal-jit-icache-coherence | 46.0.3 | Apache-2.0 WITH LLVM-exception |
 | webpki-root-certs | 1.0.9 | CDLA-Permissive-2.0 |
-| webpki-roots | 1.0.9 | CDLA-Permissive-2.0 |
+| webpki-roots | 1.0.12 | CDLA-Permissive-2.0 |
 | winapi-util | 0.1.11 | Unlicense OR MIT |
 | windows | 0.62.2 | MIT OR Apache-2.0 |
 | windows-collections | 0.3.2 | MIT OR Apache-2.0 |
