@@ -1,7 +1,7 @@
 # moqt-rs の rev を 6c9aced へ更新する
 
 - Created: 2026-11-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-23
 - Branch: feature/update-moqt-rs-6c9aced
 - Polished: {YYYY-MM-DD}
 
@@ -55,3 +55,20 @@ zakuro-moq が依存する `shiguredo_moqt` を moqt-rs の develop 最新に追
 - `cargo +1.100 check --locked --workspace` が通ること
 - `python3 scripts/generate_third_party_licenses.py` を実行したときに、rev の更新に伴う
   正当な差分だけが `THIRD_PARTY_LICENSES.md` に出ること
+
+## 解決方法
+
+- `zakuro-moq/Cargo.toml` の `[dependencies.shiguredo_moqt]` の rev を
+  `6c9aced3f1d6223c98063a8083efb837c0504289` に更新し、`cargo update -p shiguredo_moqt` で
+  `Cargo.lock` を再生成した
+- `drain_events` に `SessionEvent::PeerClosed(_)` の arm を追加し、状態を変えずに無視した。
+  zakuro-moq は `Session::recv_session_closed` を呼ばないため到達しない
+- `cargo fmt --all -- --check` が通った
+- `cargo clippy --locked -p zakuro-moq --all-targets -- -D warnings` が通った
+- `cargo test --locked -p zakuro-moq` が通り、126 件が成功した
+- `cargo check --locked -p zakuro-moq --all-targets` が通った
+- `cargo +1.100 check --locked --workspace` が通った
+- `python3 scripts/generate_third_party_licenses.py` は `THIRD_PARTY_LICENSES.md` に
+  差分を出さなかった
+- `/usr/include/fdk-aac/aacdecoder_lib.h` が無い環境のため `make ci` は実行していない。
+  CI で確認する
