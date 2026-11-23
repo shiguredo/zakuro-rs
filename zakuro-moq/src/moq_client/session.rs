@@ -2229,6 +2229,13 @@ async fn drain_events(
                 state.connection_handle.close(error.code).await;
                 state.closed_reason = Some(format!("{:#x} {}", error.code, error.reason));
             }
+            // `PeerClosed` は I/O 層が peer 起点の transport 終了 (QUIC の
+            // CONNECTION_CLOSE / WebTransport の WT_CLOSE_SESSION) を
+            // `Session::recv_session_closed` で通知したときだけ発行される。
+            // zakuro-moq は transport 層の peer 終了をストリーム読み込みのエラーとして扱い、
+            // `recv_session_closed` を呼ばないため、この variant は到達しない。
+            // 到達した場合も接続は既に閉じているため、状態を変えずに無視する
+            SessionEvent::PeerClosed(_) => {}
             // namespace 操作と SUBSCRIBE_TRACKS は zakuro-moq が送らないため、これらの
             // イベントは通常は到達しない。到達してもセッションの状態を変えずに無視する
             // (draft-ietf-moq-transport-23 §9.13〜§9.18)。未知の variant を wildcard で

@@ -49,7 +49,7 @@ zakuro-core = { path = "../zakuro-core" }
 # crates.io には未公開のため git 依存とし、再現性のため rev を固定する
 [dependencies.shiguredo_moqt]
 git = "https://github.com/shiguredo/moqt-rs"
-rev = "e25dae7a2fa8c164bb2264176aeaf71bfd142ac0"
+rev = "6c9aced3f1d6223c98063a8083efb837c0504289"
 
 # QMux (draft-ietf-quic-qmux-02) の Sans I/O 実装。
 # crates.io には未公開のため git 依存とし、再現性のため rev を固定する。
